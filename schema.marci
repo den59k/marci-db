@@ -1,0 +1,24 @@
+
+model User {
+  name        String
+  surname     String
+  posts       Post[]        @derived(Post.author)
+  projects    UserRole[]    @derived(UserRole.user)
+}
+
+model Project {
+  name        String
+  users       UserRole[]    @derived(UserRole.project)
+}
+
+model UserRole {
+  user        User          
+  project     Project       
+  role        String        @index
+}
+
+model Post {
+  title       String
+  createdAt   DateTime
+  author      User
+}
