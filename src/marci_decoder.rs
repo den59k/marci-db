@@ -1,6 +1,7 @@
+use bitvec::vec::BitVec;
 use serde_json::{Map, Value};
 
-use crate::schema::{FieldType, Model, PrimitiveFieldType};
+use crate::{marci_db::IncludeResult, schema::{FieldType, Model, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -11,7 +12,7 @@ pub enum DecodeError {
     OffsetOutOfRange,
 }
 
-pub fn decode_document(model: &Model, data: &[u8], id: u64) -> Result<String, DecodeError> {
+pub fn decode_document(model: &Model, data: &[u8], id: u64, select: &BitVec, includes: Option<Vec<IncludeResult<Value>>>) -> Result<Value, DecodeError> {
     if data.len() < 3 {
         return Err(DecodeError::BufferTooSmall);
     }
@@ -31,9 +32,15 @@ pub fn decode_document(model: &Model, data: &[u8], id: u64) -> Result<String, De
     }
 
     let mut obj = Map::new();
-    obj.insert("id".to_string(), Value::Number(id.into()));
+    if select[0] {
+        obj.insert("id".to_string(), Value::Number(id.into()));
+    }
 
-    for field in &model.fields {
+    for (field_index, field) in model.fields.iter().enumerate() {
+        if !select[field_index+1] {
+            continue;
+        }
+
         let FieldType::Primitive(ref primitive) = field.ty else {
             // пропускаем derived / relation
             continue;
@@ -58,7 +65,21 @@ pub fn decode_document(model: &Model, data: &[u8], id: u64) -> Result<String, De
         obj.insert(field.name.clone(), value);
     }
 
-    return Ok(Value::Object(obj).to_string());
+    if let Some(includes) = includes {
+        for include in includes {
+            match include {
+                IncludeResult::One(field_index, val) => {
+                    obj.insert(model.fields[field_index].name.clone(), val);
+                },
+                IncludeResult::Many(field_index, val) => {
+                    let vec = Value::Array(val);
+                    obj.insert(model.fields[field_index].name.clone(), vec);
+                }
+            }
+        }
+    }
+
+    return Ok(Value::Object(obj));
 }
 
 fn decode_value(ty: &PrimitiveFieldType, slice: &[u8]) -> Result<Value, DecodeError> {

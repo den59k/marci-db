@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 
 use bitvec::vec::BitVec;
-use canopydb::{Bytes, Database, Environment};
+use canopydb::{Bytes, Database, Environment, ReadTransaction, Tree};
 
-use crate::schema::{Attribute, Field, FieldType, Model, Schema};
+use crate::{schema::{Attribute, Field, FieldType, Model, Schema}};
 
 pub struct MarciDB {
   pub db: Database,
@@ -11,11 +11,29 @@ pub struct MarciDB {
   counters_map: HashMap<String, Arc<AtomicU64>>
 }
 
+pub struct MarciSelectInclude {
+  pub offset: usize,
+  pub field_index: usize,
+  pub model_index: usize,
+  pub select: Box<MarciSelect>
+}
+
+pub struct MarciSelect {
+  pub select: BitVec,
+  pub includes: Vec<MarciSelectInclude>
+}
+
 const HEADER_OFFSET: usize = 3;
 
 #[derive(Debug)]
 pub enum InsertError {
-  ForeignKeyViolation(String)
+  ForeignKeyViolation(String),
+  ItemNotFound(u64)
+}
+
+pub enum IncludeResult<U> {
+  One(usize,U),
+  Many(usize,Vec<U>)
 }
 
 impl MarciDB {
@@ -66,13 +84,7 @@ impl MarciDB {
 
   pub fn insert_data(&self, model: &Model, data: &[u8]) -> Result<u64, InsertError> {
 
-    let mut foreign_keys = vec![];
-    for (index, field) in model.fields.iter().enumerate() {
-      if let FieldType::ModelRef(model_index) = field.ty {
-        let item_id = u64::from_be_bytes(get_value(data, field, 8).try_into().unwrap());
-        foreign_keys.push((model_index, index, item_id));
-      }
-    }
+    let foreign_keys = get_foreign_keys(data, model);
 
     let id = self.next_id(model);
     let tx = self.db.begin_write().unwrap();
@@ -94,19 +106,62 @@ impl MarciDB {
     return Ok(id)
   }
 
-  pub fn get_all<U, F: Fn(u64, &[u8]) -> U>(&self, model: &Model, f: F) -> Vec<U> {
-    
-    let rx = self.db.begin_read().unwrap();
+  fn process_data<U, F>(
+      &self,
+      id: u64,
+      data: &[u8],
+      rx: &ReadTransaction,
+      select: &MarciSelect,
+      model: &Model,
+      f: &F,
+  ) -> U
+  where
+      F: Fn(u64, &[u8], &Model, &BitVec, Option<Vec<IncludeResult<U>>>) -> U,
+  {
+      if select.includes.is_empty() {
+          f(id, data, model, &select.select, None)
+      } else {
+          let mut includes_arr = Vec::with_capacity(select.includes.len());
+          for include in select.includes.iter() {
+              let Some(item_id) = get_value(data, include.offset, 8) else {
+                  continue;
+              };
+              let model = &self.schema.models[include.model_index];
+              let tree = rx
+                  .get_tree(model.name.as_bytes())
+                  .unwrap()
+                  .unwrap();
+              let data = tree.get(item_id).unwrap().unwrap();
 
-    let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+              let item_id_val = u64::from_be_bytes(item_id.try_into().unwrap());
+              let item = self.process_data(item_id_val, data.as_ref(), rx, &include.select, model, f);
+              includes_arr.push(IncludeResult::One(include.field_index, item));
+          }
 
-    tree.iter().unwrap().map(|item| {
-      let (key, value) = item.unwrap();
-      let id = u64::from_be_bytes(key.as_ref().try_into().unwrap());
-
-      f(id, value.as_ref())
-    }).collect()
+          f(id, data, model, &select.select, Some(includes_arr))
+      }
   }
+
+  pub fn get_all<U, F>(
+      &self,
+      model: &Model,
+      select: &MarciSelect,
+      f: F
+  ) -> Vec<U>
+  where
+      F: Fn(u64, &[u8], &Model, &BitVec, Option<Vec<IncludeResult<U>>>) -> U,
+  {
+      let rx = self.db.begin_read().unwrap();
+      let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+
+      tree.iter().unwrap().map(|item| {
+          let (key, value) = item.unwrap();
+          let id = u64::from_be_bytes(key.as_ref().try_into().unwrap());
+          let data = value.as_ref();
+          self.process_data(id, data, &rx, select, model, &f)
+      }).collect()
+  }
+
 
   pub fn get_item<U, F: FnOnce(&[u8]) -> U>(&self, model: &Model, key: &str, f: F) -> Option<U> {
 
@@ -116,15 +171,25 @@ impl MarciDB {
     return tree.get(key.as_bytes()).unwrap().map(|item| f(item.as_ref()))
   }
 
-  pub fn update(&self, model: &Model, id: u64, new_data: &[u8], changed_mask: BitVec) -> Option<u64> {
+  pub fn update(&self, model: &Model, id: u64, new_data: &[u8], changed_mask: BitVec) -> Result<u64, InsertError> {
+    
+    let foreign_keys = get_foreign_keys(new_data, model);
+
     let tx = self.db.begin_write().unwrap();
 
     {
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
       let Some(data) = tree.get(&id.to_be_bytes()).unwrap() else {
-        return None
+        return Err(InsertError::ItemNotFound(id))
       };
+
+      for (model_index, field_index, item_id) in foreign_keys {
+        let tree = tx.get_tree(self.schema.models[model_index].name.as_bytes()).unwrap().unwrap();
+        if tree.get(&item_id.to_be_bytes()).unwrap().is_none() {
+          return Err(InsertError::ForeignKeyViolation(model.fields[field_index].name.clone()))
+        }
+      }
 
       let mut data = data.to_vec();
 
@@ -195,7 +260,7 @@ impl MarciDB {
 
     tx.commit().unwrap();
 
-    return Some(id);
+    return Ok(id);
   }
 
   pub fn delete(&self, model: &Model, id: u64) -> bool {
@@ -225,7 +290,25 @@ pub fn get_end(data: &[u8], j: usize, payload_offset: usize) -> usize {
 }
 
 #[inline(always)]
-pub fn get_value<'a>(data: &'a[u8], field: &Field, size: usize) -> &'a[u8] {
-  let offset: usize = u32::from_be_bytes(data[field.offset_pos..field.offset_pos+4].try_into().unwrap()) as usize;
-  return &data[offset..offset+size];
+fn get_value<'a>(data: &'a[u8], offset_pos: usize, size: usize) -> Option<&'a[u8]> {
+  let offset: usize = u32::from_be_bytes(data[offset_pos..offset_pos+4].try_into().unwrap()) as usize;
+  if offset == 0 {
+    return None;
+  }
+  return Some(&data[offset..offset+size]);
+}
+
+
+#[inline(always)]
+fn get_foreign_keys<'a>(data: &'a[u8], model: &Model) -> Vec<(usize, usize, u64)> {
+  let mut foreign_keys = vec![];
+  for (index, field) in model.fields.iter().enumerate() {
+    if let FieldType::ModelRef(model_index) = field.ty {
+      if let Some(bytes) = get_value(data, field.offset_pos, 8) {
+        let item_id = u64::from_be_bytes(bytes.try_into().unwrap());
+        foreign_keys.push((model_index, index, item_id));
+      }
+    }
+  }
+  return foreign_keys;
 }

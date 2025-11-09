@@ -12,15 +12,17 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-use crate::marci_db::MarciDB;
+use crate::marci_db::{MarciDB, MarciSelect};
 use crate::marci_decoder::decode_document;
 use crate::marci_encoder::encode_document;
+use crate::marci_select::{parse_select};
 use crate::schema::parse_schema;
 
 mod marci_db;
 mod schema;
 mod marci_encoder;
 mod marci_decoder;
+mod marci_select;
 
 async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result<Response<Full<Bytes>>, Infallible> {
 
@@ -68,11 +70,43 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
         }
 
         (&Method::GET, "findMany") => {
-            let data = db.get_all(model, |id, data| {
-                return decode_document(model, data, id).unwrap_or("".to_string());
+
+            let select = MarciSelect::all(model);
+
+            let data = db.get_all(model, &select, |id, data, model, select, includes | {
+                return decode_document(model, data, id, select, includes).unwrap();
             });
 
-            let body = Bytes::from(format!("[\n{}\n]", data.join(",\n")));
+            let body = Bytes::from(Value::Array(data).to_string());
+            let resp = Response::new(Full::new(body));
+            Ok(resp)
+        }
+
+        (&Method::POST, "findMany") => {
+
+            let Ok(whole_body) = req.collect().await else {
+                return Ok(error(StatusCode::BAD_REQUEST, "Failed to get body"));
+            };
+                
+            // Преобразуем в &str или &[u8] и парсим JSON
+            let Ok(json_val): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
+                return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
+            };
+
+            let Some(select) = json_val.get("select") else {
+                return Ok(error(StatusCode::BAD_REQUEST, "Missing select field"));
+            };
+
+            let select = match parse_select(model, select, &db.schema) {
+                Ok(result) => result,
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
+            };
+
+            let data = db.get_all(model, &select, |id, data, model, select, includes | {
+                return decode_document(model, data, id, select, includes).unwrap();
+            });
+
+            let body = Bytes::from(Value::Array(data).to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
@@ -96,8 +130,9 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let Some(item_id) = db.update(model, id, &new_data, changed_mask) else {
-                return Ok(error(StatusCode::BAD_REQUEST, "Object not found"));
+            let item_id = match db.insert_data(model, &new_data) {
+                Ok(result) => result,
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err))) 
             };
 
             let body = Bytes::from(format!("{{ \"id\": {} }}", item_id));
