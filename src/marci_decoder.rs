@@ -26,8 +26,7 @@ pub fn decode_document(model: &Model, data: &[u8], id: u64) -> Result<String, De
         return Err(DecodeError::TypeMismatch("field count mismatch"));
     }
 
-    let header_size = 1 + 2 + (field_count as usize) * 4;
-    if data.len() < header_size {
+    if data.len() < model.payload_offset {
         return Err(DecodeError::BufferTooSmall);
     }
 
@@ -41,13 +40,7 @@ pub fn decode_document(model: &Model, data: &[u8], id: u64) -> Result<String, De
         };
 
         // читаем offset
-        let offset_pos = 1 + 2 + field.offset_index * 4;
-        let offset = u32::from_be_bytes([
-            data[offset_pos],
-            data[offset_pos + 1],
-            data[offset_pos + 2],
-            data[offset_pos + 3],
-        ]);
+        let offset = u32::from_be_bytes(data[field.offset_pos..field.offset_pos+4].try_into().unwrap());
 
         // Поле = null
         if offset == 0 {
@@ -95,6 +88,27 @@ fn decode_value(ty: &PrimitiveFieldType, slice: &[u8]) -> Result<Value, DecodeEr
             }
             let n = i64::from_be_bytes(slice[0..8].try_into().unwrap());
             Ok(Value::Number(n.into()))
+        }
+        PrimitiveFieldType::UInt64 => {
+            if slice.len() < 8 {
+                return Err(DecodeError::BufferTooSmall);
+            }
+            let n = u64::from_be_bytes(slice[0..8].try_into().unwrap());
+            Ok(Value::Number(n.into()))
+        }
+        PrimitiveFieldType::Float => {
+            if slice.len() < 4 {
+                return Err(DecodeError::BufferTooSmall);
+            }
+            let n = f32::from_be_bytes(slice[0..4].try_into().unwrap());
+            Ok(Value::Number(serde_json::Number::from_f64(n as f64).unwrap()))
+        }
+        PrimitiveFieldType::Double => {
+            if slice.len() < 8 {
+                return Err(DecodeError::BufferTooSmall);
+            }
+            let n = f64::from_be_bytes(slice[0..8].try_into().unwrap());
+            Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
         }
         PrimitiveFieldType::Bool => {
             if slice.is_empty() {

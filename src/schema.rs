@@ -9,6 +9,7 @@ pub struct Schema {
 pub struct Model {
     pub name: String,
     pub fields: Vec<Field>,
+    // Count of fields
     pub fields_size: u16,
     pub payload_offset: usize
 }
@@ -17,15 +18,21 @@ pub struct Model {
 pub struct Field {
     pub name: String,
     pub ty: FieldType,
-    // attribute offset index. In bytes offset is (3 + offset_index*3)
+    // field offset index. In bytes offset is (3 + offset_index*3)
     pub offset_index: usize,
+    pub offset_pos: usize,
+    pub is_nullable: bool,
     pub attributes: Vec<Attribute>,
+    pub is_virtual: bool
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum PrimitiveFieldType {
     String,
     Int64,
+    UInt64,
+    Float,
+    Double,
     Bool,
     DateTime, // пока кодируем как строку (ISO), но тип отличаем
 }
@@ -52,6 +59,7 @@ pub fn parse_schema(input: &str) -> Schema {
     while let Some(line) = lines.next() {
         let line = line.trim();
         if let Some(name) = line.strip_prefix("model ") {
+            let mut offset_index: usize = 0;
             let name = name.trim_end_matches('{').trim().to_string();
             let mut fields = Vec::new();
 
@@ -59,14 +67,18 @@ pub fn parse_schema(input: &str) -> Schema {
                 let line = line.trim();
                 if line == "}" { break }
                 if !line.is_empty() {
-                    fields.push(parse_field_raw(line, fields.len()));
+                    let mut field = parse_field_raw(line);
+                    if !field.is_virtual { 
+                        field.offset_index = offset_index;
+                        field.offset_pos = 3 + offset_index * 4;
+                        offset_index += 1;
+                    }
+                    fields.push(field);
                 }
             }
 
-            let fields_len = fields.last().unwrap().offset_index + 1;
-            
-            let payload_offset = 3 + fields_len * 4;
-            models.push(Model { name, fields_size: fields_len as u16, fields, payload_offset });
+            let payload_offset = 3 + offset_index * 4;
+            models.push(Model { name, fields_size: offset_index as u16, fields, payload_offset });
         }
     }
 
@@ -89,23 +101,30 @@ pub fn parse_schema(input: &str) -> Schema {
                 }
             }
         }
+
+        println!("{:?}", model);
     }
 
     schema
 }
 
-fn parse_field_raw(line: &str, offset_index: usize) -> Field {
+fn parse_field_raw(line: &str) -> Field {
     // имя и тип
     let mut parts = line.split_whitespace();
     let name = parts.next().unwrap().to_string();
-    let ty = parse_type(parts.next().unwrap());
+
+    let type_str = parts.next().unwrap();
+    let is_nullable = type_str.ends_with("?");
+    let ty = parse_type(if is_nullable { &type_str[0..type_str.len()-1] } else { type_str });
 
     // атрибуты
     let attributes = line.split_once('@')
         .map(|(_, attr)| parse_attribute(attr.trim()))
         .unwrap_or_else(Vec::new);
 
-    Field { name, ty, offset_index, attributes }
+    let is_virtual = attributes.iter().any(|i| matches!(i, Attribute::DerivedUnresolved { .. }));
+
+    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, is_virtual }
 }
 
 fn parse_attribute(s: &str) -> Vec<Attribute> {
@@ -143,9 +162,9 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
     }
 }
 
-fn is_primitive(s: &str) -> bool {
-    matches!(s, "String" | "DateTime" | "Bool" | "Int" | "Float")
-}
+// fn is_primitive(s: &str) -> bool {
+//     matches!(s, "String" | "DateTime" | "Bool" | "Int" | "Float")
+// }
 
 fn resolve_field_type(ty: &mut FieldType, model_by_name: &HashMap<String, usize>) {
     match ty {

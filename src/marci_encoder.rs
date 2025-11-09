@@ -21,15 +21,14 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
     const VERSION: u8 = 1;
 
     // [version: u8] + [field_count: u16] + [offsets: N * u32]
-    let header_size = 1 + 2 + (model.fields_size as usize) * 4;
-    let mut buf = Vec::with_capacity(header_size + 128);
+    let mut buf = Vec::with_capacity(model.payload_offset + 128);
 
     // version
     buf.push(VERSION);
     // field_count
     buf.extend_from_slice(&model.fields_size.to_be_bytes());
     // offsets (плейсхолдеры)
-    buf.resize(buf.len() + (model.fields_size as usize * 4), 0);
+    buf.resize(model.payload_offset, 0);
 
     let initial_size = buf.len();
 
@@ -37,35 +36,53 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
 
     // Тело
     for field in &model.fields {
-      let FieldType::Primitive(primitive_type) = field.ty else {
-        continue;
-      };
-      
-      let value_opt = obj.get(&field.name);
 
-      if let Some(value) = value_opt {
-        changed_mask.set(field.offset_index, true);
-
-        // Keep offset 0 
-        if value.is_null() {
+        if field.is_virtual {
             continue;
         }
 
-          // Смещение начала данных этого поля
-          let start = buf.len();
-          if start > u32::MAX as usize {
-              return Err(EncodeError::OffsetOverflow);
-          }
-          let start_u32 = start as u32;
+        let value_opt: Option<&Value> = obj.get(&field.name);
+        let Some(value) = value_opt else {
+            // TODO: set default value here. Now it setting null (offset = 0)
+            continue;
+        };
 
-          let offset_pos = 3 + field.offset_index * 4; // позиция u32 в заголовке
-          buf[offset_pos..offset_pos + 4].copy_from_slice(&start_u32.to_be_bytes());
+        if value.is_null() {
+            changed_mask.set(field.offset_index, true);
+            continue;
+        }
 
-          // Кодируем само значение
-          encode_value(&mut buf, &primitive_type, &field.name, value)?;
-      } else {
-        // TODO: set default value here. Now it is setting null
-      }
+        match field.ty {
+            FieldType::ModelRef(model_index) => {
+                changed_mask.set(field.offset_index, true);
+
+                if !value.is_object() {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "object" })
+                }
+
+                let Some(item_id) = value.get("id") else {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "{ id: u64 }" })
+                };
+
+                let start = buf.len() as u32;
+                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
+
+                encode_value(&mut buf, &PrimitiveFieldType::UInt64, &field.name, item_id)?;
+            }
+            FieldType::Primitive(primitive_type) => {
+                changed_mask.set(field.offset_index, true);
+
+                // Смещение начала данных этого поля
+                let start = buf.len() as u32;
+                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
+
+                // Кодируем само значение
+                encode_value(&mut buf, &primitive_type, &field.name, value)?;
+            }
+            _ => {
+
+            }
+        }
     }
 
     if buf.len() == initial_size {
@@ -121,7 +138,7 @@ fn encode_value(
                           expected: "valid ISO-8601 datetime string",
                       })?;
 
-                  dt.timestamp()
+                  dt.timestamp_millis()
               }
 
               _ => {
@@ -147,6 +164,58 @@ fn encode_value(
                     return Err(EncodeError::TypeMismatch {
                         field: field_name.to_string(),
                         expected: "int64",
+                    })
+                }
+            };
+            dst.extend_from_slice(&n.to_be_bytes());
+        }
+        PrimitiveFieldType::UInt64 => {
+            let n = match v {
+                Value::Number(num) => num
+                    .as_u64()
+                    .ok_or_else(|| EncodeError::TypeMismatch {
+                        field: field_name.to_string(),
+                        expected: "uint64",
+                    })?,
+                _ => {
+                    return Err(EncodeError::TypeMismatch {
+                        field: field_name.to_string(),
+                        expected: "uint64",
+                    })
+                }
+            };
+            dst.extend_from_slice(&n.to_be_bytes());
+        }
+        PrimitiveFieldType::Float => {
+            let n = match v {
+                Value::Number(num) => num
+                    .as_f64()
+                    .map(|f| f as f32)
+                    .ok_or_else(|| EncodeError::TypeMismatch {
+                        field: field_name.to_string(),
+                        expected: "float",
+                    })?,
+                _ => {
+                    return Err(EncodeError::TypeMismatch {
+                        field: field_name.to_string(),
+                        expected: "float",
+                    })
+                }
+            };
+            dst.extend_from_slice(&n.to_be_bytes());
+        }
+        PrimitiveFieldType::Double => {
+            let n = match v {
+                Value::Number(num) => num
+                    .as_f64()
+                    .ok_or_else(|| EncodeError::TypeMismatch {
+                        field: field_name.to_string(),
+                        expected: "double",
+                    })?,
+                _ => {
+                    return Err(EncodeError::TypeMismatch {
+                        field: field_name.to_string(),
+                        expected: "double",
                     })
                 }
             };
@@ -182,22 +251,38 @@ mod tests {
                     name: "name".to_string(),
                     ty: FieldType::Primitive(PrimitiveFieldType::String),
                     offset_index: 0,
+                    offset_pos: 3 + 2 * 4,
+                    is_virtual: false,
+                    is_nullable: false,
                     attributes: vec![]
                 },
                 crate::schema::Field {
                     name: "age".to_string(),
                     ty: FieldType::Primitive(PrimitiveFieldType::Int64),
                     offset_index: 1,
+                    offset_pos: 3 + 2 * 4,
+                    is_virtual: false,
+                    is_nullable: false,
+                    attributes: vec![]
+                },
+                crate::schema::Field {
+                    name: "profile".to_string(),
+                    ty: FieldType::ModelRef(1),
+                    offset_index: 2,
+                    offset_pos: 3 + 2 * 4,
+                    is_virtual: false,
+                    is_nullable: false,
                     attributes: vec![]
                 },
             ],
-            payload_offset: 3,
-            fields_size: 2,
+            payload_offset: 3 + 3 * 4,
+            fields_size: 3,
         };
 
         let input = json!({
             "name": "Alice",
-            "age": 30
+            "age": 30,
+            "profile": { "id": 1 }
         });
 
         let (encoded, _) = encode_document(&model, &input).expect("encode ok");
@@ -206,12 +291,13 @@ mod tests {
         assert_eq!(encoded[0], 1);
 
         // Читаем field_count
-        let field_count = u16::from_be_bytes([encoded[1], encoded[2]]);
-        assert_eq!(field_count, 2);
+        let field_count = u16::from_be_bytes(encoded[1..3].try_into().unwrap());
+        assert_eq!(field_count, 3);
 
         // Читаем смещения
-        let offset_name = u32::from_be_bytes([encoded[3], encoded[4], encoded[5], encoded[6]]) as usize;
-        let offset_age  = u32::from_be_bytes([encoded[7], encoded[8], encoded[9], encoded[10]]) as usize;
+        let offset_name = u32::from_be_bytes(encoded[3..7].try_into().unwrap()) as usize;
+        let offset_age  = u32::from_be_bytes(encoded[7..11].try_into().unwrap()) as usize;
+        let offset_profile  = u32::from_be_bytes(encoded[11..15].try_into().unwrap()) as usize;
 
         // Проверяем, что смещения действительно указывают на данные
         // name: [len=5][bytes]

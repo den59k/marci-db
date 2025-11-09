@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use bitvec::vec::BitVec;
 use canopydb::{Bytes, Database, Environment};
 
-use crate::schema::{Attribute, FieldType, Model, Schema};
+use crate::schema::{Attribute, Field, FieldType, Model, Schema};
 
 pub struct MarciDB {
   pub db: Database,
@@ -12,6 +12,11 @@ pub struct MarciDB {
 }
 
 const HEADER_OFFSET: usize = 3;
+
+#[derive(Debug)]
+pub enum InsertError {
+  ForeignKeyViolation(String)
+}
 
 impl MarciDB {
 
@@ -51,34 +56,49 @@ impl MarciDB {
     }
   }
 
-  pub fn next_id(&self, collection: &str) -> u64 {
-    self.counters_map[collection].fetch_add(1, Ordering::Relaxed)
+  pub fn next_id(&self, model: &Model) -> u64 {
+    self.counters_map[&model.name].fetch_add(1, Ordering::Relaxed)
   }
   
   pub fn get_model(&self, name: &str) -> Option<&Model> {
     return self.schema.models.iter().find(|i| i.name == name);
   }
 
-  pub fn insert_data(&self, collection: &str, data: &[u8]) -> u64 {
-    let id = self.next_id(collection);
+  pub fn insert_data(&self, model: &Model, data: &[u8]) -> Result<u64, InsertError> {
 
+    let mut foreign_keys = vec![];
+    for (index, field) in model.fields.iter().enumerate() {
+      if let FieldType::ModelRef(model_index) = field.ty {
+        let item_id = u64::from_be_bytes(get_value(data, field, 8).try_into().unwrap());
+        foreign_keys.push((model_index, index, item_id));
+      }
+    }
+
+    let id = self.next_id(model);
     let tx = self.db.begin_write().unwrap();
     
     {
-      let mut tree = tx.get_tree(collection.as_bytes()).unwrap().unwrap();
+      for (model_index, field_index, item_id) in foreign_keys {
+        let tree = tx.get_tree(self.schema.models[model_index].name.as_bytes()).unwrap().unwrap();
+        if tree.get(&item_id.to_be_bytes()).unwrap().is_none() {
+          return Err(InsertError::ForeignKeyViolation(model.fields[field_index].name.clone()))
+        }
+      }
+
+      let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
       tree.insert(&id.to_be_bytes(), data).unwrap();
     }
     
     tx.commit().unwrap();
 
-    return id
+    return Ok(id)
   }
 
-  pub fn get_all<U, F: Fn(u64, &[u8]) -> U>(&self, collection: &str, f: F) -> Vec<U> {
+  pub fn get_all<U, F: Fn(u64, &[u8]) -> U>(&self, model: &Model, f: F) -> Vec<U> {
     
     let rx = self.db.begin_read().unwrap();
 
-    let tree = rx.get_tree(collection.as_bytes()).unwrap().unwrap();
+    let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
     tree.iter().unwrap().map(|item| {
       let (key, value) = item.unwrap();
@@ -88,27 +108,25 @@ impl MarciDB {
     }).collect()
   }
 
-  pub fn get_item<U, F: FnOnce(&[u8]) -> U>(&self, collection: &str, key: &str, f: F) -> Option<U> {
+  pub fn get_item<U, F: FnOnce(&[u8]) -> U>(&self, model: &Model, key: &str, f: F) -> Option<U> {
 
     let rx = self.db.begin_read().unwrap();
-    let tree = rx.get_tree(collection.as_bytes()).unwrap().unwrap();
+    let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
     return tree.get(key.as_bytes()).unwrap().map(|item| f(item.as_ref()))
   }
 
-  pub fn update(&self, collection: &str, id: u64, new_data: &[u8], changed_mask: BitVec) -> Option<u64> {
+  pub fn update(&self, model: &Model, id: u64, new_data: &[u8], changed_mask: BitVec) -> Option<u64> {
     let tx = self.db.begin_write().unwrap();
 
     {
-      let mut tree = tx.get_tree(collection.as_bytes()).unwrap().unwrap();
+      let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
       let Some(data) = tree.get(&id.to_be_bytes()).unwrap() else {
         return None
       };
 
       let mut data = data.to_vec();
-
-      let model = self.get_model(collection).unwrap();
 
       for j in (HEADER_OFFSET..model.payload_offset).step_by(4) {
         let update_offset = u32::from_be_bytes(new_data[j..j+4].try_into().unwrap()) as usize;
@@ -180,10 +198,10 @@ impl MarciDB {
     return Some(id);
   }
 
-  pub fn delete(&self, collection: &str, id: u64) -> bool {
+  pub fn delete(&self, model: &Model, id: u64) -> bool {
     let tx = self.db.begin_write().unwrap();
     {
-      let mut tree = tx.get_tree(collection.as_bytes()).unwrap().unwrap();
+      let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
       if !tree.delete(&id.to_be_bytes()).unwrap() {
         return false;
       }
@@ -194,6 +212,7 @@ impl MarciDB {
 
 }
 
+#[inline(always)]
 pub fn get_end(data: &[u8], j: usize, payload_offset: usize) -> usize {
   for j in ((j+4)..payload_offset).step_by(4) {
     let off_j = u32::from_be_bytes(data[j..j+4].try_into().unwrap()) as usize;
@@ -203,4 +222,10 @@ pub fn get_end(data: &[u8], j: usize, payload_offset: usize) -> usize {
   }
 
   return data.len();
+}
+
+#[inline(always)]
+pub fn get_value<'a>(data: &'a[u8], field: &Field, size: usize) -> &'a[u8] {
+  let offset: usize = u32::from_be_bytes(data[field.offset_pos..field.offset_pos+4].try_into().unwrap()) as usize;
+  return &data[offset..offset+size];
 }

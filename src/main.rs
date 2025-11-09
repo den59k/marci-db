@@ -56,7 +56,10 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
             
-            let new_id = db.insert_data(model_name, &data);
+            let new_id = match db.insert_data(model, &data) {
+                Ok(result) => result,
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
+            };
 
             // Возвращаем успешный ответ
             let body = Bytes::from(format!("{{ \"id\": {new_id} }}"));
@@ -65,7 +68,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
         }
 
         (&Method::GET, "findMany") => {
-            let data = db.get_all(model_name, |id, data| {
+            let data = db.get_all(model, |id, data| {
                 return decode_document(model, data, id).unwrap_or("".to_string());
             });
 
@@ -93,7 +96,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let Some(item_id) = db.update(model_name, id, &new_data, changed_mask) else {
+            let Some(item_id) = db.update(model, id, &new_data, changed_mask) else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Object not found"));
             };
 
@@ -113,7 +116,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 return Ok(error(StatusCode::BAD_REQUEST, "ID field required"));
             };
 
-            let deleted = db.delete(model_name, id);
+            let deleted = db.delete(model, id);
             if !deleted {
                 return Ok(error(StatusCode::BAD_REQUEST, "Object not found"));
             }
