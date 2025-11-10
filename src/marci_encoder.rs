@@ -37,7 +37,7 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
     // Тело
     for field in &model.fields {
 
-        if field.is_virtual {
+        if field.derived_from.is_some() {
             continue;
         }
 
@@ -252,8 +252,9 @@ mod tests {
                     ty: FieldType::Primitive(PrimitiveFieldType::String),
                     offset_index: 0,
                     offset_pos: 3,
-                    is_virtual: false,
+                    derived_from: None,
                     is_nullable: false,
+                    index_name: None,
                     attributes: vec![]
                 },
                 crate::schema::Field {
@@ -261,8 +262,9 @@ mod tests {
                     ty: FieldType::Primitive(PrimitiveFieldType::Int64),
                     offset_index: 1,
                     offset_pos: 3 + 1 * 4,
-                    is_virtual: false,
+                    derived_from: None,
                     is_nullable: false,
+                    index_name: None,
                     attributes: vec![]
                 },
                 crate::schema::Field {
@@ -270,8 +272,9 @@ mod tests {
                     ty: FieldType::ModelRef(1),
                     offset_index: 2,
                     offset_pos: 3 + 2 * 4,
-                    is_virtual: false,
+                    derived_from: None,
                     is_nullable: false,
+                    index_name: None,
                     attributes: vec![]
                 },
             ],

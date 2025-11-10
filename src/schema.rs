@@ -23,7 +23,8 @@ pub struct Field {
     pub offset_pos: usize,
     pub is_nullable: bool,
     pub attributes: Vec<Attribute>,
-    pub is_virtual: bool
+    pub index_name: Option<String>,
+    pub derived_from: Option<(usize, usize)>
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,14 +43,15 @@ pub enum FieldType {
     Primitive(PrimitiveFieldType),
     ModelRefUnresolved(String),
     ModelRef(usize),
-    List(Box<FieldType>),
+    ModelRefListUnresolved(String),
+    ModelRefList(usize),
+    PrimitiveList(PrimitiveFieldType),
 }
 
 #[derive(Debug)]
 pub enum Attribute {
     Index,
     DerivedUnresolved { model: String, field: String },
-    Derived { model: usize, field: usize },
 }
 
 pub fn parse_schema(input: &str) -> Schema {
@@ -68,7 +70,10 @@ pub fn parse_schema(input: &str) -> Schema {
                 if line == "}" { break }
                 if !line.is_empty() {
                     let mut field = parse_field_raw(line);
-                    if !field.is_virtual { 
+
+                    let is_virtual = field.attributes.iter().any(|f| matches!(f, Attribute::DerivedUnresolved { .. }));
+
+                    if !is_virtual { 
                         field.offset_index = offset_index;
                         field.offset_pos = 3 + offset_index * 4;
                         offset_index += 1;
@@ -93,11 +98,17 @@ pub fn parse_schema(input: &str) -> Schema {
         for field in &mut model.fields {
             resolve_field_type(&mut field.ty, &model_by_name);
 
+            let is_index = field.attributes.iter().any(|i| matches!(i, Attribute::Index));
+            let is_ref = matches!(field.ty, FieldType::ModelRef(_));
+            if is_index || is_ref {
+                field.index_name = Some(format!("{}.{}.idx", model.name, field.name));
+            }
+
             for attr in &mut field.attributes {
-                if let Attribute::DerivedUnresolved { model, field } = attr {
-                    let m = model_by_name[model];
-                    let f = field_by_name[m][field];
-                    *attr = Attribute::Derived { model: m, field: f };
+                if let Attribute::DerivedUnresolved { model: model_name, field: field_name } = attr {
+                    let m = model_by_name[model_name];
+                    let f = field_by_name[m][field_name];
+                    field.derived_from = Some((m, f))
                 }
             }
         }
@@ -122,9 +133,7 @@ fn parse_field_raw(line: &str) -> Field {
         .map(|(_, attr)| parse_attribute(attr.trim()))
         .unwrap_or_else(Vec::new);
 
-    let is_virtual = attributes.iter().any(|i| matches!(i, Attribute::DerivedUnresolved { .. }));
-
-    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, is_virtual }
+    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, derived_from: None, index_name: None }
 }
 
 fn parse_attribute(s: &str) -> Vec<Attribute> {
@@ -144,7 +153,11 @@ fn parse_attribute(s: &str) -> Vec<Attribute> {
 
 fn parse_type(s: &str) -> FieldType {
     if let Some(inner) = s.strip_suffix("[]") {
-        FieldType::List(Box::new(parse_type(inner)))
+        if let Some(primitive_field) = get_primitive_type(inner) {
+            FieldType::PrimitiveList(primitive_field)
+        } else {
+            FieldType::ModelRefListUnresolved(inner.to_string())
+        }
     } else if let Some(primitive_field) = get_primitive_type(s) {
         FieldType::Primitive(primitive_field)
     } else {
@@ -168,11 +181,13 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
 
 fn resolve_field_type(ty: &mut FieldType, model_by_name: &HashMap<String, usize>) {
     match ty {
-        FieldType::Primitive(_) | FieldType::ModelRef(_) => {}
         FieldType::ModelRefUnresolved(name) => {
             *ty = FieldType::ModelRef(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
         }
-        FieldType::List(inner) => resolve_field_type(inner, model_by_name),
+        FieldType::ModelRefListUnresolved(name) => {
+            *ty = FieldType::ModelRefList(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+        }
+        _ => {}
     }
 }
 

@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 
 use bitvec::vec::BitVec;
-use canopydb::{Bytes, Database, Environment, ReadTransaction, Tree};
+use canopydb::{Database, Environment, ReadTransaction};
 
-use crate::{schema::{Attribute, Field, FieldType, Model, Schema}};
+use crate::schema::{FieldType, Model, Schema};
 
 pub struct MarciDB {
   pub db: Database,
@@ -11,16 +11,24 @@ pub struct MarciDB {
   counters_map: HashMap<String, Arc<AtomicU64>>
 }
 
-pub struct MarciSelectInclude {
+pub struct MarciSelectInclude<'a> {
   pub offset: usize,
   pub field_index: usize,
-  pub model_index: usize,
-  pub select: Box<MarciSelect>
+  pub model: &'a Model,
+  pub select: Box<MarciSelect<'a>>
 }
 
-pub struct MarciSelect {
+pub struct MarciSelectVirtual<'a> {
+  pub field_index: usize,
+  pub index_name: &'a[u8],
+  pub model: &'a Model,
+  pub select: Box<MarciSelect<'a>>
+}
+
+pub struct MarciSelect<'a> {
   pub select: BitVec,
-  pub includes: Vec<MarciSelectInclude>
+  pub includes: Vec<MarciSelectInclude<'a>>,
+  pub virtual_fields: Vec<MarciSelectVirtual<'a>>
 }
 
 pub struct DecodeCtx<'a, U> {
@@ -63,12 +71,7 @@ impl MarciDB {
       counters_map.insert(model.name.clone(), Arc::new(AtomicU64::new(index)));
 
       for field in model.fields.iter() {
-
-        let is_index = field.attributes.iter().any(|i| matches!(i, Attribute::Index));
-        let is_ref = matches!(field.ty, FieldType::ModelRef(_));
-
-        if is_index || is_ref {
-          let index_name = format!("{}.{}", model.name, field.name);
+        if let Some(index_name) = &field.index_name {
           tx.get_or_create_tree(index_name.as_bytes()).unwrap();
         }
       }
@@ -96,13 +99,20 @@ impl MarciDB {
 
     let id = self.next_id(model);
     let tx = self.db.begin_write().unwrap();
-    
+
+    let indexes = get_indexes(data, id, model);
+
     {
       for (model_index, field_index, item_id) in foreign_keys {
         let tree = tx.get_tree(self.schema.models[model_index].name.as_bytes()).unwrap().unwrap();
         if tree.get(&item_id.to_be_bytes()).unwrap().is_none() {
           return Err(InsertError::ForeignKeyViolation(model.fields[field_index].name.clone()))
         }
+      }
+
+      for (index_name, index_key) in indexes {
+        let mut index_tree = tx.get_tree(index_name).unwrap().unwrap();
+        index_tree.insert(&index_key, &[1]).unwrap();
       }
 
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
@@ -126,24 +136,41 @@ impl MarciDB {
   where
       F: Fn(DecodeCtx<'_, U>) -> U,
   {
-      if select.includes.is_empty() {
+      if select.includes.is_empty() && select.virtual_fields.is_empty() {
         f(DecodeCtx { id, data, model, select: &select.select, includes: None })
       } else {
-          let mut includes_arr = Vec::with_capacity(select.includes.len());
+          let mut includes_arr = Vec::with_capacity(select.includes.len() + select.virtual_fields.len());
           for include in select.includes.iter() {
               let Some(item_id) = get_value::<8>(data, include.offset) else {
                   continue;
               };
-              let nested_model = &self.schema.models[include.model_index];
-              let tree = rx
-                  .get_tree(nested_model.name.as_bytes())
+              let nested_tree = rx
+                  .get_tree(include.model.name.as_bytes())
                   .unwrap()
                   .unwrap();
-              let data = tree.get(item_id).unwrap().unwrap();
+              let data = nested_tree.get(item_id).unwrap().unwrap();
 
               let item_id_val = u64::from_be_bytes(*item_id);
-              let item = self.process_data(item_id_val, data.as_ref(), rx, &include.select, nested_model, f);
+              let item = self.process_data(item_id_val, data.as_ref(), rx, &include.select, include.model, f);
               includes_arr.push(IncludeResult::One(include.field_index, item));
+          }
+
+          for item in select.virtual_fields.iter() {
+            let mut values = vec![];
+            let tree = rx.get_tree(item.index_name).unwrap().unwrap();
+            let nested_tree = rx.get_tree(item.model.name.as_bytes()).unwrap().unwrap();
+            // TODO: correct encode with lexical order
+            for key in tree.prefix_keys(&id.to_be_bytes()).unwrap() {
+              let key = key.unwrap();
+              let item_id = &key.as_ref()[8..16];
+              let data = nested_tree.get(item_id).unwrap().unwrap();
+              
+              let item_id_val = u64::from_be_bytes(item_id.try_into().unwrap());
+              let item = self.process_data(item_id_val, data.as_ref(), rx, &item.select, item.model, f);
+              values.push(item);
+            }
+
+            includes_arr.push(IncludeResult::Many(item.field_index, values));
           }
 
           f(DecodeCtx { id, data, model, select: &select.select, includes: Some(includes_arr) })
@@ -309,8 +336,32 @@ fn get_value<'a, const SIZE: usize>(
         return None;
     }
 
-    let slice = data.get(offset..offset + SIZE)?;
-    Some(slice.try_into().ok()?)
+    Some(data[offset..offset + SIZE].try_into().ok()?)
+}
+
+#[inline(always)]
+fn get_value_with_len<'a>(
+    data: &'a[u8],
+    offset_pos: usize,
+    model: &Model
+) -> Option<&'a[u8]> {
+  let off_bytes: [u8; 4] = data[offset_pos..offset_pos + 4].try_into().unwrap();
+  let offset = u32::from_be_bytes(off_bytes) as usize;
+  if offset == 0 {
+    return None;
+  }
+
+  let mut offset_end = data.len();
+  for j in offset_pos+4..model.payload_offset {
+    let off_bytes: [u8; 4] = data[j..j + 4].try_into().unwrap();
+    let offset = u32::from_be_bytes(off_bytes) as usize;
+    if offset != 0 { 
+      offset_end = offset;
+      break;
+    }
+  }
+
+  return Some(&data[offset..offset_end])
 }
 
 #[inline(always)]
@@ -325,4 +376,21 @@ fn get_foreign_keys<'a>(data: &'a[u8], model: &Model) -> Vec<(usize, usize, u64)
     }
   }
   return foreign_keys;
+}
+
+#[inline(always)]
+fn get_indexes<'a>(data: &'a[u8], item_id: u64, model: &'a Model) -> Vec<(&'a[u8], Vec<u8>)> {
+
+  let mut indexes = vec![];
+  for field in model.fields.iter() {
+    if let Some(index_name) = field.index_name.as_ref() {
+      if let Some(value) = get_value_with_len(data, field.offset_pos, model) {
+        let index = [value, &item_id.to_be_bytes()].concat();
+
+        // TODO: encode value for lexical sorting support (int, float)
+        indexes.push((index_name.as_bytes(), index));
+      }
+    }
+  }
+  return indexes;
 }
