@@ -73,8 +73,8 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
 
             let select = MarciSelect::all(model);
 
-            let data = db.get_all(model, &select, |id, data, model, select, includes | {
-                return decode_document(model, data, id, select, includes).unwrap();
+            let data = db.get_all(model, &select, | ctx | {
+                return decode_document(ctx).unwrap();
             });
 
             let body = Bytes::from(Value::Array(data).to_string());
@@ -89,21 +89,17 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             };
                 
             // Преобразуем в &str или &[u8] и парсим JSON
-            let Ok(json_val): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
+            let Ok(select): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let Some(select) = json_val.get("select") else {
-                return Ok(error(StatusCode::BAD_REQUEST, "Missing select field"));
-            };
-
-            let select = match parse_select(model, select, &db.schema) {
+            let select = match parse_select(model, &select, &db.schema) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };
 
-            let data = db.get_all(model, &select, |id, data, model, select, includes | {
-                return decode_document(model, data, id, select, includes).unwrap();
+            let data = db.get_all(model, &select, |ctx | {
+                return decode_document(ctx).unwrap();
             });
 
             let body = Bytes::from(Value::Array(data).to_string());
@@ -130,7 +126,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let item_id = match db.insert_data(model, &new_data) {
+            let item_id = match db.update(model,  id, &new_data, changed_mask) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err))) 
             };

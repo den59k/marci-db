@@ -23,6 +23,14 @@ pub struct MarciSelect {
   pub includes: Vec<MarciSelectInclude>
 }
 
+pub struct DecodeCtx<'a, U> {
+  pub id: u64,
+  pub data: &'a [u8],
+  pub model: &'a Model,
+  pub select: &'a BitVec,
+  pub includes: Option<Vec<IncludeResult<U>>>,
+}
+
 const HEADER_OFFSET: usize = 3;
 
 #[derive(Debug)]
@@ -116,29 +124,29 @@ impl MarciDB {
       f: &F,
   ) -> U
   where
-      F: Fn(u64, &[u8], &Model, &BitVec, Option<Vec<IncludeResult<U>>>) -> U,
+      F: Fn(DecodeCtx<'_, U>) -> U,
   {
       if select.includes.is_empty() {
-          f(id, data, model, &select.select, None)
+        f(DecodeCtx { id, data, model, select: &select.select, includes: None })
       } else {
           let mut includes_arr = Vec::with_capacity(select.includes.len());
           for include in select.includes.iter() {
-              let Some(item_id) = get_value(data, include.offset, 8) else {
+              let Some(item_id) = get_value::<8>(data, include.offset) else {
                   continue;
               };
-              let model = &self.schema.models[include.model_index];
+              let nested_model = &self.schema.models[include.model_index];
               let tree = rx
-                  .get_tree(model.name.as_bytes())
+                  .get_tree(nested_model.name.as_bytes())
                   .unwrap()
                   .unwrap();
               let data = tree.get(item_id).unwrap().unwrap();
 
-              let item_id_val = u64::from_be_bytes(item_id.try_into().unwrap());
-              let item = self.process_data(item_id_val, data.as_ref(), rx, &include.select, model, f);
+              let item_id_val = u64::from_be_bytes(*item_id);
+              let item = self.process_data(item_id_val, data.as_ref(), rx, &include.select, nested_model, f);
               includes_arr.push(IncludeResult::One(include.field_index, item));
           }
 
-          f(id, data, model, &select.select, Some(includes_arr))
+          f(DecodeCtx { id, data, model, select: &select.select, includes: Some(includes_arr) })
       }
   }
 
@@ -149,7 +157,7 @@ impl MarciDB {
       f: F
   ) -> Vec<U>
   where
-      F: Fn(u64, &[u8], &Model, &BitVec, Option<Vec<IncludeResult<U>>>) -> U,
+      F: Fn(DecodeCtx<'_, U>) -> U,
   {
       let rx = self.db.begin_read().unwrap();
       let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
@@ -290,22 +298,28 @@ pub fn get_end(data: &[u8], j: usize, payload_offset: usize) -> usize {
 }
 
 #[inline(always)]
-fn get_value<'a>(data: &'a[u8], offset_pos: usize, size: usize) -> Option<&'a[u8]> {
-  let offset: usize = u32::from_be_bytes(data[offset_pos..offset_pos+4].try_into().unwrap()) as usize;
-  if offset == 0 {
-    return None;
-  }
-  return Some(&data[offset..offset+size]);
-}
+fn get_value<'a, const SIZE: usize>(
+    data: &'a [u8],
+    offset_pos: usize,
+) -> Option<&'a [u8; SIZE]> {
+    let off_bytes: [u8; 4] = data.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+    let offset = u32::from_be_bytes(off_bytes) as usize;
 
+    if offset == 0 {
+        return None;
+    }
+
+    let slice = data.get(offset..offset + SIZE)?;
+    Some(slice.try_into().ok()?)
+}
 
 #[inline(always)]
 fn get_foreign_keys<'a>(data: &'a[u8], model: &Model) -> Vec<(usize, usize, u64)> {
   let mut foreign_keys = vec![];
   for (index, field) in model.fields.iter().enumerate() {
     if let FieldType::ModelRef(model_index) = field.ty {
-      if let Some(bytes) = get_value(data, field.offset_pos, 8) {
-        let item_id = u64::from_be_bytes(bytes.try_into().unwrap());
+      if let Some(bytes) = get_value::<8>(data, field.offset_pos) {
+        let item_id = u64::from_be_bytes(*bytes);
         foreign_keys.push((model_index, index, item_id));
       }
     }

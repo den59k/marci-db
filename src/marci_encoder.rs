@@ -251,7 +251,7 @@ mod tests {
                     name: "name".to_string(),
                     ty: FieldType::Primitive(PrimitiveFieldType::String),
                     offset_index: 0,
-                    offset_pos: 3 + 2 * 4,
+                    offset_pos: 3,
                     is_virtual: false,
                     is_nullable: false,
                     attributes: vec![]
@@ -260,7 +260,7 @@ mod tests {
                     name: "age".to_string(),
                     ty: FieldType::Primitive(PrimitiveFieldType::Int64),
                     offset_index: 1,
-                    offset_pos: 3 + 2 * 4,
+                    offset_pos: 3 + 1 * 4,
                     is_virtual: false,
                     is_nullable: false,
                     attributes: vec![]
@@ -297,7 +297,9 @@ mod tests {
         // Читаем смещения
         let offset_name = u32::from_be_bytes(encoded[3..7].try_into().unwrap()) as usize;
         let offset_age  = u32::from_be_bytes(encoded[7..11].try_into().unwrap()) as usize;
-        let offset_profile  = u32::from_be_bytes(encoded[11..15].try_into().unwrap()) as usize;
+        let _offset_profile  = u32::from_be_bytes(encoded[11..15].try_into().unwrap()) as usize;
+
+        assert_eq!(offset_name, 15);
 
         // Проверяем, что смещения действительно указывают на данные
         // name: [len=5][bytes]

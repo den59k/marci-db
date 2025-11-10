@@ -1,7 +1,6 @@
-use bitvec::vec::BitVec;
 use serde_json::{Map, Value};
 
-use crate::{marci_db::IncludeResult, schema::{FieldType, Model, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult}, schema::{FieldType, Model, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -12,7 +11,9 @@ pub enum DecodeError {
     OffsetOutOfRange,
 }
 
-pub fn decode_document(model: &Model, data: &[u8], id: u64, select: &BitVec, includes: Option<Vec<IncludeResult<Value>>>) -> Result<Value, DecodeError> {
+pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError> {
+    let DecodeCtx { data, model, id, select, includes } = ctx;
+
     if data.len() < 3 {
         return Err(DecodeError::BufferTooSmall);
     }

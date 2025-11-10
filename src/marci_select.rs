@@ -39,10 +39,7 @@ pub fn parse_select(model: &Model, json: &Value, schema: &Schema) -> Result<Marc
       if val.is_boolean() {
         select = MarciSelect::all(model);
       } else {
-        let Some(select_json) = val.get("select") else {
-          return Err(MarciSelectError::MissingField(format!("select")));
-        };
-        select = parse_select(model, select_json, schema)?;
+        select = parse_select(model, &val, schema)?;
       }
       let include = MarciSelectInclude { offset: field.offset_pos, field_index, model_index, select: Box::new(select) };
       includes.push(include);
