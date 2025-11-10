@@ -69,6 +69,9 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError> {
     if let Some(includes) = includes {
         for include in includes {
             match include {
+                IncludeResult::None(field_index) => {
+                    obj.insert(model.fields[field_index].name.clone(), Value::Null);
+                },
                 IncludeResult::One(field_index, val) => {
                     obj.insert(model.fields[field_index].name.clone(), val);
                 },

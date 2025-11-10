@@ -6,6 +6,13 @@ model User {
   projects    UserRole[]    @derived(UserRole.user)
 }
 
+model Post {
+  title       String
+  createdAt   DateTime
+  author      User
+  images      File[]
+}
+
 model Project {
   name        String
   users       UserRole[]    @derived(UserRole.project)
@@ -14,11 +21,9 @@ model Project {
 model UserRole {
   user        User          
   project     Project       
-  role        String        @index
+  role        String
 }
 
-model Post {
-  title       String
-  createdAt   DateTime
-  author      User
+model File {
+  name        String
 }

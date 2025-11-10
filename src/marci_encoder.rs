@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use serde_json::Value;
 use bitvec::prelude::*;
 
@@ -11,6 +13,8 @@ pub enum EncodeError {
     OffsetOverflow,
     EmptyObject
 }
+
+static EMPTY_ARRAY: Value = Value::Array(vec![]);
 
 /// Кодируем JSON-документ для заданной модели в бинарный формат
 pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec), EncodeError> {
@@ -42,7 +46,9 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
         }
 
         let value_opt: Option<&Value> = obj.get(&field.name);
-        let Some(value) = value_opt else {
+        let Some(value) = value_opt.or_else(|| {
+            matches!(field.ty, FieldType::ModelRefList(_)).then(|| &EMPTY_ARRAY)
+        }) else {
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
         };
@@ -53,7 +59,7 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
         }
 
         match field.ty {
-            FieldType::ModelRef(model_index) => {
+            FieldType::ModelRef(_) => {
                 changed_mask.set(field.offset_index, true);
 
                 if !value.is_object() {
@@ -79,6 +85,27 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
                 // Кодируем само значение
                 encode_value(&mut buf, &primitive_type, &field.name, value)?;
             }
+            FieldType::ModelRefList(_) => {
+                let start = buf.len() as u32;
+                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
+
+                let Some(value) = value.as_array() else {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                };
+
+                let ids: Vec<&Value> = value
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        item.get("id").ok_or_else(|| EncodeError::TypeMismatch {
+                            field: format!("{}[{}]", field.name, index),
+                            expected: "{ id: u64 }"
+                        })
+                    })
+                    .collect::<Result<_, _>>()?; // <---- вот здесь вся магия
+
+                encode_list(&mut buf, &PrimitiveFieldType::UInt64, &field.name, &ids)?;
+            }
             _ => {
 
             }
@@ -90,6 +117,21 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
     }
 
     Ok((buf, changed_mask))
+}
+
+/// Кодирует массив значений и дописывает в конец `dst`
+fn encode_list<T>(
+    dst: &mut Vec<u8>,
+    ty: &PrimitiveFieldType,
+    field_name: &str,
+    v: &[T],
+)  -> Result<(), EncodeError> where T: Borrow<Value> {
+    dst.extend_from_slice(&(v.len() as u32).to_be_bytes());
+    for (index, val) in v.iter().enumerate() {
+        // TODO: remove format! from this
+        encode_value(dst, ty, &format!("{}[{}]", field_name, index), val.borrow())?;
+    }
+    Ok(())
 }
 
 /// Кодирует одно значение и дописывает в конец `dst`
@@ -255,7 +297,8 @@ mod tests {
                     derived_from: None,
                     is_nullable: false,
                     index_name: None,
-                    attributes: vec![]
+                    attributes: vec![],
+                    ext_indexes: vec![]
                 },
                 crate::schema::Field {
                     name: "age".to_string(),
@@ -265,7 +308,8 @@ mod tests {
                     derived_from: None,
                     is_nullable: false,
                     index_name: None,
-                    attributes: vec![]
+                    attributes: vec![],
+                    ext_indexes: vec![]
                 },
                 crate::schema::Field {
                     name: "profile".to_string(),
@@ -275,7 +319,8 @@ mod tests {
                     derived_from: None,
                     is_nullable: false,
                     index_name: None,
-                    attributes: vec![]
+                    attributes: vec![],
+                    ext_indexes: vec![]
                 },
             ],
             payload_offset: 3 + 3 * 4,

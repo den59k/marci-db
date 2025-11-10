@@ -24,8 +24,33 @@ pub struct Field {
     pub is_nullable: bool,
     pub attributes: Vec<Attribute>,
     pub index_name: Option<String>,
-    pub derived_from: Option<(usize, usize)>
+    pub derived_from: Option<ModelRef>,
+    pub ext_indexes: Vec<IndexRef>
 }
+
+#[derive(Debug)]
+pub struct ModelRef {
+    pub model_index: usize,
+    pub field_index: usize
+}
+impl ModelRef {
+    pub fn new(model_index: usize, field_index: usize) ->  ModelRef {
+        return ModelRef { model_index, field_index };
+    }
+}
+
+#[derive(Debug)]
+pub struct IndexRef {
+    pub model_index: usize,
+    pub field_index: usize,
+    pub index_name: String
+}
+impl IndexRef {
+    pub fn new(model_index: usize, field_index: usize, index_name: String) -> IndexRef {
+        return IndexRef { model_index, field_index, index_name };
+    }
+}
+
 
 #[derive(Debug, Clone, Copy)]
 pub enum PrimitiveFieldType {
@@ -35,7 +60,7 @@ pub enum PrimitiveFieldType {
     Float,
     Double,
     Bool,
-    DateTime, // пока кодируем как строку (ISO), но тип отличаем
+    DateTime,
 }
 
 #[derive(Debug, Clone)]
@@ -93,27 +118,39 @@ pub fn parse_schema(input: &str) -> Schema {
     let model_by_name = build_model_map(&schema);
     let field_by_name = build_field_map(&schema);
 
-    // resolve types and attributes
-    for model in &mut schema.models {
-        for field in &mut model.fields {
-            resolve_field_type(&mut field.ty, &model_by_name);
+    let mut ext_indexes_map: HashMap<(usize, usize), Vec<IndexRef>> = HashMap::new();
 
-            let is_index = field.attributes.iter().any(|i| matches!(i, Attribute::Index));
-            let is_ref = matches!(field.ty, FieldType::ModelRef(_));
-            if is_index || is_ref {
-                field.index_name = Some(format!("{}.{}.idx", model.name, field.name));
-            }
+    // resolve types and attributes
+    for (cur_model_idx, model) in &mut schema.models.iter_mut().enumerate() {
+        for (cur_field_idx, field) in &mut model.fields.iter_mut().enumerate() {
+            resolve_field_type(&mut field.ty, &model_by_name);
 
             for attr in &mut field.attributes {
                 if let Attribute::DerivedUnresolved { model: model_name, field: field_name } = attr {
                     let m = model_by_name[model_name];
                     let f = field_by_name[m][field_name];
-                    field.derived_from = Some((m, f))
+                    field.derived_from = Some(ModelRef::new(m, f));
+
+                    let index_name = format!("{}.{}.idx", model.name, field.name);
+                    field.index_name = Some(index_name.clone());
+                    ext_indexes_map.entry((m, f)).or_default().push(IndexRef::new(cur_model_idx, cur_field_idx, index_name));
                 }
             }
-        }
 
-        println!("{:?}", model);
+            let is_index = field.attributes.iter().any(|i| matches!(i, Attribute::Index));
+            if is_index {
+                field.index_name = Some(format!("{}.{}.idx", model.name, field.name));
+            }
+        }
+        // println!("{:?}", model);
+    }
+
+    for (key, ext_indexes) in ext_indexes_map {
+        schema.models[key.0].fields[key.1].ext_indexes = ext_indexes;
+    }
+
+    for model in schema.models.iter() {
+        println!("{:#?}", model);
     }
 
     schema
@@ -133,7 +170,7 @@ fn parse_field_raw(line: &str) -> Field {
         .map(|(_, attr)| parse_attribute(attr.trim()))
         .unwrap_or_else(Vec::new);
 
-    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, derived_from: None, index_name: None }
+    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, derived_from: None, index_name: None, ext_indexes: vec![] }
 }
 
 fn parse_attribute(s: &str) -> Vec<Attribute> {
@@ -170,6 +207,9 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
         "String" => Some(PrimitiveFieldType::String),
         "Bool" => Some(PrimitiveFieldType::Bool),
         "Int" => Some(PrimitiveFieldType::Int64),
+        "UInt" => Some(PrimitiveFieldType::UInt64),
+        "Float" => Some(PrimitiveFieldType::Float),
+        "Double" => Some(PrimitiveFieldType::Double),
         "DateTime" => Some(PrimitiveFieldType::DateTime),
         _ => None
     }
