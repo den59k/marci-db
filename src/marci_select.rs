@@ -38,14 +38,18 @@ pub fn parse_select<'a>(model: &'a Model, json: &Value, schema: &'a Schema) -> R
 
     if let Some(model_ref) = field.derived_from.as_ref() {
       let select = parse_select(model, &val, schema)?;
-      let model = &schema.models[model_ref.model_index];
-      
+      let ref_model = &schema.models[model_ref.model_index];
+      let ref_field = &ref_model.fields[model_ref.field_index];
+      let index_name = ref_field.index_name.as_ref()
+          .unwrap_or_else(|| panic!("Index for field {}.{} not found", model.name, field.name))
+          .as_bytes();
+
       match field.ty {
           FieldType::ModelRefList(_) => {
             virtual_fields.push(MarciSelectVirtual { 
               field_index, 
-              index_name: field.index_name.as_ref().unwrap().as_bytes(),
-              model: model,
+              index_name,
+              model: ref_model,
               select: Box::new(select)
             });
           },
@@ -55,13 +59,24 @@ pub fn parse_select<'a>(model: &'a Model, json: &Value, schema: &'a Schema) -> R
       let model = &schema.models[model_index];
       let select = parse_select(model, &val, schema)?;
 
-      let include = MarciSelectInclude { offset: field.offset_pos, field_index, model, select: Box::new(select), is_array: false };
+      let include = MarciSelectInclude { 
+        offset: field.offset_pos, 
+        field_index, 
+        model, 
+        select: Box::new(select), 
+        is_array: false 
+      };
       includes.push(include);
     } else if let FieldType::ModelRefList(model_index) = field.ty {
       let model = &schema.models[model_index];
       let select = parse_select(model, &val, schema)?;
 
-      let include = MarciSelectInclude { offset: field.offset_pos, field_index, model, select: Box::new(select), is_array: true };
+      let include = MarciSelectInclude { 
+        offset: field.offset_pos, 
+        field_index, model, 
+        select: Box::new(select), 
+        is_array: true 
+      };
       includes.push(include);
     } else {
       fields.set(field_index+1, true);

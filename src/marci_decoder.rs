@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult}, schema::{FieldType, Model, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult}, schema::{FieldType, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -11,8 +11,8 @@ pub enum DecodeError {
     OffsetOutOfRange,
 }
 
-pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError> {
-    let DecodeCtx { data, model, id, select, includes } = ctx;
+pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
+    let DecodeCtx { data, fields, payload_offset, id, select, includes } = ctx;
 
     if data.len() < 3 {
         return Err(DecodeError::BufferTooSmall);
@@ -23,12 +23,11 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError> {
         return Err(DecodeError::WrongVersion);
     }
 
-    let field_count = u16::from_be_bytes([data[1], data[2]]);
-    if field_count as usize != model.fields_size as usize {
+    if u16::from_be_bytes([data[1], data[2]]) as usize != payload_offset {
         return Err(DecodeError::TypeMismatch("field count mismatch"));
     }
 
-    if data.len() < model.payload_offset {
+    if data.len() < payload_offset {
         return Err(DecodeError::BufferTooSmall);
     }
 
@@ -37,7 +36,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError> {
         obj.insert("id".to_string(), Value::Number(id.into()));
     }
 
-    for (field_index, field) in model.fields.iter().enumerate() {
+    for (field_index, field) in fields.iter().enumerate() {
         if !select[field_index+1] {
             continue;
         }
@@ -70,14 +69,14 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError> {
         for include in includes {
             match include {
                 IncludeResult::None(field_index) => {
-                    obj.insert(model.fields[field_index].name.clone(), Value::Null);
+                    obj.insert(fields[field_index].name.clone(), Value::Null);
                 },
                 IncludeResult::One(field_index, val) => {
-                    obj.insert(model.fields[field_index].name.clone(), val);
+                    obj.insert(fields[field_index].name.clone(), val);
                 },
                 IncludeResult::Many(field_index, val) => {
                     let vec = Value::Array(val);
-                    obj.insert(model.fields[field_index].name.clone(), vec);
+                    obj.insert(fields[field_index].name.clone(), vec);
                 }
             }
         }

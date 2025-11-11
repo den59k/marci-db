@@ -30,7 +30,7 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
     // version
     buf.push(VERSION);
     // field_count
-    buf.extend_from_slice(&model.fields_size.to_be_bytes());
+    buf.extend_from_slice(&model.payload_offset.to_be_bytes());
     // offsets (плейсхолдеры)
     buf.resize(model.payload_offset, 0);
 
@@ -297,8 +297,7 @@ mod tests {
                     derived_from: None,
                     is_nullable: false,
                     index_name: None,
-                    attributes: vec![],
-                    ext_indexes: vec![]
+                    attributes: vec![]
                 },
                 crate::schema::Field {
                     name: "age".to_string(),
@@ -308,8 +307,7 @@ mod tests {
                     derived_from: None,
                     is_nullable: false,
                     index_name: None,
-                    attributes: vec![],
-                    ext_indexes: vec![]
+                    attributes: vec![]
                 },
                 crate::schema::Field {
                     name: "profile".to_string(),
@@ -319,12 +317,10 @@ mod tests {
                     derived_from: None,
                     is_nullable: false,
                     index_name: None,
-                    attributes: vec![],
-                    ext_indexes: vec![]
+                    attributes: vec![]
                 },
             ],
-            payload_offset: 3 + 3 * 4,
-            fields_size: 3,
+            payload_offset: 3 + 3 * 4
         };
 
         let input = json!({

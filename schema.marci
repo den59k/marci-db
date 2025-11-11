@@ -2,8 +2,13 @@
 model User {
   name        String
   surname     String
+  info        UserInfo
   posts       Post[]        @derived(Post.author)
   projects    UserRole[]    @derived(UserRole.user)
+}
+
+struct UserInfo {
+  bio         String
 }
 
 model Post {

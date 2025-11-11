@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use bitvec::vec::BitVec;
 use canopydb::{Database, Environment, ReadTransaction};
 
-use crate::schema::{Field, FieldType, Model, Schema};
+use crate::schema::{Field, FieldType, Model, Schema, WithFields};
 
 pub struct MarciDB {
   pub db: Database,
@@ -15,7 +15,7 @@ pub struct MarciSelectInclude<'a> {
   pub offset: usize,
   pub field_index: usize,
   pub is_array: bool,
-  pub model: &'a Model,
+  pub model: &'a dyn WithFields,
   pub select: Box<MarciSelect<'a>>
 }
 
@@ -35,7 +35,8 @@ pub struct MarciSelect<'a> {
 pub struct DecodeCtx<'a, U> {
   pub id: u64,
   pub data: &'a [u8],
-  pub model: &'a Model,
+  pub fields: &'a [Field],
+  pub payload_offset: usize,
   pub select: &'a BitVec,
   pub includes: Option<Vec<IncludeResult<U>>>,
 }
@@ -73,6 +74,13 @@ impl MarciDB {
       for field in model.fields.iter() {
         if let Some(index_name) = &field.index_name {
           tx.get_or_create_tree(index_name.as_bytes()).unwrap();
+        }
+
+        if let FieldType::Struct(st) = &field.ty {
+          tx.get_or_create_tree(st.name.as_bytes()).unwrap();
+        }
+        if let FieldType::StructList(st) = &field.ty {
+          tx.get_or_create_tree(st.name.as_bytes()).unwrap();
         }
       }
     }
@@ -131,14 +139,14 @@ impl MarciDB {
       data: &[u8],
       rx: &ReadTransaction,
       select: &MarciSelect,
-      model: &Model,
+      model: &dyn WithFields,
       f: &F,
   ) -> U
   where
-      F: Fn(DecodeCtx<'_, U>) -> U,
+      F: Fn(DecodeCtx<U>) -> U,
   {
       if select.includes.is_empty() && select.virtual_fields.is_empty() {
-        f(DecodeCtx { id, data, model, select: &select.select, includes: None })
+        f(DecodeCtx { id, data, fields: model.fields(), payload_offset: model.payload_offset(), select: &select.select, includes: None })
       } else {
           let mut includes_arr = Vec::with_capacity(select.includes.len() + select.virtual_fields.len());
           for include in select.includes.iter() {
@@ -154,7 +162,7 @@ impl MarciDB {
                 let len = arr.len();
                 
                 let nested_tree = rx
-                    .get_tree(include.model.name.as_bytes())
+                    .get_tree(include.model.tree_name())
                     .unwrap()
                     .unwrap();
                 
@@ -173,7 +181,7 @@ impl MarciDB {
                   continue;
                 };
                 let nested_tree = rx
-                    .get_tree(include.model.name.as_bytes())
+                    .get_tree(include.model.tree_name())
                     .unwrap()
                     .unwrap();
                 let data = nested_tree.get(item_id).unwrap().unwrap();
@@ -209,21 +217,22 @@ impl MarciDB {
             includes_arr.push(IncludeResult::Many(item.field_index, values));
           }
 
-          f(DecodeCtx { id, data, model, select: &select.select, includes: Some(includes_arr) })
+          f(DecodeCtx { id, data, fields: model.fields(), payload_offset: model.payload_offset(), select: &select.select, includes: Some(includes_arr) })
       }
   }
 
-  pub fn get_all<U, F>(
+  pub fn get_all<U, F, T>(
       &self,
-      model: &Model,
+      model: &T,
       select: &MarciSelect,
       f: F
   ) -> Vec<U>
   where
-      F: Fn(DecodeCtx<'_, U>) -> U,
+    T: WithFields,
+    F: Fn(DecodeCtx<'_, U>) -> U,
   {
       let rx = self.db.begin_read().unwrap();
-      let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+      let tree = rx.get_tree(model.tree_name()).unwrap().unwrap();
 
       tree.iter().unwrap().map(|item| {
           let (key, value) = item.unwrap();
@@ -510,12 +519,9 @@ fn get_index<'a>(data: &'a[u8], field: &'a Field, model: &Model, item_id: u64) -
   }
 
   let Some(value) = get_value_with_len(data, field.offset_pos, model) else {
+    // Если элемента нет в индексе - это значит, что значение у него NULL
     return None;
   };
-
-  for item in field.ext_indexes.iter() {
-    return Some((item.index_name.as_bytes(), [value, &item_id.to_be_bytes()].concat()));
-  }
 
   if let Some(index_name) = field.index_name.as_ref() {
     // TODO: encode value for lexical sorting support (int, float)

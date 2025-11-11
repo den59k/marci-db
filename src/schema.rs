@@ -10,11 +10,10 @@ pub struct Model {
     pub name: String,
     pub fields: Vec<Field>,
     // Count of fields
-    pub fields_size: u16,
     pub payload_offset: usize
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Field {
     pub name: String,
     pub ty: FieldType,
@@ -24,11 +23,37 @@ pub struct Field {
     pub is_nullable: bool,
     pub attributes: Vec<Attribute>,
     pub index_name: Option<String>,
-    pub derived_from: Option<ModelRef>,
-    pub ext_indexes: Vec<IndexRef>
+    pub derived_from: Option<ModelRef>
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
+pub struct Struct {
+    /// Полное имя (для таблицы) (base_table + base_field)
+    pub name: String,
+    pub fields: Vec<Field>,
+    pub payload_offset: usize
+}
+
+pub trait WithFields {
+    fn tree_name(&self) -> &[u8];
+    fn fields(&self) -> &[Field];
+    fn field(&self, index: usize) -> &Field;
+    fn payload_offset(&self) -> usize;
+}
+impl WithFields for Model {
+    fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
+    fn fields(&self) -> &[Field] { &self.fields }
+    fn field(&self, index: usize) -> &Field { &self.fields[index] }
+    fn payload_offset(&self) -> usize { self.payload_offset }
+}
+impl WithFields for Struct {
+    fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
+    fn fields(&self) -> &[Field] { &self.fields }
+    fn field(&self, index: usize) -> &Field { &self.fields[index] }
+    fn payload_offset(&self) -> usize { self.payload_offset }
+}
+
+#[derive(Debug,Clone)]
 pub struct ModelRef {
     pub model_index: usize,
     pub field_index: usize
@@ -39,7 +64,7 @@ impl ModelRef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct IndexRef {
     pub model_index: usize,
     pub field_index: usize,
@@ -66,49 +91,85 @@ pub enum PrimitiveFieldType {
 #[derive(Debug, Clone)]
 pub enum FieldType {
     Primitive(PrimitiveFieldType),
-    ModelRefUnresolved(String),
+    // Ссылка на либо model, либо struct
+    RefUnresolved(String),
+    // Ссылка на список либо model, либо struct
+    RefListUnresolved(String),
     ModelRef(usize),
-    ModelRefListUnresolved(String),
     ModelRefList(usize),
     PrimitiveList(PrimitiveFieldType),
+    Struct(Struct),
+    StructList(Struct)
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum Attribute {
     Index,
     DerivedUnresolved { model: String, field: String },
 }
 
+fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> (Vec<Field>, usize) {
+    let mut offset_index: usize = 0;
+    let mut fields = Vec::new();
+
+    for line in lines {
+        let line = line.trim();
+        if line == "}" { break }
+        if line.is_empty() { continue; }
+
+        let mut field = parse_field_raw(line);
+
+        let is_virtual = field.attributes.iter().any(|f| matches!(f, Attribute::DerivedUnresolved { .. }));
+
+        if !is_virtual { 
+            field.offset_index = offset_index;
+            field.offset_pos = 3 + offset_index * 4;
+            offset_index += 1;
+        }
+        fields.push(field);
+    }
+    return (fields, offset_index);
+}
+
+pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Model {
+
+    let (fields, offset_index) = parse_fields(lines);
+
+    let payload_offset = 3 + offset_index * 4;
+    return Model { name, fields, payload_offset };
+}
+
+pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Struct {
+    let (fields, offset_index) = parse_fields(lines);
+    let payload_offset = 3 + offset_index * 4;
+
+    return Struct { name: String::new(), fields: fields, payload_offset }
+}
+
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
+    let mut structs: HashMap<String, Struct> = HashMap::new();
     let mut lines = input.lines().peekable();
 
     while let Some(line) = lines.next() {
         let line = line.trim();
-        if let Some(name) = line.strip_prefix("model ") {
-            let mut offset_index: usize = 0;
-            let name = name.trim_end_matches('{').trim().to_string();
-            let mut fields = Vec::new();
+        if !line.starts_with("model ") && !line.starts_with("struct ") && !line.starts_with("enum ") {
+            continue;
+        }
+        let (kind, rest) = line.trim().split_once(' ').unwrap(); 
+        let name = rest.trim_end_matches('{').trim().to_string();
 
-            for line in &mut lines {
-                let line = line.trim();
-                if line == "}" { break }
-                if !line.is_empty() {
-                    let mut field = parse_field_raw(line);
+        match kind.trim() {
+            "model" => {
+                models.push(parse_model_block(name, &mut lines));
+            },
+            "struct" => {
+                structs.insert(name, parse_struct_block(&mut lines));
+            },
+            "enum" => {
 
-                    let is_virtual = field.attributes.iter().any(|f| matches!(f, Attribute::DerivedUnresolved { .. }));
-
-                    if !is_virtual { 
-                        field.offset_index = offset_index;
-                        field.offset_pos = 3 + offset_index * 4;
-                        offset_index += 1;
-                    }
-                    fields.push(field);
-                }
             }
-
-            let payload_offset = 3 + offset_index * 4;
-            models.push(Model { name, fields_size: offset_index as u16, fields, payload_offset });
+            _ => {}
         }
     }
 
@@ -118,22 +179,23 @@ pub fn parse_schema(input: &str) -> Schema {
     let model_by_name = build_model_map(&schema);
     let field_by_name = build_field_map(&schema);
 
-    let mut ext_indexes_map: HashMap<(usize, usize), Vec<IndexRef>> = HashMap::new();
+    let mut indexes: Vec<(usize, usize)> = vec![];
 
     // resolve types and attributes
-    for (cur_model_idx, model) in &mut schema.models.iter_mut().enumerate() {
-        for (cur_field_idx, field) in &mut model.fields.iter_mut().enumerate() {
-            resolve_field_type(&mut field.ty, &model_by_name);
+    for model in &mut schema.models.iter_mut(){
+        for field in &mut model.fields.iter_mut() {
+            resolve_field_type(&mut field.ty, &model_by_name, &structs);
+
+            if let FieldType::Struct(st) = &mut field.ty {
+                st.name = format!("{}.{}", model.name, field.name)
+            }
 
             for attr in &mut field.attributes {
                 if let Attribute::DerivedUnresolved { model: model_name, field: field_name } = attr {
                     let m = model_by_name[model_name];
                     let f = field_by_name[m][field_name];
                     field.derived_from = Some(ModelRef::new(m, f));
-
-                    let index_name = format!("{}.{}.idx", model.name, field.name);
-                    field.index_name = Some(index_name.clone());
-                    ext_indexes_map.entry((m, f)).or_default().push(IndexRef::new(cur_model_idx, cur_field_idx, index_name));
+                    indexes.push((m, f));
                 }
             }
 
@@ -142,11 +204,13 @@ pub fn parse_schema(input: &str) -> Schema {
                 field.index_name = Some(format!("{}.{}.idx", model.name, field.name));
             }
         }
-        // println!("{:?}", model);
+        println!("{:?}", model);
     }
 
-    for (key, ext_indexes) in ext_indexes_map {
-        schema.models[key.0].fields[key.1].ext_indexes = ext_indexes;
+    for key in indexes {
+        let model = &mut schema.models[key.0];
+        let field = &mut model.fields[key.1];
+        field.index_name = Some(format!("{}.{}.idx", model.name, field.name));
     }
 
     for model in schema.models.iter() {
@@ -170,7 +234,7 @@ fn parse_field_raw(line: &str) -> Field {
         .map(|(_, attr)| parse_attribute(attr.trim()))
         .unwrap_or_else(Vec::new);
 
-    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, derived_from: None, index_name: None, ext_indexes: vec![] }
+    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, derived_from: None, index_name: None }
 }
 
 fn parse_attribute(s: &str) -> Vec<Attribute> {
@@ -193,12 +257,12 @@ fn parse_type(s: &str) -> FieldType {
         if let Some(primitive_field) = get_primitive_type(inner) {
             FieldType::PrimitiveList(primitive_field)
         } else {
-            FieldType::ModelRefListUnresolved(inner.to_string())
+            FieldType::RefListUnresolved(inner.to_string())
         }
     } else if let Some(primitive_field) = get_primitive_type(s) {
         FieldType::Primitive(primitive_field)
     } else {
-        FieldType::ModelRefUnresolved(s.to_string())
+        FieldType::RefUnresolved(s.to_string())
     }
 }
 
@@ -219,13 +283,21 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
 //     matches!(s, "String" | "DateTime" | "Bool" | "Int" | "Float")
 // }
 
-fn resolve_field_type(ty: &mut FieldType, model_by_name: &HashMap<String, usize>) {
+fn resolve_field_type(ty: &mut FieldType, model_by_name: &HashMap<String, usize>, structs: &HashMap<String, Struct>) {
     match ty {
-        FieldType::ModelRefUnresolved(name) => {
-            *ty = FieldType::ModelRef(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+        FieldType::RefUnresolved(name) => {
+            if let Some(st) = structs.get(name) {
+                *ty = FieldType::Struct(st.clone());
+            } else {
+                *ty = FieldType::ModelRef(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+            }
         }
-        FieldType::ModelRefListUnresolved(name) => {
-            *ty = FieldType::ModelRefList(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+        FieldType::RefListUnresolved(name) => {
+            if let Some(st) = structs.get(name) {
+                *ty = FieldType::StructList(st.clone());
+            } else {
+                *ty = FieldType::ModelRefList(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+            }
         }
         _ => {}
     }
