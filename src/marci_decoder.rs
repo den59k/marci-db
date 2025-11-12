@@ -7,7 +7,7 @@ pub enum DecodeError {
     WrongVersion,
     BufferTooSmall,
     Utf8Error,
-    TypeMismatch(&'static str),
+    TypeMismatch(String),
     OffsetOutOfRange,
 }
 
@@ -23,8 +23,9 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
         return Err(DecodeError::WrongVersion);
     }
 
-    if u16::from_be_bytes([data[1], data[2]]) as usize != payload_offset {
-        return Err(DecodeError::TypeMismatch("field count mismatch"));
+    if u16::from_be_bytes([data[1], data[2]]) != payload_offset as u16 {
+        let offset = u16::from_be_bytes([data[1], data[2]]);
+        return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", payload_offset, offset)));
     }
 
     if data.len() < payload_offset {
@@ -65,19 +66,17 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
         obj.insert(field.name.clone(), value);
     }
 
-    if let Some(includes) = includes {
-        for include in includes {
-            match include {
-                IncludeResult::None(field_index) => {
-                    obj.insert(fields[field_index].name.clone(), Value::Null);
-                },
-                IncludeResult::One(field_index, val) => {
-                    obj.insert(fields[field_index].name.clone(), val);
-                },
-                IncludeResult::Many(field_index, val) => {
-                    let vec = Value::Array(val);
-                    obj.insert(fields[field_index].name.clone(), vec);
-                }
+    for include in includes {
+        match include {
+            IncludeResult::None(field_index) => {
+                obj.insert(fields[field_index].name.clone(), Value::Null);
+            },
+            IncludeResult::One(field_index, val) => {
+                obj.insert(fields[field_index].name.clone(), val);
+            },
+            IncludeResult::Many(field_index, val) => {
+                let vec = Value::Array(val);
+                obj.insert(fields[field_index].name.clone(), vec);
             }
         }
     }

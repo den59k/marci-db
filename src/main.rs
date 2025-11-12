@@ -53,12 +53,13 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             // Например: вставка в БД и т. д.
             // db.insert(json_val.clone()); // пример
 
-            let (data, _) = match encode_document(model, &json_val) {
+            let mut structs = vec![];
+            let (data, _) = match encode_document(model, &json_val, &mut structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
             
-            let new_id = match db.insert_data(model, &data) {
+            let new_id = match db.insert_data(model, &data, &structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };
@@ -71,7 +72,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
 
         (&Method::GET, "findMany") => {
 
-            let select = MarciSelect::all(model);
+            let select = MarciSelect::all(&model.fields);
 
             let data = db.get_all(model, &select, | ctx | {
                 return decode_document(ctx).unwrap();
@@ -93,7 +94,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let select = match parse_select(model, &select, &db.schema) {
+            let select = match parse_select(&model.fields, &select, &db.schema) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };
@@ -121,7 +122,8 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 return Ok(error(StatusCode::BAD_REQUEST, "ID field required"));
             };
 
-            let (new_data, changed_mask) = match encode_document(model, &json_val) {
+            let mut structs = vec![];
+            let (new_data, changed_mask) = match encode_document(model, &json_val, &mut structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };

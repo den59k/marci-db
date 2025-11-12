@@ -3,7 +3,7 @@ use std::borrow::Borrow;
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::schema::{FieldType, Model, PrimitiveFieldType};
+use crate::{marci_db::InsertStruct, schema::{FieldType, InsertedIndex, Model, PrimitiveFieldType, WithFields}};
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -17,7 +17,7 @@ pub enum EncodeError {
 static EMPTY_ARRAY: Value = Value::Array(vec![]);
 
 /// Кодируем JSON-документ для заданной модели в бинарный формат
-pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec), EncodeError> {
+pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<InsertStruct<'a>>) -> Result<(Vec<u8>, BitVec), EncodeError> where T: WithFields {
     let obj = json
         .as_object()
         .ok_or(EncodeError::NotAnObject)?;
@@ -25,40 +25,57 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
     const VERSION: u8 = 1;
 
     // [version: u8] + [field_count: u16] + [offsets: N * u32]
-    let mut buf = Vec::with_capacity(model.payload_offset + 128);
+    let mut buf = Vec::with_capacity(model.payload_offset() + 128);
 
     // version
     buf.push(VERSION);
     // field_count
-    buf.extend_from_slice(&model.payload_offset.to_be_bytes());
+    buf.extend_from_slice(&(model.payload_offset() as u16).to_be_bytes());
     // offsets (плейсхолдеры)
-    buf.resize(model.payload_offset, 0);
+    buf.resize(model.payload_offset(), 0);
 
     let initial_size = buf.len();
 
-    let mut changed_mask = bitvec![0; 200];
+    let max_offset_index = model.fields().iter().map(|a| a.offset_index).max().unwrap();
+    let mut changed_mask = bitvec![0; max_offset_index+1];
 
     // Тело
-    for field in &model.fields {
-
-        if field.derived_from.is_some() {
-            continue;
-        }
-
+    for field in model.fields() {
         let value_opt: Option<&Value> = obj.get(&field.name);
-        let Some(value) = value_opt.or_else(|| {
-            matches!(field.ty, FieldType::ModelRefList(_)).then(|| &EMPTY_ARRAY)
-        }) else {
+        let Some(value) = value_opt else {
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
         };
 
         if value.is_null() {
-            changed_mask.set(field.offset_index, true);
+            match field.ty {
+                FieldType::Struct(ref st) => {
+                    structs.push(InsertStruct::None { st: &st });
+                },
+                FieldType::StructList(_, _) => {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                },
+                FieldType::ModelRefList(_) => {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
+                },
+                _ => {
+                    changed_mask.set(field.offset_index, true);
+                }
+            }
             continue;
         }
 
         match field.ty {
+            FieldType::Primitive(primitive_type) => {
+                changed_mask.set(field.offset_index, true);
+
+                // Смещение начала данных этого поля
+                let start = buf.len() as u32;
+                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
+
+                // Кодируем само значение
+                encode_value(&mut buf, &primitive_type, &field.name, value)?;
+            }
             FieldType::ModelRef(_) => {
                 changed_mask.set(field.offset_index, true);
 
@@ -75,36 +92,42 @@ pub fn encode_document(model: &Model, json: &Value) -> Result<(Vec<u8>, BitVec),
 
                 encode_value(&mut buf, &PrimitiveFieldType::UInt64, &field.name, item_id)?;
             }
-            FieldType::Primitive(primitive_type) => {
-                changed_mask.set(field.offset_index, true);
-
-                // Смещение начала данных этого поля
-                let start = buf.len() as u32;
-                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
-
-                // Кодируем само значение
-                encode_value(&mut buf, &primitive_type, &field.name, value)?;
-            }
-            FieldType::ModelRefList(_) => {
-                let start = buf.len() as u32;
-                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
-
+            FieldType::ModelRefList(model_index) => {
                 let Some(value) = value.as_array() else {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
                 };
 
-                let ids: Vec<&Value> = value
+                let ids: Vec<u64> = value
                     .iter()
                     .enumerate()
                     .map(|(index, item)| {
-                        item.get("id").ok_or_else(|| EncodeError::TypeMismatch {
+                        item.get("id").and_then(|i| i.as_u64()).ok_or_else(|| EncodeError::TypeMismatch {
                             field: format!("{}[{}]", field.name, index),
                             expected: "{ id: u64 }"
                         })
                     })
                     .collect::<Result<_, _>>()?; // <---- вот здесь вся магия
 
-                encode_list(&mut buf, &PrimitiveFieldType::UInt64, &field.name, &ids)?;
+                structs.push(InsertStruct::Connect { field, ref_model: model_index, ids: ids.clone() });
+            }
+            FieldType::Struct(ref st) => {
+                let (data, changed_values) = encode_document(st, value, structs)?;
+                structs.push(InsertStruct::One { st: &st, changed_values, data });
+            }
+            FieldType::StructList(ref st, counter_idx) => {
+                let Some(value) = value.as_array() else {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                };
+                if value.len() == 0 {
+                    structs.push(InsertStruct::Empty { st: &st });
+                } else {
+                    let mut vec = Vec::with_capacity(value.len());
+                    for item in value {
+                        let (data, _) = encode_document(st, item, structs)?;
+                        vec.push(data);
+                    }
+                    structs.push(InsertStruct::Many { st: &st, data: vec, counter_idx });
+                }
             }
             _ => {
 
@@ -288,6 +311,7 @@ mod tests {
         // Модель: два поля: name: String, age: Int64
         let model = Model {
             name: "User".to_string(),
+            counter_idx: 0,
             fields: vec![
                 crate::schema::Field {
                     name: "name".to_string(),
@@ -296,7 +320,7 @@ mod tests {
                     offset_pos: 3,
                     derived_from: None,
                     is_nullable: false,
-                    index_name: None,
+                    inserted_indexes: vec![], select_index: None,
                     attributes: vec![]
                 },
                 crate::schema::Field {
@@ -306,7 +330,7 @@ mod tests {
                     offset_pos: 3 + 1 * 4,
                     derived_from: None,
                     is_nullable: false,
-                    index_name: None,
+                    inserted_indexes: vec![], select_index: None,
                     attributes: vec![]
                 },
                 crate::schema::Field {
@@ -316,7 +340,7 @@ mod tests {
                     offset_pos: 3 + 2 * 4,
                     derived_from: None,
                     is_nullable: false,
-                    index_name: None,
+                    inserted_indexes: vec![], select_index: None,
                     attributes: vec![]
                 },
             ],
@@ -329,14 +353,15 @@ mod tests {
             "profile": { "id": 1 }
         });
 
-        let (encoded, _) = encode_document(&model, &input).expect("encode ok");
+        let mut structs = vec![];
+        let (encoded, _) = encode_document(&model, &input, &mut structs).expect("encode ok");
 
         // Проверяем версию
         assert_eq!(encoded[0], 1);
 
         // Читаем field_count
         let field_count = u16::from_be_bytes(encoded[1..3].try_into().unwrap());
-        assert_eq!(field_count, 3);
+        assert_eq!(field_count, model.payload_offset as u16);
 
         // Читаем смещения
         let offset_name = u32::from_be_bytes(encoded[3..7].try_into().unwrap()) as usize;
