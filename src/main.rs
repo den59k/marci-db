@@ -23,6 +23,7 @@ mod schema;
 mod marci_encoder;
 mod marci_decoder;
 mod marci_select;
+mod update_data;
 
 async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result<Response<Full<Bytes>>, Infallible> {
 
@@ -128,7 +129,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let item_id = match db.update(model,  id, &new_data, changed_mask) {
+            let item_id = match db.update(model,  id, &new_data, changed_mask, &structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err))) 
             };

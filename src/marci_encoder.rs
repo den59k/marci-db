@@ -112,21 +112,26 @@ pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<Inse
             }
             FieldType::Struct(ref st) => {
                 let (data, changed_values) = encode_document(st, value, structs)?;
-                structs.push(InsertStruct::One { st: &st, changed_values, data });
+                structs.push(InsertStruct::One { st, changed_mask: changed_values, data });
             }
             FieldType::StructList(ref st, counter_idx) => {
                 let Some(value) = value.as_array() else {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
                 };
                 if value.len() == 0 {
-                    structs.push(InsertStruct::Empty { st: &st });
+                    structs.push(InsertStruct::Empty { st });
                 } else {
-                    let mut vec = Vec::with_capacity(value.len());
+                    let mut vec_many = Vec::with_capacity(value.len());
                     for item in value {
-                        let (data, _) = encode_document(st, item, structs)?;
-                        vec.push(data);
+                        if let Some(id) = item.get("id").and_then(|a|a.as_u64()) {
+                            let (data, _) = encode_document(st, item, structs)?;
+                            vec_many.push((Some(id), data));
+                        } else {
+                            let (data, _) = encode_document(st, item, structs)?;
+                            vec_many.push((None, data));
+                        }
                     }
-                    structs.push(InsertStruct::Many { st: &st, data: vec, counter_idx });
+                    structs.push(InsertStruct::Many { st, data: vec_many, counter_idx });
                 }
             }
             _ => {
@@ -135,7 +140,7 @@ pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<Inse
         }
     }
 
-    if buf.len() == initial_size {
+    if buf.len() == initial_size && structs.len() == 0 {
         return Err(EncodeError::EmptyObject);
     }
 
@@ -174,12 +179,12 @@ fn encode_value(
                     expected: "string",
                 })?;
             let bytes = s.as_bytes();
-            let len = bytes.len();
-            if len > u32::MAX as usize {
-                // на практике вряд ли, но проверка не помешает
-                return Err(EncodeError::OffsetOverflow);
-            }
-            dst.extend_from_slice(&(len as u32).to_be_bytes());
+            // let len = bytes.len();
+            // if len > u32::MAX as usize {
+            //     // на практике вряд ли, но проверка не помешает
+            //     return Err(EncodeError::OffsetOverflow);
+            // }
+            // dst.extend_from_slice(&(len as u32).to_be_bytes());
             dst.extend_from_slice(bytes);
         }
         PrimitiveFieldType::DateTime => {
@@ -300,10 +305,9 @@ fn encode_value(
     Ok(())
 }
 
+#[cfg(test)]
 mod tests {
-  #[cfg(test)]
-mod tests {
-    use crate::{marci_encoder::encode_document, schema::{FieldType, Model, PrimitiveFieldType}};
+    use crate::{marci_db::get_end, marci_encoder::encode_document, schema::{FieldType, Model, PrimitiveFieldType}};
     use serde_json::json;
 
     #[test]
@@ -372,15 +376,10 @@ mod tests {
 
         // Проверяем, что смещения действительно указывают на данные
         // name: [len=5][bytes]
-        let name_len = u32::from_be_bytes([
-            encoded[offset_name],
-            encoded[offset_name + 1],
-            encoded[offset_name + 2],
-            encoded[offset_name + 3],
-        ]) as usize;
-        assert_eq!(name_len, 5);
+        let name_end = get_end(&encoded, 3, model.payload_offset);
+        println!("{} {}", name_end, model.payload_offset);
 
-        let name_value = &encoded[offset_name + 4 .. offset_name + 4 + name_len];
+        let name_value = &encoded[offset_name .. name_end];
         assert_eq!(name_value, b"Alice");
 
         // age: i64
@@ -390,4 +389,3 @@ mod tests {
     }
 }
 
-}

@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult}, schema::{FieldType, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{FieldType, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -48,7 +48,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
         };
 
         // читаем offset
-        let offset = u32::from_be_bytes(data[field.offset_pos..field.offset_pos+4].try_into().unwrap());
+        let offset = get_offset(data, field.offset_pos);
 
         // Поле = null
         if offset == 0 {
@@ -62,7 +62,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
         }
 
         // Декодируем
-        let value = decode_value(primitive, &data[offset..])?;
+        let value = decode_value(primitive, &data, field.offset_pos, offset, payload_offset)?;
         obj.insert(field.name.clone(), value);
     }
 
@@ -84,60 +84,58 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     return Ok(Value::Object(obj));
 }
 
-fn decode_value(ty: &PrimitiveFieldType, slice: &[u8]) -> Result<Value, DecodeError> {
+#[inline(always)]
+fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset_pos: usize, offset: usize, payload_offset: usize) -> Result<Value, DecodeError> {
     match ty {
         PrimitiveFieldType::String => {
-            if slice.len() < 4 {
+            if data.len() < 4 {
                 return Err(DecodeError::BufferTooSmall);
             }
-            let len = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
-            if slice.len() < 4 + len {
-                return Err(DecodeError::BufferTooSmall);
-            }
-            let s = std::str::from_utf8(&slice[4..4+len]).map_err(|_| DecodeError::Utf8Error)?;
+            let end = get_end(data, offset_pos, payload_offset);
+            let s = std::str::from_utf8(&data[offset..end]).map_err(|_| DecodeError::Utf8Error)?;
             Ok(Value::String(s.to_string()))
         }
         PrimitiveFieldType::DateTime => {
-            if slice.len() < 8 {
+            if data.len() < 8 {
                 return Err(DecodeError::BufferTooSmall);
             }
-            let epoch = i64::from_be_bytes(slice[0..8].try_into().unwrap());
+            let epoch = i64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             // Возвращаем как число (или можно форматировать обратно в ISO)
             Ok(Value::Number(epoch.into()))
         }
         PrimitiveFieldType::Int64 => {
-            if slice.len() < 8 {
+            if data.len() < 8 {
                 return Err(DecodeError::BufferTooSmall);
             }
-            let n = i64::from_be_bytes(slice[0..8].try_into().unwrap());
+            let n = i64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             Ok(Value::Number(n.into()))
         }
         PrimitiveFieldType::UInt64 => {
-            if slice.len() < 8 {
+            if data.len() < 8 {
                 return Err(DecodeError::BufferTooSmall);
             }
-            let n = u64::from_be_bytes(slice[0..8].try_into().unwrap());
+            let n = u64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             Ok(Value::Number(n.into()))
         }
         PrimitiveFieldType::Float => {
-            if slice.len() < 4 {
+            if data.len() < 4 {
                 return Err(DecodeError::BufferTooSmall);
             }
-            let n = f32::from_be_bytes(slice[0..4].try_into().unwrap());
+            let n = f32::from_be_bytes(data[offset..offset+4].try_into().unwrap());
             Ok(Value::Number(serde_json::Number::from_f64(n as f64).unwrap()))
         }
         PrimitiveFieldType::Double => {
-            if slice.len() < 8 {
+            if data.len() < 8 {
                 return Err(DecodeError::BufferTooSmall);
             }
-            let n = f64::from_be_bytes(slice[0..8].try_into().unwrap());
+            let n = f64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
         }
         PrimitiveFieldType::Bool => {
-            if slice.is_empty() {
+            if data.is_empty() {
                 return Err(DecodeError::BufferTooSmall);
             }
-            Ok(Value::Bool(slice[0] != 0))
+            Ok(Value::Bool(data[offset] != 0))
         }
     }
 }
