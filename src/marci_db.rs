@@ -164,11 +164,11 @@ impl MarciDB {
     let foreign_keys = collect_foreign_keys(data, &model.fields, structs, &self.schema);
     
     let id = self.next_id(model);
-    let mut indexes = get_indexes(data, id, model);
+    let mut indexes = get_indexes(data, id, model, None);
     for st in structs {
       match st {
         InsertStruct::One { st, data, .. } => {
-          indexes.extend(get_indexes(data, id, *st));
+          indexes.extend(get_indexes(data, id, *st, None));
         }
         _ => {}
       }
@@ -191,7 +191,7 @@ impl MarciDB {
           for (item_id, item_data) in data {
             let item_id: u64 = item_id.unwrap_or_else(|| self.next_idc(*counter_idx));
             tree.insert(&make_key(id, item_id), item_data).unwrap();
-            indexes.extend(get_indexes(item_data, item_id, *st));
+            indexes.extend(get_indexes(item_data, item_id, *st, None));
           }
         },
         InsertStruct::One { st, data, .. } => {
@@ -317,9 +317,18 @@ impl MarciDB {
   pub fn update(&self, model: &Model, id: u64, new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<u64, InsertError> {
     
     let foreign_keys = collect_foreign_keys(new_data, &model.fields, structs, &self.schema);
-    let mut indexes = get_indexes(new_data, id, model);
 
-    let mut indexes_to_remove = get_indexes_to_remove(id, model);
+    let mut indexes = get_indexes(new_data, id, model, None);
+    for st in structs {
+      match st {
+        InsertStruct::One { st, data, .. } => {
+          indexes.extend(get_indexes(data, id, *st, None));
+        }
+        _ => {}
+      }
+    }
+
+    let mut indexes_to_remove = vec![];
 
     let tx = self.db.begin_write().unwrap();
 
@@ -334,12 +343,9 @@ impl MarciDB {
       };
 
       let updated_data = update_data(&model.fields, model.payload_offset, &data, new_data, &changed_mask);
-
-      for index in indexes_to_remove.iter_mut() {
-        index.set_from_data(&data, model.payload_offset);
-      }
-
       tree.insert(&id.to_be_bytes(), &updated_data).unwrap();
+
+      indexes_to_remove.extend(get_indexes(&data, id, model, Some(&changed_mask)));
     };
 
     
@@ -349,20 +355,27 @@ impl MarciDB {
         InsertStruct::Empty { st } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           tree.delete_range(id.to_be_bytes()..(id+1).to_be_bytes()).unwrap();
+
+          // TODO: Delete old indexes here (from model_ref -> struct values)
         }
         InsertStruct::Many { st, data: new_data, counter_idx, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           for (item_id, item_data) in new_data {
             let item_id: u64 = item_id.unwrap_or_else(|| self.next_idc(*counter_idx));
             tree.insert(&make_key(id, item_id), item_data).unwrap();
-            indexes.extend(get_indexes(item_data, item_id, *st));
+            indexes.extend(get_indexes(item_data, item_id, *st, None));
+
+            // TODO: Delete old indexes here (from model_ref -> struct values)
           }
         },
-        InsertStruct::One { st, data: new_data, changed_mask: changed_values } => {
+        InsertStruct::One { st, data: new_data, changed_mask } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           if let Some(data) = tree.get(&id.to_be_bytes()).unwrap() {
-            let updated_data = update_data(&model.fields, model.payload_offset, &data.as_ref(), new_data, &changed_values);
-            tree.insert(&id.to_be_bytes(), &updated_data).unwrap()
+
+            let updated_data = update_data(&st.fields, st.payload_offset, &data.as_ref(), new_data, &changed_mask);
+            tree.insert(&id.to_be_bytes(), &updated_data).unwrap();
+
+            indexes_to_remove.extend(get_indexes(&data, id, *st, Some(&changed_mask)));
           } else {
             tree.insert(&id.to_be_bytes(), new_data).unwrap()
           }
@@ -380,10 +393,8 @@ impl MarciDB {
     }
     
     for index in indexes_to_remove {
-      if index.is_filled {
-        let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
-        index_tree.delete(&index.key).unwrap();
-      }
+      let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
+      index_tree.delete(&index.key).unwrap();
     }
 
     // Обновляем индексы (сносим старые, ставим новые)
@@ -643,58 +654,14 @@ struct IndexData<'a> {
   key: Vec<u8>
 }
 
-struct IndexToRemove<'a> {
-  tree_name: &'a[u8],
-  offset_pos: usize,
-  key: Vec<u8>,
-  is_rev: bool,
-  is_filled: bool
-}
-
-impl IndexToRemove<'_> {
-  fn set_from_data(&mut self, data: &[u8], payload_offset: usize) {
-    let Some(value) = get_value_with_len(data, self.offset_pos, payload_offset) else {
-      return
-    };
-    assert!(value.len() == 8, "Only 8 bytes index supported");
-    self.is_filled = true;
-    if self.is_rev {
-      self.key[..8].copy_from_slice(value)
-    } else {
-      self.key[8..].copy_from_slice(value);
-    }
-  }
-}
-
-#[inline(always)]
-fn get_indexes_to_remove<'a, T>(item_id: u64, model: &'a T) -> Vec<IndexToRemove<'a>> where T: WithFields {
-  let mut indexes = vec![];
-  for field in model.fields() {
-    if field.offset_pos == 0 { continue; }
-    for index in &field.inserted_indexes {
-      let mut key = vec![0u8; 16];
-      match index {
-          InsertedIndex::Rev { tree_name } => {
-            key[8..].copy_from_slice(&item_id.to_be_bytes());
-            indexes.push(IndexToRemove { tree_name: tree_name.as_bytes(), offset_pos: field.offset_pos, key, is_rev: true, is_filled: false });
-          },
-          InsertedIndex::Direct { tree_name } => {
-            key[..8].copy_from_slice(&item_id.to_be_bytes());
-            indexes.push(IndexToRemove { tree_name: tree_name.as_bytes(), offset_pos: field.offset_pos, key, is_rev: false, is_filled: false });
-          }
-      }
-    }
-  }
-  return indexes;
-}
-
 #[inline(always)]
 /// В этой функции собираем все индексы с данных. Обычно это собирается только с OneToMany
-fn get_indexes<'a, T>(data: &'a[u8], item_id: u64, model: &'a T) -> Vec<IndexData<'a>> where T: WithFields {
+fn get_indexes<'a, T>(data: &[u8], item_id: u64, model: &'a T, mask: Option<&BitVec>) -> Vec<IndexData<'a>> where T: WithFields {
 
   let mut indexes = vec![];
   for field in model.fields() {
-    if field.offset_pos == 0 { continue; }
+    if field.offset_pos == 0 || field.inserted_indexes.is_empty() { continue; }
+    if mask.is_some_and(|f| !f[field.offset_index]) { continue; }
     let Some(value) = get_value_with_len(data, field.offset_pos, model.payload_offset()) else {
       continue;
     };
