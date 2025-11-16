@@ -38,9 +38,10 @@ pub struct MarciSelect<'a> {
 }
 
 pub struct DecodeCtx<'a, U> {
-  pub id: u64,
+  pub id: &'a [u8],
   pub data: &'a [u8],
   pub fields: &'a [Field],
+  pub key_fields: &'a [usize],
   pub payload_offset: usize,
   pub select: &'a BitVec,
   pub includes: Vec<IncludeResult<U>>,
@@ -61,13 +62,12 @@ pub enum InsertStruct<'a> {
     },
     Many {
         st: &'a Struct,
-        counter_idx: usize,
-        data: Vec<(Option<u64>,Vec<u8>)>,
+        data: Vec<(Vec<u8>,Vec<u8>)>,
     },
     Connect {
         field: &'a Field,
         ref_model: usize,
-        ids: Vec<u64>
+        ids: Vec<Vec<u8>>
     },
     Update {
         st: &'a Struct,
@@ -88,7 +88,7 @@ pub enum InsertStruct<'a> {
 #[derive(Debug)]
 pub enum InsertError {
   ForeignKeyViolation(String, u64),
-  ItemNotFound(u64)
+  ItemNotFound
 }
 
 pub enum IncludeResult<U> {
@@ -114,9 +114,13 @@ impl MarciDB {
     for model in schema.models.iter_mut() {
       let tree = tx.get_or_create_tree(model.name.as_bytes()).unwrap();
 
-      let max_id = get_max_id(&tree);
-      model.counter_idx = counters.len();
-      counters.push(Arc::new(AtomicU64::new(max_id)));
+      for field in model.fields.iter_mut() {
+        if field.counter_idx.is_some() {
+          let max_id = get_max_id(&tree);
+          field.counter_idx = Some(counters.len());
+          counters.push(Arc::new(AtomicU64::new(max_id)));
+        }
+      }
 
       for field in model.fields.iter_mut() {
         for index in &field.inserted_indexes {
@@ -131,11 +135,13 @@ impl MarciDB {
         if let FieldType::Struct(st) = &field.ty {
           tx.get_or_create_tree(st.name.as_bytes()).unwrap();
         }
-        if let FieldType::StructList(ref st, ref mut counter_idx) = field.ty {
+        if let FieldType::StructList(st) = &field.ty {
           let tree = tx.get_or_create_tree(st.name.as_bytes()).unwrap();
-          let max_id = get_max_id(&tree);
-          *counter_idx = counters.len();
-          counters.push(Arc::new(AtomicU64::new(max_id)));
+          if field.counter_idx.is_some() {
+            let max_id = get_max_id_struct(&tree);
+            field.counter_idx = Some(counters.len());
+            counters.push(Arc::new(AtomicU64::new(max_id)));
+          }
         }
       }
     }
@@ -148,9 +154,6 @@ impl MarciDB {
     }
   }
   
-  pub fn next_id(&self, model: &Model) -> u64 {
-    self.counters[model.counter_idx].fetch_add(1, Ordering::Relaxed)
-  }
   pub fn next_idc(&self, counter_idx: usize) -> u64 {
     self.counters[counter_idx].fetch_add(1, Ordering::Relaxed)
   }
@@ -159,11 +162,20 @@ impl MarciDB {
     return self.schema.models.iter().find(|i| i.name == name);
   }
 
-  pub fn insert_data(&self, model: &Model, data: &[u8], structs: &[InsertStruct]) -> Result<u64, InsertError> {
+  pub fn insert_counter_value<T>(&self, model: &T, id: &mut [u8]) where T: WithFields {
+    for (idx, field) in model.key_fields().iter().map(|i| model.get_field(*i)).enumerate() {
+      if let Some(counter_idx) = field.counter_idx {
+        let field_id = self.next_idc(counter_idx);
+        id[idx..idx+8].copy_from_slice(&field_id.to_be_bytes());
+      }
+    }
+  }
+
+  pub fn insert_data(&self, model: &Model, id: &mut [u8], data: &[u8], structs: &[InsertStruct]) -> Result<(), InsertError> {
 
     let foreign_keys = collect_foreign_keys(data, &model.fields, structs, &self.schema);
-    
-    let id = self.next_id(model);
+    self.insert_counter_value(model, id);
+
     let mut indexes = get_indexes(data, id, model, None);
     for st in structs {
       match st {
@@ -180,23 +192,25 @@ impl MarciDB {
     // Добавляем само значение
     {
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-      tree.insert(&id.to_be_bytes(), data).unwrap();
+      tree.insert(id, data).unwrap();
     }
 
     // Добавляем зависимые структуры
     for st in structs {
       match st {
-        InsertStruct::Many { st, data, counter_idx, .. } => {
+        InsertStruct::Many { st, data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           for (item_id, item_data) in data {
-            let item_id: u64 = item_id.unwrap_or_else(|| self.next_idc(*counter_idx));
-            tree.insert(&make_key(id, item_id), item_data).unwrap();
-            indexes.extend(get_indexes(item_data, item_id, *st, None));
+            let mut item_id = item_id.clone();
+            self.insert_counter_value(*st, &mut item_id);
+
+            tree.insert(&item_id, item_data).unwrap();
+            indexes.extend(get_indexes(item_data, &item_id, *st, None));
           }
         },
         InsertStruct::One { st, data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          tree.insert(&id.to_be_bytes(), data).unwrap()
+          tree.insert(id, data).unwrap()
         }
         InsertStruct::Connect { field, ids, .. } => {
           insert_indexes(&tx, field, id, ids);
@@ -213,12 +227,12 @@ impl MarciDB {
     
     tx.commit().unwrap();
 
-    return Ok(id)
+    return Ok(())
   }
 
   fn process_data<U, F>(
       &self,
-      id: u64,
+      id: &[u8],
       data: &[u8],
       rx: &ReadTransaction,
       select: &MarciSelect,
@@ -237,8 +251,7 @@ impl MarciDB {
           };
           let nested_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
           let data = nested_tree.get(item_id).unwrap().unwrap();
-          let item_id_val = u64::from_be_bytes(*item_id);
-          let item = self.process_data(item_id_val, data.as_ref(), rx, &include.select, include.model, f);
+          let item = self.process_data(item_id, data.as_ref(), rx, &include.select, include.model, f);
           return IncludeResult::One(include.field_index, item);
         },
         MarciSelectBinding::Many(tree_name) => {
@@ -250,17 +263,15 @@ impl MarciDB {
 
           let nested_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
           let items = keys.iter().map(|key| {
-            let data = nested_tree.get(&key).unwrap().unwrap();
-            let item_id = u64::from_be_bytes(key.as_slice().try_into().unwrap());
-            return self.process_data(item_id, data.as_ref(), rx, &include.select, include.model, f);
+            let data = nested_tree.get(key).unwrap().unwrap();
+            return self.process_data(key, data.as_ref(), rx, &include.select, include.model, f);
           }).collect();
 
           return IncludeResult::Many(include.field_index, items);
         },
         MarciSelectBinding::OneStruct() => {
-          let item_id = &id.to_be_bytes();
           let st_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
-          let Some(data) = st_tree.get(item_id).unwrap() else {
+          let Some(data) = st_tree.get(id).unwrap() else {
             return IncludeResult::None(include.field_index);
           };
           let item = self.process_data(id, data.as_ref(), rx, &include.select, include.model, f);
@@ -268,12 +279,11 @@ impl MarciDB {
         },
         MarciSelectBinding::ManyStruct() => {
 
-          let item_id = &id.to_be_bytes();
           let st_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
 
-          let items = st_tree.prefix(item_id).unwrap().map(|item| {
+          let items = st_tree.prefix(&id).unwrap().map(|item| {
             let (key, data) = item.unwrap();
-            let st_item_id = u64::from_be_bytes(key[8..].try_into().unwrap());
+            let st_item_id = &key[id.len()..];
             return self.process_data(st_item_id, data.as_ref(), rx, &include.select, include.model, f);
           }).collect();
 
@@ -282,7 +292,7 @@ impl MarciDB {
       }
     }).collect();
 
-    return f(DecodeCtx { id, data, fields: model.fields(), payload_offset: model.payload_offset(), select: &select.select, includes });
+    return f(DecodeCtx { id, data, fields: model.fields(), key_fields: model.key_fields(), payload_offset: model.payload_offset(), select: &select.select, includes });
   }
 
   pub fn get_all<U, F, T>(
@@ -299,10 +309,9 @@ impl MarciDB {
       let tree = rx.get_tree(model.tree_name()).unwrap().unwrap();
 
       tree.iter().unwrap().map(|item| {
-          let (key, value) = item.unwrap();
-          let id = u64::from_be_bytes(key.as_ref().try_into().unwrap());
-          let data = value.as_ref();
-          self.process_data(id, data, &rx, select, model, &f)
+          let (id, value) = item.unwrap();
+          
+          self.process_data(&id, &value, &rx, select, model, &f)
       }).collect()
   }
 
@@ -314,7 +323,7 @@ impl MarciDB {
     return tree.get(key.as_bytes()).unwrap().map(|item| f(item.as_ref()))
   }
 
-  pub fn update(&self, model: &Model, id: u64, new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<u64, InsertError> {
+  pub fn update(&self, model: &Model, id: &[u8], new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<(), InsertError> {
     
     let foreign_keys = collect_foreign_keys(new_data, &model.fields, structs, &self.schema);
 
@@ -338,12 +347,12 @@ impl MarciDB {
     {
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
-      let Some(data) = tree.get(&id.to_be_bytes()).unwrap() else {
-        return Err(InsertError::ItemNotFound(id))
+      let Some(data) = tree.get(id).unwrap() else {
+        return Err(InsertError::ItemNotFound)
       };
 
       let updated_data = update_data(&model.fields, model.payload_offset, &data, new_data, &changed_mask);
-      tree.insert(&id.to_be_bytes(), &updated_data).unwrap();
+      tree.insert(id, &updated_data).unwrap();
 
       indexes_to_remove.extend(get_indexes(&data, id, model, Some(&changed_mask)));
     };
@@ -354,30 +363,33 @@ impl MarciDB {
       match st {
         InsertStruct::Empty { st } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          tree.delete_range(id.to_be_bytes()..(id+1).to_be_bytes()).unwrap();
+          let end = increment_bytes_be(id);
+          tree.delete_range(id..&end).unwrap();
 
           // TODO: Delete old indexes here (from model_ref -> struct values)
         }
-        InsertStruct::Many { st, data: new_data, counter_idx, .. } => {
+        InsertStruct::Many { st, data: new_data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           for (item_id, item_data) in new_data {
-            let item_id: u64 = item_id.unwrap_or_else(|| self.next_idc(*counter_idx));
-            tree.insert(&make_key(id, item_id), item_data).unwrap();
-            indexes.extend(get_indexes(item_data, item_id, *st, None));
+            let mut item_id = item_id.clone();
+            self.insert_counter_value(*st, &mut item_id);
 
+            tree.insert(&item_id, item_data).unwrap();
+            indexes.extend(get_indexes(item_data, &item_id, *st, None));
+            
             // TODO: Delete old indexes here (from model_ref -> struct values)
           }
         },
         InsertStruct::One { st, data: new_data, changed_mask } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          if let Some(data) = tree.get(&id.to_be_bytes()).unwrap() {
+          if let Some(data) = tree.get(id).unwrap() {
 
             let updated_data = update_data(&st.fields, st.payload_offset, &data.as_ref(), new_data, &changed_mask);
-            tree.insert(&id.to_be_bytes(), &updated_data).unwrap();
+            tree.insert(id, &updated_data).unwrap();
 
             indexes_to_remove.extend(get_indexes(&data, id, *st, Some(&changed_mask)));
           } else {
-            tree.insert(&id.to_be_bytes(), new_data).unwrap()
+            tree.insert(id, new_data).unwrap()
           }
         }
         InsertStruct::Connect { field, ids, .. } => {
@@ -386,7 +398,7 @@ impl MarciDB {
         },
         InsertStruct::None { st } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          tree.delete(&id.to_be_bytes()).unwrap();
+          tree.delete(id).unwrap();
         },
         _ => {}
       }
@@ -412,7 +424,7 @@ impl MarciDB {
 
     tx.commit().unwrap();
 
-    return Ok(id);
+    return Ok(());
   }
 
   pub fn delete(&self, model: &Model, id: u64) -> bool {
@@ -567,7 +579,7 @@ fn get_value_with_len<'a>(
 struct ForeignKey<'a> {
   model: &'a Model,
   field: &'a Field,
-  id: [u8;8]
+  id: &'a[u8]
 }
 
 #[inline(always)]
@@ -579,7 +591,7 @@ fn get_foreign_keys<'a>(data: &'a[u8], fields: &'a [Field], schema: &'a Schema) 
     match field.ty {
         FieldType::ModelRef(model_index) => {
           if let Some(bytes) = get_value::<8>(data, field.offset_pos) {
-            foreign_keys.push(ForeignKey { model: &schema.models[model_index], field, id: bytes.clone() });
+            foreign_keys.push(ForeignKey { model: &schema.models[model_index], field, id: bytes });
           }
         }
         _  => { }
@@ -597,7 +609,7 @@ fn collect_foreign_keys<'a>(data: &'a[u8], fields: &'a [Field], structs: &'a [In
       InsertStruct::Connect { field, ref_model, ids } => {
         for item_id in ids.iter() {
           let model = &schema.models[*ref_model];
-          foreign_keys.push(ForeignKey { model, field, id: item_id.to_be_bytes() });
+          foreign_keys.push(ForeignKey { model, field, id: item_id });
         }
       }
       InsertStruct::Many { st, data, .. } => {
@@ -619,7 +631,8 @@ fn check_foreign_keys(tx: &Transaction, foreign_keys: &[ForeignKey]) -> Result<(
   for item in foreign_keys {
     let tree = tx.get_tree(item.model.name.as_bytes()).unwrap().unwrap();
     if tree.get(&item.id).unwrap().is_none() {
-      return Err(InsertError::ForeignKeyViolation(item.field.name.clone(), u64::from_be_bytes(item.id)))
+      // TODO: Incorrect u64::from_be_bytes. Write full key instead
+      return Err(InsertError::ForeignKeyViolation(item.field.name.clone(), u64::from_be_bytes(item.id.try_into().unwrap())))
     }
   }
   return Ok(());
@@ -627,26 +640,28 @@ fn check_foreign_keys(tx: &Transaction, foreign_keys: &[ForeignKey]) -> Result<(
 
 #[inline(always)]
 /// Находит все ключи в индексе через ключ A, возвращает массив ключей B
-fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: u64) -> Vec<Vec<u8>> {
+fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Vec<u8>> {
   let index_tree = rx.get_tree(tree_name).unwrap()
     .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
 
-  let iter = index_tree.prefix_keys(&item_id.to_be_bytes()).unwrap();
+  let iter = index_tree.prefix_keys(&item_id).unwrap();
   iter.map(|k| k.unwrap()[8..].to_vec()).collect()
 }
 
-#[inline(always)]
-fn make_key(a: u64, b: u64) -> [u8; 16] {
-  let mut key = [0u8; 16];
-  key[..8].copy_from_slice(&a.to_be_bytes());
-  key[8..].copy_from_slice(&b.to_be_bytes());
-  key
-}
+// #[inline(always)]
+// fn make_key(a: u64, b: u64) -> [u8; 16] {
+//   let mut key = [0u8; 16];
+//   key[..8].copy_from_slice(&a.to_be_bytes());
+//   key[8..].copy_from_slice(&b.to_be_bytes());
+//   key
+// }
 
 #[inline(always)]
-fn insert_index(tree: &mut Tree, left: u64, right: u64) {
-    let key = make_key(left, right);
-    tree.insert(&key, &[1]).unwrap();
+fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) {
+  let mut key = Vec::with_capacity(left.len() + right.len());
+  key.extend_from_slice(left);
+  key.extend_from_slice(right);
+  tree.insert(&key, &[1]).unwrap();
 }
 
 struct IndexData<'a> {
@@ -656,23 +671,27 @@ struct IndexData<'a> {
 
 #[inline(always)]
 /// В этой функции собираем все индексы с данных. Обычно это собирается только с OneToMany
-fn get_indexes<'a, T>(data: &[u8], item_id: u64, model: &'a T, mask: Option<&BitVec>) -> Vec<IndexData<'a>> where T: WithFields {
+fn get_indexes<'a, T>(data: &[u8], id: &[u8], model: &'a T, mask: Option<&BitVec>) -> Vec<IndexData<'a>> where T: WithFields {
 
   let mut indexes = vec![];
-  for field in model.fields() {
+  for (field_index, field) in model.fields().iter().enumerate(){
     if field.offset_pos == 0 || field.inserted_indexes.is_empty() { continue; }
-    if mask.is_some_and(|f| !f[field.offset_index]) { continue; }
+    if mask.is_some_and(|f| !f[field_index]) { continue; }
     let Some(value) = get_value_with_len(data, field.offset_pos, model.payload_offset()) else {
       continue;
     };
     for index in &field.inserted_indexes {
       match index {
         InsertedIndex::Rev { tree_name } => {
-          let key = [value, &item_id.to_be_bytes()].concat();
+          let mut key = Vec::with_capacity(value.len() + id.len());
+          key.extend_from_slice(value);
+          key.extend_from_slice(id);
           indexes.push(IndexData { tree_name: tree_name.as_bytes(), key });
         },
         InsertedIndex::Direct { tree_name } => {
-          let key = [&item_id.to_be_bytes(), value].concat();
+          let mut key = Vec::with_capacity(value.len() + id.len());
+          key.extend_from_slice(id);
+          key.extend_from_slice(value);
           indexes.push(IndexData { tree_name: tree_name.as_bytes(), key });
         }
       }
@@ -690,9 +709,19 @@ pub fn get_max_id(tree: &Tree) -> u64 {
     .unwrap_or(1);
 }
 
+#[inline(always)]
+pub fn get_max_id_struct(tree: &Tree) -> u64 {
+  return tree.last().unwrap()
+    .map(|(key, _)| u64::from_be_bytes(key.as_ref()[8..16].try_into().unwrap()) + 1)
+    .unwrap_or(1);
+}
+
 pub fn get_offsets(data: &[u8], model: &Model) -> Vec<usize> {
   let mut arr = vec![];
   for field in model.fields.iter() {
+    if field.offset_pos == 0 {
+      continue;
+    }
     let offset = get_offset(data, field.offset_pos);
     arr.push(offset);
   }
@@ -700,7 +729,7 @@ pub fn get_offsets(data: &[u8], model: &Model) -> Vec<usize> {
 }
 
 #[inline(always)]
-fn insert_indexes(tx: &WriteTransaction, field: &Field, id: u64, ids: &[u64]) {
+fn insert_indexes(tx: &WriteTransaction, field: &Field, id: &[u8], ids: &[Vec<u8>]) {
   if ids.is_empty() {
     return;
   }
@@ -709,15 +738,15 @@ fn insert_indexes(tx: &WriteTransaction, field: &Field, id: u64, ids: &[u64]) {
     let mut tree = tx.get_tree(index.tree_name()).unwrap().unwrap();
 
     match index {
-      InsertedIndex::Direct { .. } => for &cid in ids { insert_index(&mut tree, id, cid); },
-      InsertedIndex::Rev { .. } => for &cid in ids { insert_index(&mut tree, cid, id); },
+      InsertedIndex::Direct { .. } => for cid in ids { insert_index(&mut tree, id, cid); },
+      InsertedIndex::Rev { .. } => for cid in ids { insert_index(&mut tree, cid, id); },
     }
   }
 }
 
 
 #[inline(always)]
-pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: u64) {
+pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: &[u8]) {
   if field.inserted_indexes.is_empty() {
     return;
   }
@@ -745,6 +774,7 @@ pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: u64) {
   for index in field.inserted_indexes.iter() {
     let InsertedIndex::Direct { tree_name } = index else { continue };
     let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
-    tree.delete_range(id.to_be_bytes()..(id+1).to_be_bytes()).unwrap();
+    let end = increment_bytes_be(id);
+    tree.delete_range(id..&end).unwrap();
   }
 }

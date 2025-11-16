@@ -10,7 +10,7 @@ pub enum MarciSelectError {
 
 impl MarciSelect<'_> {
   pub fn all(fields: &'_[Field]) -> MarciSelect<'_> {
-    return MarciSelect { select: bitvec![1; fields.len()+1], includes: vec![] };
+    return MarciSelect { select: bitvec![1; fields.len()], includes: vec![] };
   }
 }
 
@@ -20,12 +20,8 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
     return Ok(MarciSelect::all(fields));
   }
 
-  let mut changed_mask = bitvec![0; fields.len()+1];
+  let mut changed_mask = bitvec![0; fields.len()];
   let mut includes = vec![];
-
-  if json.get("id").and_then(|i|i.as_bool()).is_some_and(|f| f) {
-    changed_mask.set(0, true);
-  }
 
   for (field_index, field) in fields.iter().enumerate() {
     let Some(val) = json.get(&field.name) else {
@@ -60,9 +56,6 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
       },
       FieldType::Struct(st) => {
         let mut select = parse_select(&st.fields, &val, schema)?;
-        if matches!(val, Value::Bool(true)) {
-          select.select.set(0, false);
-        }
         includes.push(MarciSelectInclude {
           field_index,
           model: st,
@@ -70,7 +63,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
           binding: MarciSelectBinding::OneStruct()
         });
       },
-      FieldType::StructList(st, _) => {
+      FieldType::StructList(st) => {
         let select = parse_select(&st.fields, &val, schema)?;
         includes.push(MarciSelectInclude {
           field_index,
@@ -80,71 +73,61 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
         });
       },
       _ => {
-        changed_mask.set(field_index+1, true);
+        changed_mask.set(field_index, true);
       }
-    }    
-
-    // if let Some(model_ref) = field.derived_from.as_ref() {
-    //   let select = parse_select(model, &val, schema)?;
-    //   let ref_model = &schema.models[model_ref.model_index];
-    //   let ref_field = &ref_model.fields[model_ref.field_index];
-    //   let index_name = ref_field.index_name.as_ref()
-    //       .unwrap_or_else(|| panic!("Index for field {}.{} not found", model.name, field.name))
-    //       .as_bytes();
-
-    //   match field.ty {
-    //       FieldType::ModelRefList(_) => {
-    //         virtual_fields.push(MarciSelectVirtual { 
-    //           field_index, 
-    //           index_name,
-    //           model: ref_model,
-    //           select: Box::new(select)
-    //         });
-    //       },
-    //       _ => {}
-    //   }
-    // } else {
-    //   match field.ty {
-    //     FieldType::ModelRef(model_index)  => {
-    //       let model = &schema.models[model_index];
-    //       let select = parse_select(model, &val, schema)?;
-
-    //       let include = MarciSelectInclude { 
-    //         offset: field.offset_pos, 
-    //         field_index, 
-    //         model, 
-    //         select: Box::new(select), 
-    //         is_array: false 
-    //       };
-    //       includes.push(include);
-    //     }
-
-    //     FieldType::ModelRefList(model_index) => {
-    //       let model = &schema.models[model_index];
-    //       let select = parse_select(model, &val, schema)?;
-
-    //       let include = MarciSelectInclude { 
-    //         offset: field.offset_pos, 
-    //         field_index, model, 
-    //         select: Box::new(select), 
-    //         is_array: true 
-    //       };
-    //       includes.push(include);
-    //     }
-
-    //     FieldType::Struct(ref st) => {
-          
-    //     }
-    //     FieldType::StructList(ref st, _) => {
-          
-    //     }
-
-    //     _ => {
-    //       changed_mask.set(field_index+1, true);
-    //     }
-    //   }
-    // }
+    } 
   }
 
   return Ok(MarciSelect { select: changed_mask, includes: includes })
+}
+
+
+#[cfg(test)]
+mod tests {
+use bitvec::prelude::*;
+use serde_json::json;
+
+use crate::{marci_select::parse_select, schema::parse_schema};
+
+  #[test]
+  fn test_parse_select() {
+    let schema_str = "
+model User {
+  name        String
+  surname     String
+  info        UserInfo
+}
+
+struct UserInfo {
+  bio         String
+}
+";
+    let schema = parse_schema(schema_str);
+    let model = &schema.models[0];
+
+    let input = json!({
+        "name": true
+    });
+    let parsed = parse_select(&model.fields, &input, &schema).unwrap();
+    let mut expect = bitvec::bitvec![0; model.fields.len()];
+    expect.set(1, true);
+    assert_eq!(parsed.select, expect);
+    assert_eq!(parsed.includes.len(), 0);
+    
+    let input = json!({
+        "name": true,
+        "info": true
+    });
+    let parsed = parse_select(&model.fields, &input, &schema).unwrap();
+    let mut expect = bitvec::bitvec![0; model.fields.len()];
+    expect.set(1, true);
+    assert_eq!(parsed.select, expect);
+
+    assert_eq!(parsed.includes.len(), 1);
+
+    let mut expect = bitvec::bitvec![1; parsed.includes[0].model.fields().len()];
+    expect.set(0, true);
+    assert_eq!(parsed.includes[0].select.select, expect);
+    
+  }
 }

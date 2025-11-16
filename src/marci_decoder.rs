@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{FieldType, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{FieldType, Model, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -12,8 +12,7 @@ pub enum DecodeError {
 }
 
 pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
-    let DecodeCtx { data, fields, payload_offset, id, select, includes } = ctx;
-
+    let DecodeCtx { data, fields, key_fields, payload_offset, id, select, includes } = ctx;
     if data.len() < 3 {
         return Err(DecodeError::BufferTooSmall);
     }
@@ -33,14 +32,25 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     }
 
     let mut obj = Map::new();
-    if select[0] {
-        obj.insert("id".to_string(), Value::Number(id.into()));
+    let mut pos = 0;
+    for i in key_fields {
+        if !select[*i] {
+            continue;
+        }
+        let field = &fields[*i];
+        match &field.ty {
+            FieldType::Primitive(primitive) => {
+                let value = decode_value(primitive, id, 0, pos, 0)?;
+                obj.insert(field.name.clone(), value);
+            }
+            _ => {}
+        }
+        pos += 8;
     }
 
     for (field_index, field) in fields.iter().enumerate() {
-        if !select[field_index+1] {
-            continue;
-        }
+        if field.offset_pos == 0 { continue; }
+        if !select[field_index] { continue;  }
 
         let FieldType::Primitive(ref primitive) = field.ty else {
             // пропускаем derived / relation
@@ -87,6 +97,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
 #[inline(always)]
 fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset_pos: usize, offset: usize, payload_offset: usize) -> Result<Value, DecodeError> {
     match ty {
+        // TODO: Create string decoder supports 2 mode: read len from header and read len by terminate character
         PrimitiveFieldType::String => {
             if data.len() < 4 {
                 return Err(DecodeError::BufferTooSmall);
@@ -138,4 +149,21 @@ fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset_pos: usize, offset:
             Ok(Value::Bool(data[offset] != 0))
         }
     }
+}
+
+pub fn decode_id(id: &[u8], model: &Model) -> Result<Value, DecodeError> {
+    let mut obj = Map::new();
+    let mut pos = 0;
+    for i in model.key_fields.iter() {
+        let field = &model.fields[*i];
+        match &field.ty {
+            FieldType::Primitive(primitive) => {
+                let value = decode_value(primitive, id, 0, pos, 0)?;
+                obj.insert(field.name.clone(), value);
+            }
+            _ => {}
+        }
+        pos += 8;
+    }
+    Ok(Value::Object(obj))
 }

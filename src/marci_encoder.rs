@@ -3,21 +3,24 @@ use std::borrow::Borrow;
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{marci_db::InsertStruct, schema::{FieldType, InsertedIndex, Model, PrimitiveFieldType, WithFields}};
+use crate::{marci_db::InsertStruct, schema::{Field, FieldType, InsertedIndex, Model, PrimitiveFieldType, Schema, WithFields}};
 
 #[derive(Debug)]
 pub enum EncodeError {
     NotAnObject,
     MissingField(String),
+    MissingIdField(String),
     TypeMismatch { field: String, expected: &'static str },
     OffsetOverflow,
+    TryWriteToVirtualField,
+    UnavailableKeyField,
     EmptyObject
 }
 
 static EMPTY_ARRAY: Value = Value::Array(vec![]);
 
-/// Кодируем JSON-документ для заданной модели в бинарный формат
-pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<InsertStruct<'a>>) -> Result<(Vec<u8>, BitVec), EncodeError> where T: WithFields {
+/// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные, ключ, и changed_mask
+pub fn encode_document<'a, T>(schema: &'a Schema, model: &'a T, json: &Value, structs: &mut Vec<InsertStruct<'a>>) -> Result<(Vec<u8>,BitVec), EncodeError> where T: WithFields {
     let obj = json
         .as_object()
         .ok_or(EncodeError::NotAnObject)?;
@@ -36,49 +39,41 @@ pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<Inse
 
     let initial_size = buf.len();
 
-    let max_offset_index = model.fields().iter().map(|a| a.offset_index).max().unwrap();
-    let mut changed_mask = bitvec![0; max_offset_index+1];
+    let mut changed_mask = bitvec![0; model.fields().len()];
 
     // Тело
-    for field in model.fields() {
-        let value_opt: Option<&Value> = obj.get(&field.name);
-        let Some(value) = value_opt else {
+    for (field_index, field) in model.fields().iter().enumerate() {
+        let Some(value) = obj.get(&field.name) else {
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
         };
+
+        changed_mask.set(field_index, true);
 
         if value.is_null() {
             match field.ty {
                 FieldType::Struct(ref st) => {
                     structs.push(InsertStruct::None { st: &st });
                 },
-                FieldType::StructList(_, _) => {
+                FieldType::StructList(_) => {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
                 },
                 FieldType::ModelRefList(_) => {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
                 },
-                _ => {
-                    changed_mask.set(field.offset_index, true);
-                }
+                _ => { }
             }
             continue;
         }
 
         match field.ty {
             FieldType::Primitive(primitive_type) => {
-                changed_mask.set(field.offset_index, true);
-
-                // Смещение начала данных этого поля
-                let start = buf.len() as u32;
-                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
-
-                // Кодируем само значение
-                encode_value(&mut buf, &primitive_type, &field.name, value)?;
+                if field.offset_pos != 0 {
+                    write_header(&mut buf, field);
+                    encode_value(&mut buf, field, &primitive_type,  value)?;
+                }
             }
             FieldType::ModelRef(_) => {
-                changed_mask.set(field.offset_index, true);
-
                 if !value.is_object() {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "object" })
                 }
@@ -87,34 +82,31 @@ pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<Inse
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "{ id: u64 }" })
                 };
 
-                let start = buf.len() as u32;
-                buf[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
-
-                encode_value(&mut buf, &PrimitiveFieldType::UInt64, &field.name, item_id)?;
+                if field.offset_pos != 0 {
+                    write_header(&mut buf, field)?;
+                    // TODO: write all key from model, not only id
+                    encode_value(&mut buf, field, &PrimitiveFieldType::UInt64,  item_id)?;
+                }
             }
             FieldType::ModelRefList(model_index) => {
                 let Some(value) = value.as_array() else {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
                 };
 
-                let ids: Vec<u64> = value
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        item.get("id").and_then(|i| i.as_u64()).ok_or_else(|| EncodeError::TypeMismatch {
-                            field: format!("{}[{}]", field.name, index),
-                            expected: "{ id: u64 }"
-                        })
-                    })
-                    .collect::<Result<_, _>>()?; // <---- вот здесь вся магия
+                let ref_model = &schema.models[model_index];
 
-                structs.push(InsertStruct::Connect { field, ref_model: model_index, ids: ids.clone() });
+                let mut ids = Vec::with_capacity(value.len());
+                for obj in value.iter() {
+                    let id = encode_id(ref_model, obj, false)?;
+                    ids.push(id);
+                }
+                structs.push(InsertStruct::Connect { field, ref_model: model_index, ids });
             }
             FieldType::Struct(ref st) => {
-                let (data, changed_values) = encode_document(st, value, structs)?;
+                let (data, changed_values) = encode_document(schema, st, value, structs)?;
                 structs.push(InsertStruct::One { st, changed_mask: changed_values, data });
             }
-            FieldType::StructList(ref st, counter_idx) => {
+            FieldType::StructList(ref st) => {
                 let Some(value) = value.as_array() else {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
                 };
@@ -123,15 +115,12 @@ pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<Inse
                 } else {
                     let mut vec_many = Vec::with_capacity(value.len());
                     for item in value {
-                        if let Some(id) = item.get("id").and_then(|a|a.as_u64()) {
-                            let (data, _) = encode_document(st, item, structs)?;
-                            vec_many.push((Some(id), data));
-                        } else {
-                            let (data, _) = encode_document(st, item, structs)?;
-                            vec_many.push((None, data));
-                        }
+                        let (data, _) = encode_document(schema, st, item, structs)?;
+                        // TODO: skip counter only in insert
+                        let key = encode_id(st, item, true)?;
+                        vec_many.push((key, data));
                     }
-                    structs.push(InsertStruct::Many { st, data: vec_many, counter_idx });
+                    structs.push(InsertStruct::Many { st, data: vec_many });
                 }
             }
             _ => {
@@ -148,34 +137,44 @@ pub fn encode_document<'a, T>(model: &'a T, json: &Value, structs: &mut Vec<Inse
 }
 
 /// Кодирует массив значений и дописывает в конец `dst`
-fn encode_list<T>(
-    dst: &mut Vec<u8>,
-    ty: &PrimitiveFieldType,
-    field_name: &str,
-    v: &[T],
-)  -> Result<(), EncodeError> where T: Borrow<Value> {
-    dst.extend_from_slice(&(v.len() as u32).to_be_bytes());
-    for (index, val) in v.iter().enumerate() {
-        // TODO: remove format! from this
-        encode_value(dst, ty, &format!("{}[{}]", field_name, index), val.borrow())?;
+// fn encode_list<T>(
+//     dst: &mut Vec<u8>,
+//     ty: &PrimitiveFieldType,
+//     field_name: &str,
+//     v: &[T],
+// )  -> Result<(), EncodeError> where T: Borrow<Value> {
+//     dst.extend_from_slice(&(v.len() as u32).to_be_bytes());
+//     for (index, val) in v.iter().enumerate() {
+//         // TODO: remove format! from this
+//         encode_value(dst, ty, &format!("{}[{}]", field_name, index), val.borrow())?;
+//     }
+//     Ok(())
+// }
+
+/// Записывает в offset текущий курсор на buf
+fn write_header(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
+    if field.offset_pos == 0 {
+        return Err(EncodeError::TryWriteToVirtualField);
     }
+    
+    let start = dst.len() as u32;
+    dst[field.offset_pos..field.offset_pos + 4].copy_from_slice(&start.to_be_bytes());
     Ok(())
 }
 
 /// Кодирует одно значение и дописывает в конец `dst`
 fn encode_value(
     dst: &mut Vec<u8>,
+    field: &Field,
     ty: &PrimitiveFieldType,
-    field_name: &str,
     v: &Value,
 ) -> Result<(), EncodeError> {
-
     match ty {
         PrimitiveFieldType::String => {
             let s = v
                 .as_str()
                 .ok_or_else(|| EncodeError::TypeMismatch {
-                    field: field_name.to_string(),
+                    field: field.name.clone(),
                     expected: "string",
                 })?;
             let bytes = s.as_bytes();
@@ -193,7 +192,7 @@ fn encode_value(
               Value::Number(num) => num
                   .as_i64()
                   .ok_or_else(|| EncodeError::TypeMismatch {
-                      field: field_name.to_string(),
+                      field: field.name.clone(),
                       expected: "int64 (epoch) or string (ISO-8601)",
                   })?,
 
@@ -204,7 +203,7 @@ fn encode_value(
                   let dt: DateTime<Utc> = s
                       .parse()
                       .map_err(|_| EncodeError::TypeMismatch {
-                          field: field_name.to_string(),
+                          field: field.name.clone(),
                           expected: "valid ISO-8601 datetime string",
                       })?;
 
@@ -213,7 +212,7 @@ fn encode_value(
 
               _ => {
                   return Err(EncodeError::TypeMismatch {
-                      field: field_name.to_string(),
+                      field: field.name.clone(),
                       expected: "int64 (epoch) or ISO-8601 string",
                   });
               }
@@ -227,12 +226,12 @@ fn encode_value(
                 Value::Number(num) => num
                     .as_i64()
                     .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "int64",
                     })?,
                 _ => {
                     return Err(EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "int64",
                     })
                 }
@@ -244,12 +243,12 @@ fn encode_value(
                 Value::Number(num) => num
                     .as_u64()
                     .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "uint64",
                     })?,
                 _ => {
                     return Err(EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "uint64",
                     })
                 }
@@ -262,12 +261,12 @@ fn encode_value(
                     .as_f64()
                     .map(|f| f as f32)
                     .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "float",
                     })?,
                 _ => {
                     return Err(EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "float",
                     })
                 }
@@ -279,12 +278,12 @@ fn encode_value(
                 Value::Number(num) => num
                     .as_f64()
                     .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "double",
                     })?,
                 _ => {
                     return Err(EncodeError::TypeMismatch {
-                        field: field_name.to_string(),
+                        field: field.name.clone(),
                         expected: "double",
                     })
                 }
@@ -295,7 +294,7 @@ fn encode_value(
             let b = v
                 .as_bool()
                 .ok_or_else(|| EncodeError::TypeMismatch {
-                    field: field_name.to_string(),
+                    field: field.name.clone(),
                     expected: "bool",
                 })?;
             dst.push(if b { 1 } else { 0 });
@@ -305,51 +304,60 @@ fn encode_value(
     Ok(())
 }
 
+pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u8>, EncodeError> where T : WithFields {
+    let mut key_buf = Vec::with_capacity(model.key_min_size());
+
+    for field in model.key_fields().iter().map(|i| model.get_field(*i)) {
+        if field.counter_idx.is_some() && skip_counters {
+            key_buf.extend_from_slice(&[ 0, 0, 0, 0, 0, 0, 0, 0 ]);
+            continue;
+        }
+        let Some(value): Option<&Value> = obj.get(&field.name) else {
+            return Err(EncodeError::MissingIdField(field.name.clone()))
+        };
+        match field.ty {
+            FieldType::Primitive(primitive_type) => {
+                encode_value(&mut key_buf, field, &primitive_type, value)?;
+            }
+            FieldType::ModelRef(_) => {
+                if !value.is_object() {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "object" })
+                }
+                let Some(item_id) = value.get("id") else {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "{ id: u64 }" })
+                };
+                // TODO: write all key from model, not only id
+                encode_value(&mut key_buf, field, &PrimitiveFieldType::UInt64, item_id)?;
+            }
+            _ => {
+                return Err(EncodeError::UnavailableKeyField)
+            }
+        }
+    }
+
+    return Ok(key_buf);
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{marci_db::get_end, marci_encoder::encode_document, schema::{FieldType, Model, PrimitiveFieldType}};
+    use crate::{marci_db::get_end, marci_encoder::{encode_document, encode_id}, schema::{FieldType, Model, PrimitiveFieldType, parse_schema}};
     use serde_json::json;
 
     #[test]
     fn test_encode_simple_document() {
-        // Модель: два поля: name: String, age: Int64
-        let model = Model {
-            name: "User".to_string(),
-            counter_idx: 0,
-            fields: vec![
-                crate::schema::Field {
-                    name: "name".to_string(),
-                    ty: FieldType::Primitive(PrimitiveFieldType::String),
-                    offset_index: 0,
-                    offset_pos: 3,
-                    derived_from: None,
-                    is_nullable: false,
-                    inserted_indexes: vec![], select_index: None,
-                    attributes: vec![]
-                },
-                crate::schema::Field {
-                    name: "age".to_string(),
-                    ty: FieldType::Primitive(PrimitiveFieldType::Int64),
-                    offset_index: 1,
-                    offset_pos: 3 + 1 * 4,
-                    derived_from: None,
-                    is_nullable: false,
-                    inserted_indexes: vec![], select_index: None,
-                    attributes: vec![]
-                },
-                crate::schema::Field {
-                    name: "profile".to_string(),
-                    ty: FieldType::ModelRef(1),
-                    offset_index: 2,
-                    offset_pos: 3 + 2 * 4,
-                    derived_from: None,
-                    is_nullable: false,
-                    inserted_indexes: vec![], select_index: None,
-                    attributes: vec![]
-                },
-            ],
-            payload_offset: 3 + 3 * 4
-        };
+
+        let schema_str = "
+            model User {
+                name        String
+                age         UInt
+                profile     Profile
+            }
+            model Profile {
+                
+            }
+        ";
+        let schema=  parse_schema(schema_str);
+        let model = &schema.models[0];
 
         let input = json!({
             "name": "Alice",
@@ -358,8 +366,8 @@ mod tests {
         });
 
         let mut structs = vec![];
-        let (encoded, _) = encode_document(&model, &input, &mut structs).expect("encode ok");
-
+        let (encoded, _) = encode_document(&schema, model, &input, &mut structs).unwrap();
+        
         // Проверяем версию
         assert_eq!(encoded[0], 1);
 
@@ -377,15 +385,17 @@ mod tests {
         // Проверяем, что смещения действительно указывают на данные
         // name: [len=5][bytes]
         let name_end = get_end(&encoded, 3, model.payload_offset);
-        println!("{} {}", name_end, model.payload_offset);
 
         let name_value = &encoded[offset_name .. name_end];
         assert_eq!(name_value, b"Alice");
-
+        
         // age: i64
         let age_bytes = &encoded[offset_age .. offset_age + 8];
         let age_value = i64::from_be_bytes(age_bytes.try_into().unwrap());
         assert_eq!(age_value, 30);
+        
+        let key_field = encode_id(model, &input, true).unwrap();
+        assert_eq!(key_field, vec![0u8;8])
     }
 }
 

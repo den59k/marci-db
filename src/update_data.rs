@@ -5,7 +5,7 @@ use crate::{marci_db::{get_end, get_offset, move_offsets, set_offset, set_offset
 pub fn update_data(fields: &[Field], payload_offset: usize, data: &[u8], new_data: &[u8], changed_mask: &BitVec) -> Vec<u8> {
   let mut data = data.to_vec();
 
-  for field in fields.iter() {
+  for (field_index, field) in fields.iter().enumerate() {
 
     if field.offset_pos == 0 {
       continue;
@@ -13,7 +13,7 @@ pub fn update_data(fields: &[Field], payload_offset: usize, data: &[u8], new_dat
 
     let update_offset = get_offset(new_data, field.offset_pos);
     // Skip if hasn't new data
-    if !changed_mask[field.offset_index] {
+    if !changed_mask[field_index] {
       continue;
     }
 
@@ -97,7 +97,7 @@ model User {
       "name": "Bob"
     });
     let model = &schema.models[0];
-    let (mut data, _) = encode_document(model, &json, &mut structs).unwrap();
+    let (mut data, _) = encode_document(&schema, model, &json, &mut structs).unwrap();
 
     let payload_offset = u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize;
     assert_eq!(payload_offset, 3 + 4 * 3);
@@ -110,7 +110,7 @@ model User {
     let json_update = json!({
       "age": 30
     });
-    let (new_data, changed_mask) = encode_document(model, &json_update, &mut structs).unwrap();
+    let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
 
     data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
 
@@ -124,7 +124,7 @@ model User {
       "name": "Bobber",
       "surname": "Tester"
     });
-    let (new_data, changed_mask) = encode_document(model, &json_update, &mut structs).unwrap();
+    let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
 
     data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
 
@@ -138,7 +138,7 @@ model User {
       "surname": "",
       "age": 80
     });
-    let (new_data, changed_mask) = encode_document(model, &json_update, &mut structs).unwrap();
+    let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
 
     data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
 

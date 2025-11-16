@@ -13,8 +13,8 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 
 use crate::marci_db::{MarciDB, MarciSelect};
-use crate::marci_decoder::decode_document;
-use crate::marci_encoder::encode_document;
+use crate::marci_decoder::{decode_document, decode_id};
+use crate::marci_encoder::{encode_document, encode_id};
 use crate::marci_select::{parse_select};
 use crate::schema::parse_schema;
 
@@ -55,18 +55,20 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             // db.insert(json_val.clone()); // пример
 
             let mut structs = vec![];
-            let (data, _) = match encode_document(model, &json_val, &mut structs) {
+            let (data, _) = match encode_document(&db.schema, model, &json_val, &mut structs) {
+                Ok(result) => result,
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
+            };
+            let mut id = match encode_id(model, &json_val, true) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
             
-            let new_id = match db.insert_data(model, &data, &structs) {
-                Ok(result) => result,
-                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
-            };
+            if let Err(err) = db.insert_data(model, &mut id, &data, &structs) {
+                return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err)));
+            }
 
-            // Возвращаем успешный ответ
-            let body = Bytes::from(format!("{{ \"id\": {new_id} }}"));
+            let body = Bytes::from(decode_id(&id, model).unwrap().to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
@@ -119,22 +121,23 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             let Ok(json_val): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
-            let Some(id) = json_val.get("id").and_then(|a| a.as_u64()) else {
-                return Ok(error(StatusCode::BAD_REQUEST, "ID field required"));
-            };
 
             let mut structs = vec![];
-            let (new_data, changed_mask) = match encode_document(model, &json_val, &mut structs) {
+            let (new_data, changed_mask) = match encode_document(&db.schema, model, &json_val, &mut structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let item_id = match db.update(model,  id, &new_data, changed_mask, &structs) {
+            let key = match encode_id(model, &json_val, false) {
                 Ok(result) => result,
-                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err))) 
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let body = Bytes::from(format!("{{ \"id\": {} }}", item_id));
+            if let Err(err) =  db.update(model, &key, &new_data, changed_mask, &structs) {
+               return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err)));
+            }
+
+            let body = Bytes::from(decode_id(&key, model).unwrap().to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }

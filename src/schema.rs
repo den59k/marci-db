@@ -44,9 +44,9 @@ impl Iterator for SchemaIter {
 pub struct Model {
     pub name: String,
     pub fields: Vec<Field>,
-    pub counter_idx: usize,
     // Count of fields
-    pub payload_offset: usize
+    pub payload_offset: usize,
+    pub key_fields: Vec<usize>
 }
 
 #[derive(Debug,Clone)]
@@ -68,14 +68,21 @@ impl InsertedIndex {
 pub struct Field {
     pub name: String,
     pub ty: FieldType,
-    // field offset index. In bytes offset is (3 + offset_index*3)
-    pub offset_index: usize,
+    // Offset in bytes  (3 + offset_index*4)
     pub offset_pos: usize,
     pub is_nullable: bool,
+    pub is_id: bool,
+    pub counter_idx: Option<usize>,
     pub inserted_indexes: Vec<InsertedIndex>,
     pub select_index: Option<String>,
     pub attributes: Vec<Attribute>,
     pub derived_from: Option<ModelRef>
+}
+
+impl Field {
+    pub fn is_derived(&self) -> bool {
+        self.attributes.iter().any(|attr| matches!(attr, Attribute::DerivedUnresolved { .. }))
+    }
 }
 
 #[derive(Debug,Clone)]
@@ -83,26 +90,36 @@ pub struct Struct {
     /// Полное имя (для таблицы) (base_table + base_field)
     pub name: String,
     pub fields: Vec<Field>,
-    pub payload_offset: usize
+    pub payload_offset: usize,
+    pub key_fields: Vec<usize>
 }
 
 pub trait WithFields {
     fn tree_name(&self) -> &[u8];
     fn fields(&self) -> &[Field];
+    fn get_field(&self, idx: usize) -> &Field;
     fn payload_offset(&self) -> usize;
     fn is_model(&self) -> bool;
+    fn key_fields(&self) -> &[usize];
+
+    // fn key_fields(&self) -> Vec<&Field> { self.fields().iter().filter(|f| f.is_id).collect() }
+    fn key_min_size(&self) -> usize { self.fields().iter().filter(|f| f.is_id).map(|_| 8).sum() }
 }
 impl WithFields for Model {
     fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
     fn fields(&self) -> &[Field] { &self.fields }
+    fn get_field(&self, idx: usize) -> &Field { &self.fields[idx] }
     fn payload_offset(&self) -> usize { self.payload_offset }
     fn is_model(&self) -> bool { true }
+    fn key_fields(&self) -> &[usize] { &self.key_fields }
 }
 impl WithFields for Struct {
     fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
     fn fields(&self) -> &[Field] { &self.fields }
+    fn get_field(&self, idx: usize) -> &Field { &self.fields[idx] }
     fn payload_offset(&self) -> usize { self.payload_offset }
     fn is_model(&self) -> bool { false }
+    fn key_fields(&self) -> &[usize] { &self.key_fields }
 }
 
 #[derive(Debug,Clone,PartialEq, Eq,Hash,PartialOrd)]
@@ -152,13 +169,14 @@ pub enum FieldType {
     ModelRefList(usize),
     PrimitiveList(PrimitiveFieldType),
     Struct(Struct),
-    StructList(Struct,usize)
+    StructList(Struct)
 }
 
 #[derive(Debug,Clone)]
 pub enum Attribute {
     Index,
     DerivedUnresolved { model: String, field: String },
+    Id
 }
 
 fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> (Vec<Field>, usize) {
@@ -172,11 +190,9 @@ fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> (Vec<Fi
 
         let mut field = parse_field_raw(line);
 
-        let is_derived = field.attributes.iter().any(|f| matches!(f, Attribute::DerivedUnresolved { .. }));
         let is_virtual = matches!(field.ty, FieldType::RefListUnresolved(_));
 
-        if !is_virtual && !is_derived { 
-            field.offset_index = offset_index;
+        if !is_virtual && !field.is_derived() && !field.is_id { 
             field.offset_pos = 3 + offset_index * 4;
             offset_index += 1;
         }
@@ -185,19 +201,45 @@ fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> (Vec<Fi
     return (fields, offset_index);
 }
 
+// Parsing key fields and insert <id> key
+pub fn parse_key_fields(fields: &mut Vec<Field>) -> Vec<usize> {
+    let mut key_fields: Vec<usize> = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, field)| field.is_id.then_some(idx)).collect();
+
+    if key_fields.is_empty() {
+        fields.insert(0, Field { 
+            name: "id".to_string(), 
+            ty: FieldType::Primitive(PrimitiveFieldType::UInt64), 
+            offset_pos: 0, 
+            is_nullable: false, 
+            inserted_indexes: vec![], 
+            select_index: None, 
+            is_id: true,
+            attributes: vec![Attribute::Id], 
+            derived_from: None,
+            counter_idx: Some(0)
+        });
+        key_fields.push(0);
+    }
+    return key_fields;
+}
+
 pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Model {
 
-    let (fields, offset_index) = parse_fields(lines);
+    let (mut fields, offset_index) = parse_fields(lines);
+    let key_fields = parse_key_fields(&mut fields);
 
     let payload_offset = 3 + offset_index * 4;
-    return Model { name, fields, payload_offset, counter_idx: 0 };
+    return Model { name, fields, payload_offset, key_fields };
 }
 
 pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Struct {
     let (fields, offset_index) = parse_fields(lines);
     let payload_offset = 3 + offset_index * 4;
 
-    return Struct { name: String::new(), fields: fields, payload_offset }
+    return Struct { name: String::new(), fields: fields, payload_offset, key_fields: vec![] }
 }
 
 pub fn parse_schema(input: &str) -> Schema {
@@ -233,43 +275,13 @@ pub fn parse_schema(input: &str) -> Schema {
     let model_by_name = build_model_map(&schema);
     let field_by_name = build_field_map(&schema);
 
-    let model_names: Vec<String> = schema.models.iter().map(|i| i.name.clone()).collect();
+    // let model_names: Vec<String> = schema.models.iter().map(|i| i.name.clone()).collect();
+    // let mut indexes: Vec<ModelRef> = vec![];
 
-    let mut indexes: Vec<ModelRef> = vec![];
     let mut bindings: HashSet<(ModelRef,ModelRef)> = HashSet::new();
 
-    // resolve types and attributes
-    for field_ref in schema.iter() {
-        let model_name = schema.models[field_ref.model_index].name.clone();
-        let field = schema.get_field_mut(&field_ref);
-
-        resolve_field_type(&mut field.ty, &model_by_name, &structs);
-
-        if let FieldType::Struct(st) = &mut field.ty {
-            st.name = format!("{}.{}", model_name, field.name)
-        }
-        if let FieldType::ModelRefList(_) = &field.ty {
-            let index_name = format!("{}.{}", model_name, field.name);
-            field.inserted_indexes.push(InsertedIndex::Direct { tree_name: index_name.clone() });
-            field.select_index = Some(index_name)
-        }
-
-        for attr in &mut field.attributes {
-            if let Attribute::DerivedUnresolved { model: model_name, field: field_name } = attr {
-                let m = model_by_name[model_name];
-                let f: usize = field_by_name[m][field_name];
-                let derived_ref = ModelRef::new(m, f);
-                field.derived_from = Some(derived_ref.clone());
-                let field_ref = field_ref.clone();
-                let key: (ModelRef,ModelRef) = if derived_ref > field_ref { (field_ref,derived_ref) } else { (field_ref,derived_ref) };
-                bindings.insert(key);
-            }
-        }
-
-        // let is_index = field.attributes.iter().any(|i| matches!(i, Attribute::Index));
-        // if is_index {
-        //     field.index_name = Some(format!("{}.{}.idx", model.name, field.name));
-        // }
+    for (model_index, model) in schema.models.iter_mut().enumerate() {
+        resolve_fields(&mut model.fields, model_index, &model.name, &model_by_name, &field_by_name, &structs, &mut bindings);
     }
 
     for (a, b) in bindings {
@@ -300,13 +312,29 @@ fn parse_field_raw(line: &str) -> Field {
     let attributes = line.split_once('@')
         .map(|(_, attr)| parse_attribute(attr.trim()))
         .unwrap_or_else(Vec::new);
+    let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
 
-    Field { name, ty, offset_index: 0, offset_pos: 0, attributes, is_nullable, derived_from: None, inserted_indexes: vec![], select_index: None }
+    Field { 
+        name, 
+        ty, 
+        offset_pos: 0, 
+        attributes, 
+        is_nullable, 
+        derived_from: None, 
+        inserted_indexes: vec![], 
+        select_index: None, 
+        counter_idx: None, 
+        is_id
+    }
 }
 
 fn parse_attribute(s: &str) -> Vec<Attribute> {
     if s.starts_with("index") {
         return vec![Attribute::Index];
+    }
+
+    if s.starts_with("id") {
+        return vec![Attribute::Id];
     }
 
     if let Some(inside) = s.strip_prefix("derived(").and_then(|x| x.strip_suffix(')')) {
@@ -350,23 +378,61 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
 //     matches!(s, "String" | "DateTime" | "Bool" | "Int" | "Float")
 // }
 
-fn resolve_field_type(ty: &mut FieldType, model_by_name: &HashMap<String, usize>, structs: &HashMap<String, Struct>) {
-    match ty {
-        FieldType::RefUnresolved(name) => {
-            if let Some(st) = structs.get(name) {
-                *ty = FieldType::Struct(st.clone());
-            } else {
-                *ty = FieldType::ModelRef(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+fn resolve_fields(
+    fields: &mut Vec<Field>,
+    model_index: usize,
+    model_name: &str, 
+    model_by_name: &HashMap<String, usize>, 
+    field_by_name: &Vec<HashMap<String, usize>>,
+    structs: &HashMap<String, Struct>,
+    bindings: &mut HashSet<(ModelRef,ModelRef)>
+) {
+    for (field_index, field) in fields.iter_mut().enumerate() {
+
+        match &field.ty {
+            FieldType::RefUnresolved(name) => {
+                if let Some(st) = structs.get(name) {
+                    let mut st = st.clone();
+                    st.name = format!("{}.{}", model_name, field.name);
+                    resolve_fields(&mut st.fields, model_index, &st.name, model_by_name, field_by_name, structs, bindings);
+                    field.ty = FieldType::Struct(st);
+                } else {
+                    field.ty = FieldType::ModelRef(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+                }
+            }
+            FieldType::RefListUnresolved(name) => {
+                if let Some(st) = structs.get(name) {
+                    let mut st = st.clone();
+                    st.name = format!("{}.{}", model_name, field.name);
+                    st.key_fields = parse_key_fields(&mut st.fields);
+                    resolve_fields(&mut st.fields, model_index, &st.name, model_by_name, field_by_name, structs, bindings);
+                    field.ty = FieldType::StructList(st.clone());
+                } else {
+                    field.ty = FieldType::ModelRefList(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
+                }
+            }
+            _ => {}
+        }
+
+        if let FieldType::ModelRefList(_) = &field.ty {
+            let index_name = format!("{}.{}", model_name, field.name);
+            field.inserted_indexes.push(InsertedIndex::Direct { tree_name: index_name.clone() });
+            field.select_index = Some(index_name)
+        }
+
+        for attr in &mut field.attributes {
+            if let Attribute::DerivedUnresolved { model: ref_model_name, field: field_name } = attr {
+                let m = *model_by_name.get(ref_model_name)
+                    .expect(&format!("ERROR {}.{}: Not found model {}", &model_name, &field.name, &ref_model_name));
+
+                let f: usize = field_by_name[m][field_name];
+                let derived_ref = ModelRef::new(m, f);
+                field.derived_from = Some(derived_ref.clone());
+                let field_ref = ModelRef { model_index, field_index };
+                let key: (ModelRef,ModelRef) = if derived_ref > field_ref { (field_ref,derived_ref) } else { (field_ref,derived_ref) };
+                bindings.insert(key);
             }
         }
-        FieldType::RefListUnresolved(name) => {
-            if let Some(st) = structs.get(name) {
-                *ty = FieldType::StructList(st.clone(),0);
-            } else {
-                *ty = FieldType::ModelRefList(*model_by_name.get(name).expect(&format!("Not found type {}", name)));
-            }
-        }
-        _ => {}
     }
 }
 

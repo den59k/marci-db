@@ -4,7 +4,7 @@ model User {
   surname     String
   info        UserInfo
   posts       Post[]        @derived(Post.author)
-  projects    UserRole[]    @derived(UserRole.user)
+  projects    Project[]     @derived(Project.users.user)
 }
 
 struct UserInfo {
@@ -20,12 +20,11 @@ model Post {
 
 model Project {
   name        String
-  users       UserRole[]    @derived(UserRole.project)
+  users       UserRole[]
 }
 
-model UserRole {
-  user        User          
-  project     Project       
+struct UserRole {
+  user        User          @id
   role        String
 }
 
