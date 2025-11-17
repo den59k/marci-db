@@ -64,7 +64,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
             
-            if let Err(err) = db.insert_data(model, &mut id, &data, &structs) {
+            if let Err(err) = db.insert_data(model, &mut id, &data, &mut structs) {
                 return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err)));
             }
 

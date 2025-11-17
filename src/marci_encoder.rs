@@ -19,7 +19,8 @@ pub enum EncodeError {
 
 static EMPTY_ARRAY: Value = Value::Array(vec![]);
 
-/// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные, ключ, и changed_mask
+/// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные и changed_mask
+/// Не все данные записываются в document, используйте также функцию encode_id для кодирования полей в ID
 pub fn encode_document<'a, T>(schema: &'a Schema, model: &'a T, json: &Value, structs: &mut Vec<InsertStruct<'a>>) -> Result<(Vec<u8>,BitVec), EncodeError> where T: WithFields {
     let obj = json
         .as_object()
@@ -116,6 +117,9 @@ pub fn encode_document<'a, T>(schema: &'a Schema, model: &'a T, json: &Value, st
                     let mut vec_many = Vec::with_capacity(value.len());
                     for item in value {
                         let (data, _) = encode_document(schema, st, item, structs)?;
+                        // TODO: get base_key_size from model struct
+                        // let base_key = [0u8; 8];
+
                         // TODO: skip counter only in insert
                         let key = encode_id(st, item, true)?;
                         vec_many.push((key, data));
@@ -307,9 +311,25 @@ fn encode_value(
 pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u8>, EncodeError> where T : WithFields {
     let mut key_buf = Vec::with_capacity(model.key_min_size());
 
+    encode_id_internal(&mut key_buf, model, obj, skip_counters)?;
+
+    return Ok(key_buf);
+}
+
+pub fn encode_id_with_prefix<T>(model: &T, obj: &Value, prefix: &[u8], skip_counters: bool) -> Result<Vec<u8>, EncodeError> where T : WithFields {
+    let mut key_buf = Vec::with_capacity(prefix.len() + model.key_min_size());
+
+    key_buf.extend_from_slice(prefix);
+    encode_id_internal(&mut key_buf, model, obj, skip_counters)?;
+
+    return Ok(key_buf);
+}
+
+fn encode_id_internal<T>(key_buf: &mut Vec<u8>, model: &T, obj: &Value, skip_counters: bool) -> Result<(), EncodeError> where T : WithFields {
+
     for field in model.key_fields().iter().map(|i| model.get_field(*i)) {
         if field.counter_idx.is_some() && skip_counters {
-            key_buf.extend_from_slice(&[ 0, 0, 0, 0, 0, 0, 0, 0 ]);
+            key_buf.extend_from_slice(&[ 0u8;8 ]);
             continue;
         }
         let Some(value): Option<&Value> = obj.get(&field.name) else {
@@ -317,7 +337,7 @@ pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u
         };
         match field.ty {
             FieldType::Primitive(primitive_type) => {
-                encode_value(&mut key_buf, field, &primitive_type, value)?;
+                encode_value(key_buf, field, &primitive_type, value)?;
             }
             FieldType::ModelRef(_) => {
                 if !value.is_object() {
@@ -327,7 +347,7 @@ pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "{ id: u64 }" })
                 };
                 // TODO: write all key from model, not only id
-                encode_value(&mut key_buf, field, &PrimitiveFieldType::UInt64, item_id)?;
+                encode_value(key_buf, field, &PrimitiveFieldType::UInt64, item_id)?;
             }
             _ => {
                 return Err(EncodeError::UnavailableKeyField)
@@ -335,12 +355,12 @@ pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u
         }
     }
 
-    return Ok(key_buf);
+    return Ok(());
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{marci_db::get_end, marci_encoder::{encode_document, encode_id}, schema::{FieldType, Model, PrimitiveFieldType, parse_schema}};
+    use crate::{marci_db::{InsertStruct, get_end, get_offsets}, marci_encoder::{encode_document, encode_id}, schema::{FieldType, Model, PrimitiveFieldType, parse_schema}};
     use serde_json::json;
 
     #[test]
@@ -397,5 +417,57 @@ mod tests {
         let key_field = encode_id(model, &input, true).unwrap();
         assert_eq!(key_field, vec![0u8;8])
     }
+
+    #[test]
+    fn test_encode_struct_data() {
+        let schema_str = "
+            model User {
+                name        String
+            }
+
+            model Project {
+                name        String
+                users       UserRole[]
+            }
+
+            struct UserRole {
+                user        User          @id
+                role        String
+            }
+        ";
+
+        let schema=  parse_schema(schema_str);
+        let model = &schema.models[1];
+
+        let input = json!({
+            "name": "First project",
+            "users": [{ 
+                "user": { "id": 1 },
+                "role": "creator"
+            }]
+        });
+
+        let mut structs = vec![];
+        let (encoded, _) = encode_document(&schema, model, &input, &mut structs).unwrap();
+        
+        // Проверяем версию
+        assert_eq!(encoded[0], 1);
+
+        assert_eq!(get_offsets(&encoded, model), vec![7]); // 3 bytes + 4 byte offset
+        assert_eq!(structs.len(), 1);
+
+        let InsertStruct::Many { st, data } = &structs[0] else {
+            panic!("Expected InsertStruct::Many, found {:?}", structs[0]);
+        };
+
+        assert_eq!(data.len(), 1);
+        // Мы записываем user в ключ
+        assert_eq!(&data[0].0, &[0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(get_offsets(&data[0].1, *st), vec![7]);
+
+        // assert_eq!()
+
+    }   
+
 }
 

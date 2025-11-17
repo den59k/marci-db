@@ -37,10 +37,11 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
         let select = parse_select(&model.fields, &val, schema)?;
 
         includes.push(MarciSelectInclude {
-          field_index,
+          field,
           model,
           select,
-          binding: MarciSelectBinding::One(field.offset_pos)
+          select_only_id: false,
+          binding: MarciSelectBinding::One()
         });
       },
       FieldType::ModelRefList(model_index) => {
@@ -48,27 +49,30 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
         let select = parse_select(&model.fields, &val, schema)?;
         let tree_name = field.select_index.as_ref().expect("Index not found").as_bytes();
         includes.push(MarciSelectInclude {
-          field_index,
+          field,
           model,
           select,
+          select_only_id: false,
           binding: MarciSelectBinding::Many(tree_name)
         });
       },
       FieldType::Struct(st) => {
-        let mut select = parse_select(&st.fields, &val, schema)?;
+        let select = parse_select(&st.fields, &val, schema)?;
         includes.push(MarciSelectInclude {
-          field_index,
+          field,
           model: st,
           select,
+          select_only_id: false,
           binding: MarciSelectBinding::OneStruct()
         });
       },
       FieldType::StructList(st) => {
         let select = parse_select(&st.fields, &val, schema)?;
         includes.push(MarciSelectInclude {
-          field_index,
+          field,
           model: st,
           select,
+          select_only_id: false,
           binding: MarciSelectBinding::ManyStruct()
         });
       },
@@ -76,6 +80,18 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
         changed_mask.set(field_index, true);
       }
     } 
+  }
+
+  for include in includes.iter_mut() { 
+    include.select_only_id = !include.model
+      .fields()
+      .iter()
+      .enumerate()
+      .any(|(idx, field)| include.select.select[idx] && field.id_idx.is_none());
+
+    if include.select_only_id {
+      // println!("Optimize field (set only id): {:?}", include.field.name);
+    }
   }
 
   return Ok(MarciSelect { select: changed_mask, includes: includes })

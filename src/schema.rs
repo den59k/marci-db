@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, fmt::Debug};
 
 #[derive(Debug)]
 pub struct Schema {
@@ -68,10 +68,11 @@ impl InsertedIndex {
 pub struct Field {
     pub name: String,
     pub ty: FieldType,
-    // Offset in bytes  (3 + offset_index*4)
+    /// Offset in bytes  (3 + offset_index*4)
     pub offset_pos: usize,
     pub is_nullable: bool,
-    pub is_id: bool,
+    /// Position in ID key (just index, not bytes)
+    pub id_idx: Option<usize>,
     pub counter_idx: Option<usize>,
     pub inserted_indexes: Vec<InsertedIndex>,
     pub select_index: Option<String>,
@@ -94,23 +95,23 @@ pub struct Struct {
     pub key_fields: Vec<usize>
 }
 
-pub trait WithFields {
+pub trait WithFields: Debug {
     fn tree_name(&self) -> &[u8];
     fn fields(&self) -> &[Field];
     fn get_field(&self, idx: usize) -> &Field;
     fn payload_offset(&self) -> usize;
-    fn is_model(&self) -> bool;
+    // fn is_model(&self) -> bool;
     fn key_fields(&self) -> &[usize];
 
     // fn key_fields(&self) -> Vec<&Field> { self.fields().iter().filter(|f| f.is_id).collect() }
-    fn key_min_size(&self) -> usize { self.fields().iter().filter(|f| f.is_id).map(|_| 8).sum() }
+    fn key_min_size(&self) -> usize { self.fields().iter().filter(|f| f.id_idx.is_some()).map(|_| 8).sum() }
 }
 impl WithFields for Model {
     fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
     fn fields(&self) -> &[Field] { &self.fields }
     fn get_field(&self, idx: usize) -> &Field { &self.fields[idx] }
     fn payload_offset(&self) -> usize { self.payload_offset }
-    fn is_model(&self) -> bool { true }
+    // fn is_model(&self) -> bool { true }
     fn key_fields(&self) -> &[usize] { &self.key_fields }
 }
 impl WithFields for Struct {
@@ -118,7 +119,7 @@ impl WithFields for Struct {
     fn fields(&self) -> &[Field] { &self.fields }
     fn get_field(&self, idx: usize) -> &Field { &self.fields[idx] }
     fn payload_offset(&self) -> usize { self.payload_offset }
-    fn is_model(&self) -> bool { false }
+    // fn is_model(&self) -> bool { false }
     fn key_fields(&self) -> &[usize] { &self.key_fields }
 }
 
@@ -192,7 +193,7 @@ fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> (Vec<Fi
 
         let is_virtual = matches!(field.ty, FieldType::RefListUnresolved(_));
 
-        if !is_virtual && !field.is_derived() && !field.is_id { 
+        if !is_virtual && !field.is_derived() && !field.id_idx.is_some() { 
             field.offset_pos = 3 + offset_index * 4;
             offset_index += 1;
         }
@@ -206,7 +207,7 @@ pub fn parse_key_fields(fields: &mut Vec<Field>) -> Vec<usize> {
     let mut key_fields: Vec<usize> = fields
         .iter()
         .enumerate()
-        .filter_map(|(idx, field)| field.is_id.then_some(idx)).collect();
+        .filter_map(|(idx, field)| field.id_idx.is_some().then_some(idx)).collect();
 
     if key_fields.is_empty() {
         fields.insert(0, Field { 
@@ -216,12 +217,16 @@ pub fn parse_key_fields(fields: &mut Vec<Field>) -> Vec<usize> {
             is_nullable: false, 
             inserted_indexes: vec![], 
             select_index: None, 
-            is_id: true,
+            id_idx: Some(0),
             attributes: vec![Attribute::Id], 
             derived_from: None,
             counter_idx: Some(0)
         });
         key_fields.push(0);
+    } else {
+        for (idx, field_index) in key_fields.iter().enumerate() {
+            fields[*field_index].id_idx = Some(idx)
+        }
     }
     return key_fields;
 }
@@ -324,7 +329,7 @@ fn parse_field_raw(line: &str) -> Field {
         inserted_indexes: vec![], 
         select_index: None, 
         counter_idx: None, 
-        is_id
+        id_idx: is_id.then_some(0)
     }
 }
 

@@ -6,6 +6,7 @@ use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{
 pub enum DecodeError {
     WrongVersion,
     BufferTooSmall,
+    EmptyPayload,
     Utf8Error,
     TypeMismatch(String),
     OffsetOutOfRange,
@@ -13,22 +14,25 @@ pub enum DecodeError {
 
 pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     let DecodeCtx { data, fields, key_fields, payload_offset, id, select, includes } = ctx;
-    if data.len() < 3 {
-        return Err(DecodeError::BufferTooSmall);
-    }
 
-    let version = data[0];
-    if version != 1 {
-        return Err(DecodeError::WrongVersion);
-    }
-
-    if u16::from_be_bytes([data[1], data[2]]) != payload_offset as u16 {
-        let offset = u16::from_be_bytes([data[1], data[2]]);
-        return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", payload_offset, offset)));
-    }
-
-    if data.len() < payload_offset {
-        return Err(DecodeError::BufferTooSmall);
+    if !data.is_empty() {
+        if data.len() < 3 {
+            return Err(DecodeError::BufferTooSmall);
+        }
+    
+        let version = data[0];
+        if version != 1 {
+            return Err(DecodeError::WrongVersion);
+        }
+    
+        if u16::from_be_bytes([data[1], data[2]]) != payload_offset as u16 {
+            let offset = u16::from_be_bytes([data[1], data[2]]);
+            return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", payload_offset, offset)));
+        }
+    
+        if data.len() < payload_offset {
+            return Err(DecodeError::BufferTooSmall);
+        }
     }
 
     let mut obj = Map::new();
@@ -51,6 +55,9 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     for (field_index, field) in fields.iter().enumerate() {
         if field.offset_pos == 0 { continue; }
         if !select[field_index] { continue;  }
+        if data.is_empty() {
+            return Err(DecodeError::EmptyPayload);
+        }
 
         let FieldType::Primitive(ref primitive) = field.ty else {
             // пропускаем derived / relation
@@ -78,15 +85,15 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
 
     for include in includes {
         match include {
-            IncludeResult::None(field_index) => {
-                obj.insert(fields[field_index].name.clone(), Value::Null);
+            IncludeResult::None(field) => {
+                obj.insert(field.name.clone(), Value::Null);
             },
-            IncludeResult::One(field_index, val) => {
-                obj.insert(fields[field_index].name.clone(), val);
+            IncludeResult::One(field, val) => {
+                obj.insert(field.name.clone(), val);
             },
-            IncludeResult::Many(field_index, val) => {
+            IncludeResult::Many(field, val) => {
                 let vec = Value::Array(val);
-                obj.insert(fields[field_index].name.clone(), vec);
+                obj.insert(field.name.clone(), vec);
             }
         }
     }
