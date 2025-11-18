@@ -2,7 +2,7 @@
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{marci_db::InsertStruct, schema::{Field, FieldType, PrimitiveFieldType, Schema, WithFields}};
+use crate::{marci_db::InsertStruct, schema::{Entity, Field, FieldType, PrimitiveFieldType, Schema}};
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -16,7 +16,7 @@ pub enum EncodeError {
 
 /// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные и changed_mask
 /// Не все данные записываются в document, используйте также функцию encode_id для кодирования полей в ID
-pub fn encode_document<'a, T>(schema: &'a Schema, model: &'a T, json: &Value, structs: &mut Vec<InsertStruct<'a>>) -> Result<(Vec<u8>,BitVec), EncodeError> where T: WithFields {
+pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, structs: &mut Vec<InsertStruct<'a>>) -> Result<(Vec<u8>,BitVec), EncodeError> {
     let obj = json
         .as_object()
         .ok_or(EncodeError::NotAnObject)?;
@@ -24,21 +24,21 @@ pub fn encode_document<'a, T>(schema: &'a Schema, model: &'a T, json: &Value, st
     const VERSION: u8 = 1;
 
     // [version: u8] + [field_count: u16] + [offsets: N * u32]
-    let mut buf = Vec::with_capacity(model.payload_offset() + 128);
+    let mut buf = Vec::with_capacity(model.payload_offset + 128);
 
     // version
     buf.push(VERSION);
     // field_count
-    buf.extend_from_slice(&(model.payload_offset() as u16).to_be_bytes());
+    buf.extend_from_slice(&(model.payload_offset as u16).to_be_bytes());
     // offsets (плейсхолдеры)
-    buf.resize(model.payload_offset(), 0);
+    buf.resize(model.payload_offset, 0);
 
     let initial_size = buf.len();
 
-    let mut changed_mask = bitvec![0; model.fields().len()];
+    let mut changed_mask = bitvec![0; model.fields.len()];
 
     // Тело
-    for (field_index, field) in model.fields().iter().enumerate() {
+    for (field_index, field) in model.fields.iter().enumerate() {
         let Some(value) = obj.get(&field.name) else {
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
@@ -303,7 +303,7 @@ fn encode_value(
     Ok(())
 }
 
-pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u8>, EncodeError> where T : WithFields {
+pub fn encode_id(model: &Entity, obj: &Value, skip_counters: bool) -> Result<Vec<u8>, EncodeError> {
     let mut key_buf = Vec::with_capacity(model.key_min_size());
 
     encode_id_internal(&mut key_buf, model, obj, skip_counters)?;
@@ -311,7 +311,7 @@ pub fn encode_id<T>(model: &T, obj: &Value, skip_counters: bool) -> Result<Vec<u
     return Ok(key_buf);
 }
 
-pub fn encode_id_with_prefix<T>(model: &T, obj: &Value, prefix: &[u8], skip_counters: bool) -> Result<Vec<u8>, EncodeError> where T : WithFields {
+pub fn encode_id_with_prefix(model: &Entity, obj: &Value, prefix: &[u8], skip_counters: bool) -> Result<Vec<u8>, EncodeError> {
     let mut key_buf = Vec::with_capacity(prefix.len() + model.key_min_size());
 
     key_buf.extend_from_slice(prefix);
@@ -320,9 +320,9 @@ pub fn encode_id_with_prefix<T>(model: &T, obj: &Value, prefix: &[u8], skip_coun
     return Ok(key_buf);
 }
 
-fn encode_id_internal<T>(key_buf: &mut Vec<u8>, model: &T, obj: &Value, skip_counters: bool) -> Result<(), EncodeError> where T : WithFields {
+fn encode_id_internal(key_buf: &mut Vec<u8>, model: &Entity, obj: &Value, skip_counters: bool) -> Result<(), EncodeError> {
 
-    for field in model.fields() {
+    for field in model.fields.iter() {
         if field.id_idx.is_none() { continue; }
         if field.counter_idx.is_some() && skip_counters {
             key_buf.extend_from_slice(&[ 0u8;8 ]);

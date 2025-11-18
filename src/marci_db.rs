@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, u64}
 use bitvec::{index, vec::BitVec};
 use canopydb::{Database, Environment, ReadTransaction, Transaction, Tree, WriteTransaction};
 
-use crate::{schema::{Field, FieldType, InsertedIndex, Model, Schema, Struct, WithFields}, update_data::update_data};
+use crate::{schema::{Field, FieldType, InsertedIndex, Entity, Schema}, update_data::update_data};
 
 pub struct MarciDB {
   pub db: Database,
@@ -14,7 +14,7 @@ pub struct MarciDB {
 #[derive(Debug)]
 pub struct MarciSelectInclude<'a> {
   pub field: &'a Field,
-  pub model: &'a dyn WithFields,
+  pub model: &'a Entity,
   pub select: MarciSelect<'a>,
   pub select_only_id: bool,
   pub binding: MarciSelectBinding<'a>,
@@ -31,7 +31,7 @@ pub enum MarciSelectBinding<'a> {
 pub struct MarciSelectVirtual<'a> {
   pub field_index: usize,
   pub index_name: &'a[u8],
-  pub model: &'a Model,
+  pub model: &'a Entity,
   pub select: Box<MarciSelect<'a>>
 }
 
@@ -44,8 +44,7 @@ pub struct MarciSelect<'a> {
 pub struct DecodeCtx<'a, U> {
   pub id: &'a [u8],
   pub data: &'a [u8],
-  pub fields: &'a [Field],
-  pub payload_offset: usize,
+  pub entity: &'a Entity,
   pub select: &'a BitVec,
   pub includes: Vec<IncludeResult<'a, U>>,
 }
@@ -53,18 +52,18 @@ pub struct DecodeCtx<'a, U> {
 #[derive(Debug)]
 pub enum InsertStruct<'a> {
     None {
-        st: &'a Struct,
+        st: &'a Entity,
     },
     Empty {
-      st: &'a Struct,
+      st: &'a Entity,
     },
     One {
-        st: &'a Struct,
+        st: &'a Entity,
         changed_mask: BitVec,
         data: Vec<u8>,
     },
     Many {
-        st: &'a Struct,
+        st: &'a Entity,
         data: Vec<(Vec<u8>,Vec<u8>)>,
     },
     Connect {
@@ -73,14 +72,14 @@ pub enum InsertStruct<'a> {
         ids: Vec<Vec<u8>>
     },
     Update {
-        st: &'a Struct,
+        st: &'a Entity,
         changed_mask: BitVec,
         counter_idx: usize,
         data: Vec<u8>,
         id: u64
     },
     Push {
-        st: &'a Struct,
+        st: &'a Entity,
         changed_mask: BitVec,
         counter_idx: usize,
         data: Vec<u8>,
@@ -161,12 +160,12 @@ impl MarciDB {
     self.counters[counter_idx].fetch_add(1, Ordering::Relaxed)
   }
   
-  pub fn get_model(&self, name: &str) -> Option<&Model> {
+  pub fn get_model(&self, name: &str) -> Option<&Entity> {
     return self.schema.models.iter().find(|i| i.name == name);
   }
 
-  pub fn insert_counter_value<T>(&self, model: &T, id: &mut [u8]) where T: WithFields {
-    for field in model.fields() {
+  pub fn insert_counter_value(&self, model: &Entity, id: &mut [u8]) {
+    for field in model.fields.iter() {
       let Some(idx) = field.id_idx else { continue; };
       if let Some(counter_idx) = field.counter_idx {
         let field_id = self.next_idc(counter_idx);
@@ -175,7 +174,7 @@ impl MarciDB {
     }
   }
 
-  pub fn insert_data(&self, model: &Model, id: &mut [u8], data: &[u8], structs: &[InsertStruct]) -> Result<(), InsertError> {
+  pub fn insert_data(&self, model: &Entity, id: &mut [u8], data: &[u8], structs: &[InsertStruct]) -> Result<(), InsertError> {
 
     let foreign_keys = collect_foreign_keys(id, data, model, structs, &self.schema);
 
@@ -242,7 +241,7 @@ impl MarciDB {
       data: &[u8],
       rx: &ReadTransaction,
       select: &MarciSelect,
-      model: &dyn WithFields,
+      model: &Entity,
       f: &F,
   ) -> U
   where
@@ -260,7 +259,7 @@ impl MarciDB {
             let item = self.process_data(item_id, &[], rx, &include.select, include.model, f); 
             return IncludeResult::One(include.field, item);
           }
-          let nested_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
+          let nested_tree = rx.get_tree(include.model.name.as_bytes()).unwrap().unwrap();
           let Some(data) = nested_tree.get(item_id).unwrap() else {
             println!("Warning: not found entry for key {:?}", item_id);
             return IncludeResult::None(include.field);
@@ -283,10 +282,10 @@ impl MarciDB {
             return IncludeResult::Many(include.field, items);
           }
 
-          let nested_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
+          let nested_tree = rx.get_tree(include.model.name.as_bytes()).unwrap().unwrap();
           let items = keys.iter().map(|key| {
             let Some(data) = nested_tree.get(key).unwrap() else {
-              panic!("Not found value in tree {}. Key: {:?}", str::from_utf8(include.model.tree_name()).unwrap(), key);
+              panic!("Not found value in tree {}. Key: {:?}", str::from_utf8(include.model.name.as_bytes()).unwrap(), key);
             };
             return self.process_data(key, data.as_ref(), rx, &include.select, include.model, f);
           }).collect();
@@ -294,7 +293,7 @@ impl MarciDB {
           return IncludeResult::Many(include.field, items);
         },
         MarciSelectBinding::OneStruct() => {
-          let st_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
+          let st_tree = rx.get_tree(include.model.name.as_bytes()).unwrap().unwrap();
           let Some(data) = st_tree.get(id).unwrap() else {
             return IncludeResult::None(include.field);
           };
@@ -303,7 +302,7 @@ impl MarciDB {
         },
         MarciSelectBinding::ManyStruct() => {
 
-          let st_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
+          let st_tree = rx.get_tree(include.model.name.as_bytes()).unwrap().unwrap();
 
           if include.select_only_id {
             let items = st_tree.prefix_keys(&id).unwrap().map(|item| {
@@ -323,21 +322,20 @@ impl MarciDB {
       }
     }).collect();
 
-    return f(DecodeCtx { id, data, fields: model.fields(), payload_offset: model.payload_offset(), select: &select.select, includes });
+    return f(DecodeCtx { id, data, entity: model, select: &select.select, includes });
   }
 
-  pub fn get_all<U, F, T>(
+  pub fn get_all<U, F>(
       &self,
-      model: &T,
+      model: &Entity,
       select: &MarciSelect,
       f: F
   ) -> Vec<U>
   where
-    T: WithFields,
     F: Fn(DecodeCtx<'_, U>) -> U,
   {
       let rx = self.db.begin_read().unwrap();
-      let tree = rx.get_tree(model.tree_name()).unwrap().unwrap();
+      let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
       tree.iter().unwrap().map(|item| {
           let (id, value) = item.unwrap();
@@ -346,7 +344,7 @@ impl MarciDB {
       }).collect()
   }
 
-  pub fn get_item<U, F: FnOnce(&[u8]) -> U>(&self, model: &Model, key: &str, f: F) -> Option<U> {
+  pub fn get_item<U, F: FnOnce(&[u8]) -> U>(&self, model: &Entity, key: &str, f: F) -> Option<U> {
 
     let rx = self.db.begin_read().unwrap();
     let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
@@ -354,7 +352,7 @@ impl MarciDB {
     return tree.get(key.as_bytes()).unwrap().map(|item| f(item.as_ref()))
   }
 
-  pub fn update(&self, model: &Model, id: &[u8], new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<(), InsertError> {
+  pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<(), InsertError> {
     
     let foreign_keys = collect_foreign_keys(id, new_data, model, structs, &self.schema);
 
@@ -462,7 +460,7 @@ impl MarciDB {
     return Ok(());
   }
 
-  pub fn delete(&self, model: &Model, id: u64) -> bool {
+  pub fn delete(&self, model: &Entity, id: u64) -> bool {
     let tx = self.db.begin_write().unwrap();
     {
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
@@ -637,13 +635,13 @@ fn get_value_with_len<'a>(
 
 #[derive(Debug)]
 struct ForeignKey<'a> {
-  model: &'a Model,
+  model: &'a Entity,
   field: &'a Field,
   id: &'a[u8]
 }
 
 #[inline(always)]
-fn get_foreign_keys<'a, T>(id: &'a[u8], data: &'a[u8], model: &'a T, schema: &'a Schema) -> Vec<ForeignKey<'a>>  where T : WithFields {
+fn get_foreign_keys<'a>(id: &'a[u8], data: &'a[u8], model: &'a Entity, schema: &'a Schema) -> Vec<ForeignKey<'a>> {
   // Maybe create vec with capacity of foreign keys?
   let mut foreign_keys = Vec::new();
 
@@ -659,7 +657,7 @@ fn get_foreign_keys<'a, T>(id: &'a[u8], data: &'a[u8], model: &'a T, schema: &'a
   //   }
   // }
 
-  for field in model.fields().iter() {
+  for field in model.fields.iter() {
     match field.ty {
         FieldType::ModelRef(model_index) => {
           if field.name.starts_with("@") {
@@ -676,7 +674,7 @@ fn get_foreign_keys<'a, T>(id: &'a[u8], data: &'a[u8], model: &'a T, schema: &'a
 }
 
 #[inline(always)]
-fn collect_foreign_keys<'a, T>(id: &'a [u8], data: &'a[u8], model: &'a T, structs: &'a [InsertStruct], schema: &'a Schema) -> Vec<ForeignKey<'a>> where T : WithFields {
+fn collect_foreign_keys<'a>(id: &'a [u8], data: &'a[u8], model: &'a Entity, structs: &'a [InsertStruct], schema: &'a Schema) -> Vec<ForeignKey<'a>> {
   let mut foreign_keys = get_foreign_keys(id, data, model, schema);
   // Проверяем foreign_keys в дочерних структурах
   for st in structs {
@@ -747,10 +745,10 @@ struct IndexData<'a> {
 
 #[inline(always)]
 /// В этой функции собираем все индексы с данных. Обычно это собирается только с OneToMany
-fn get_indexes<'a, T>(data: &[u8], id: &[u8], model: &'a T, mask: Option<&BitVec>) -> Vec<IndexData<'a>> where T: WithFields {
+fn get_indexes<'a>(data: &[u8], id: &[u8], model: &'a Entity, mask: Option<&BitVec>) -> Vec<IndexData<'a>> {
 
   let mut indexes = vec![];
-  for (field_index, field) in model.fields().iter().enumerate(){
+  for (field_index, field) in model.fields.iter().enumerate(){
     // Skip values without indexes
     if field.inserted_indexes.is_empty() { continue; }
     // Skip derived values
@@ -797,9 +795,9 @@ pub fn get_max_id_struct(tree: &Tree) -> u64 {
     .unwrap_or(1);
 }
 
-pub fn get_offsets<T>(data: &[u8], model: &T) -> Vec<usize> where T: WithFields {
+pub fn get_offsets(data: &[u8], model: &Entity) -> Vec<usize> {
   let mut arr = vec![];
-  for field in model.fields() {
+  for field in model.fields.iter() {
     if field.offset_pos == 0 {
       continue;
     }

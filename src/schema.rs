@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, fmt::Debug};
 
 #[derive(Debug)]
 pub struct Schema {
-    pub models: Vec<Model>,
+    pub models: Vec<Entity>,
 }
 
 impl Schema {
@@ -32,41 +32,21 @@ impl Schema {
             return field;
         }
     }
-    fn iter(&self) -> SchemaIter {
-        let field_sizes = self.models.iter().map(|i| i.fields.len()).collect();
-        return SchemaIter { field_sizes, field_index: 0, model_index: 0 }
-    }
 }
 
-struct SchemaIter {
-    field_sizes: Vec<usize>,
-    model_index: usize,
-    field_index: usize
-}
-impl Iterator for SchemaIter {
-    type Item = ModelRef;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.field_index >= self.field_sizes[self.model_index] {
-            self.field_index = 0;
-            self.model_index += 1;
-        }
-        if self.model_index >= self.field_sizes.len() {
-            return None;
-        }
-
-        let field = ModelRef::new(self.model_index, self.field_index);
-        self.field_index += 1;
-        Some(field)
-    }
-}
-
-#[derive(Debug)]
-pub struct Model {
+#[derive(Debug,Clone)]
+pub struct Entity {
     pub name: String,
     pub fields: Vec<Field>,
     // Count of fields
     pub payload_offset: usize,
     // pub key_fields: Vec<usize>
+}
+
+impl Entity {
+    pub fn key_min_size(&self) -> usize {
+        return self.fields.iter().filter_map(|f| f.id_idx.is_some().then_some(8)).sum();
+    }
 }
 
 #[derive(Debug,Clone,PartialEq)]
@@ -103,43 +83,6 @@ impl Field {
     pub fn is_derived(&self) -> bool {
         self.attributes.iter().any(|attr| matches!(attr, Attribute::DerivedUnresolved { .. }))
     }
-}
-
-#[derive(Debug,Clone)]
-pub struct Struct {
-    /// Полное имя (для таблицы) (base_table + base_field)
-    pub name: String,
-    pub fields: Vec<Field>,
-    pub payload_offset: usize,
-    // pub key_fields: Vec<usize>
-}
-
-pub trait WithFields: Debug {
-    fn tree_name(&self) -> &[u8];
-    fn fields(&self) -> &[Field];
-    // fn get_field(&self, idx: usize) -> &Field;
-    fn payload_offset(&self) -> usize;
-    // fn is_model(&self) -> bool;
-    // fn key_fields(&self) -> &[usize];
-
-    // fn key_fields(&self) -> Vec<&Field> { self.fields().iter().filter(|f| f.is_id).collect() }
-    fn key_min_size(&self) -> usize { self.fields().iter().filter(|f| f.id_idx.is_some()).map(|_| 8).sum() }
-}
-impl WithFields for Model {
-    fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
-    fn fields(&self) -> &[Field] { &self.fields }
-    // fn get_field(&self, idx: usize) -> &Field { &self.fields[idx] }
-    fn payload_offset(&self) -> usize { self.payload_offset }
-    // fn is_model(&self) -> bool { true }
-    // fn key_fields(&self) -> &[usize] { &self.key_fields }
-}
-impl WithFields for Struct {
-    fn tree_name(&self) -> &[u8] { &self.name.as_bytes() }
-    fn fields(&self) -> &[Field] { &self.fields }
-    // fn get_field(&self, idx: usize) -> &Field { &self.fields[idx] }
-    fn payload_offset(&self) -> usize { self.payload_offset }
-    // fn is_model(&self) -> bool { false }
-    // fn key_fields(&self) -> &[usize] { &self.key_fields }
 }
 
 #[derive(Debug,Clone,PartialEq, Eq,Hash,PartialOrd)]
@@ -186,11 +129,10 @@ pub enum FieldType {
     // Ссылка на список либо model, либо struct
     RefListUnresolved(String),
     ModelRef(usize),
-    ModelRefDerived(usize),
     ModelRefList(usize),
     PrimitiveList(PrimitiveFieldType),
-    Struct(Struct),
-    StructList(Struct)
+    Struct(Entity),
+    StructList(Entity)
 }
 
 #[derive(Debug,Clone)]
@@ -249,25 +191,25 @@ pub fn update_key_fields(fields: &mut Vec<Field>) -> () {
     }
 }
 
-pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Model {
+pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Entity {
 
     let (mut fields, offset_index) = parse_fields(lines);
     update_key_fields(&mut fields);
 
     let payload_offset = 3 + offset_index * 4;
-    return Model { name, fields, payload_offset };
+    return Entity { name, fields, payload_offset };
 }
 
-pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Struct {
+pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Entity {
     let (fields, offset_index) = parse_fields(lines);
     let payload_offset = 3 + offset_index * 4;
 
-    return Struct { name: String::new(), fields: fields, payload_offset }
+    return Entity { name: String::new(), fields: fields, payload_offset }
 }
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
-    let mut structs: HashMap<String, Struct> = HashMap::new();
+    let mut structs: HashMap<String, Entity> = HashMap::new();
     let mut lines = input.lines().peekable();
 
     while let Some(line) = lines.next() {
@@ -399,7 +341,7 @@ fn resolve_fields(
     model_index: usize,
     model_name: &str, 
     model_by_name: &HashMap<String, usize>, 
-    structs: &HashMap<String, Struct>,
+    structs: &HashMap<String, Entity>,
 ) {
     for field in fields.iter_mut(){
         match &field.ty {

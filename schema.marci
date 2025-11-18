@@ -4,7 +4,7 @@ model User {
   surname     String
   info        UserInfo
   posts       Post[]        @derived(Post.author)
-  projects    Project[]     @derived(Project.users.user)
+  projects    Project[]     @derived(Project.users.user) 
 }
 
 struct UserInfo {

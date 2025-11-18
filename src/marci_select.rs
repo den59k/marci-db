@@ -1,7 +1,7 @@
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{marci_db::{MarciSelect, MarciSelectBinding, MarciSelectInclude, MarciSelectVirtual}, schema::{Field, FieldType, Model, Schema}};
+use crate::{marci_db::{MarciSelect, MarciSelectBinding, MarciSelectInclude, MarciSelectVirtual}, schema::{Field, FieldType, Entity, Schema}};
 
 #[derive(Debug)]
 pub enum MarciSelectError {
@@ -84,7 +84,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
 
   for include in includes.iter_mut() { 
     include.select_only_id = !include.model
-      .fields()
+      .fields
       .iter()
       .enumerate()
       .any(|(idx, field)| include.select.select[idx] && field.id_idx.is_none());
@@ -141,7 +141,7 @@ struct UserInfo {
 
     assert_eq!(parsed.includes.len(), 1);
 
-    let mut expect = bitvec::bitvec![1; parsed.includes[0].model.fields().len()];
+    let mut expect = bitvec::bitvec![1; parsed.includes[0].model.fields.len()];
     expect.set(0, true);
     assert_eq!(parsed.includes[0].select.select, expect);
     

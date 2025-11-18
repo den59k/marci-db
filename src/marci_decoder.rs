@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{FieldType, Model, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{FieldType, Entity, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -13,7 +13,7 @@ pub enum DecodeError {
 }
 
 pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
-    let DecodeCtx { data, fields, payload_offset, id, select, includes } = ctx;
+    let DecodeCtx { data, entity, id, select, includes } = ctx;
 
     if !data.is_empty() {
         if data.len() < 3 {
@@ -25,19 +25,19 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
             return Err(DecodeError::WrongVersion);
         }
     
-        if u16::from_be_bytes([data[1], data[2]]) != payload_offset as u16 {
+        if u16::from_be_bytes([data[1], data[2]]) != entity.payload_offset as u16 {
             let offset = u16::from_be_bytes([data[1], data[2]]);
-            return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", payload_offset, offset)));
+            return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", entity.payload_offset, offset)));
         }
     
-        if data.len() < payload_offset {
+        if data.len() < entity.payload_offset {
             return Err(DecodeError::BufferTooSmall);
         }
     }
 
     let mut obj = Map::new();
 
-    for (field_index, field) in fields.iter().enumerate() {
+    for (field_index, field) in entity.fields.iter().enumerate() {
         if !select[field_index] { continue;  }
 
         if let Some(id_idx) = field.id_idx {
@@ -77,7 +77,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
         }
 
         // Декодируем
-        let value = decode_value(primitive, &data, field.offset_pos, offset, payload_offset)?;
+        let value = decode_value(primitive, &data, field.offset_pos, offset, entity.payload_offset)?;
         obj.insert(field.name.clone(), value);
     }
 
@@ -156,7 +156,7 @@ fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset_pos: usize, offset:
     }
 }
 
-pub fn decode_id(id: &[u8], model: &Model) -> Result<Value, DecodeError> {
+pub fn decode_id(id: &[u8], model: &Entity) -> Result<Value, DecodeError> {
     let mut obj = Map::new();
 
     for field in model.fields.iter() {
