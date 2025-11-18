@@ -45,7 +45,6 @@ pub struct DecodeCtx<'a, U> {
   pub id: &'a [u8],
   pub data: &'a [u8],
   pub fields: &'a [Field],
-  pub key_fields: &'a [usize],
   pub payload_offset: usize,
   pub select: &'a BitVec,
   pub includes: Vec<IncludeResult<'a, U>>,
@@ -167,7 +166,8 @@ impl MarciDB {
   }
 
   pub fn insert_counter_value<T>(&self, model: &T, id: &mut [u8]) where T: WithFields {
-    for (idx, field) in model.key_fields().iter().map(|i| model.get_field(*i)).enumerate() {
+    for field in model.fields() {
+      let Some(idx) = field.id_idx else { continue; };
       if let Some(counter_idx) = field.counter_idx {
         let field_id = self.next_idc(counter_idx);
         id[idx..idx+8].copy_from_slice(&field_id.to_be_bytes());
@@ -177,21 +177,15 @@ impl MarciDB {
 
   pub fn insert_data(&self, model: &Model, id: &mut [u8], data: &[u8], structs: &[InsertStruct]) -> Result<(), InsertError> {
 
-    self.insert_counter_value(model, id);
     let foreign_keys = collect_foreign_keys(id, data, model, structs, &self.schema);
-
-    let mut indexes = get_indexes(data, id, model, None);
-    for st in structs {
-      match st {
-        InsertStruct::One { st, data, .. } => {
-          indexes.extend(get_indexes(data, id, *st, None));
-        }
-        _ => {}
-      }
-    }
 
     let tx = self.db.begin_write().unwrap();
     check_foreign_keys(&tx, &foreign_keys)?;
+
+    self.insert_counter_value(model, id);
+
+    // После получения ID - получаем индексы
+    let mut indexes = get_indexes(data, id, model, None);
 
     // Добавляем само значение
     {
@@ -205,18 +199,22 @@ impl MarciDB {
         InsertStruct::Many { st, data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           for (item_id, item_data) in data {
-            let mut new_item_id = Vec::with_capacity(id.len() + item_id.len());
-            new_item_id.extend_from_slice(id);
-            new_item_id.extend_from_slice(item_id);
-            self.insert_counter_value(*st, &mut new_item_id[id.len()..]);
+
+            let mut new_item_id = item_id.clone();
+            new_item_id[0..8].copy_from_slice(id);
+            
+            self.insert_counter_value(*st, &mut new_item_id);
 
             tree.insert(&new_item_id, item_data).unwrap();
+
+            // NOTE: здесь бы не запутаться. Мы расширяем ID для структуры, но данные в ID хранятся без этого префикса
             indexes.extend(get_indexes(item_data, &new_item_id, *st, None));
           }
         },
         InsertStruct::One { st, data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          tree.insert(id, data).unwrap()
+          tree.insert(id, data).unwrap();
+          indexes.extend(get_indexes(data, id, *st, None));
         }
         InsertStruct::Connect { field, ids, .. } => {
           insert_indexes(&tx, field, id, ids);
@@ -227,6 +225,8 @@ impl MarciDB {
 
     // Обновляем индексы
     for index in indexes {
+      println!("Insert index to {:#?} {:?}", str::from_utf8(index.tree_name).unwrap(), index.key);
+      
       let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
       index_tree.insert(&index.key, &[1]).unwrap();
     }
@@ -285,7 +285,9 @@ impl MarciDB {
 
           let nested_tree = rx.get_tree(include.model.tree_name()).unwrap().unwrap();
           let items = keys.iter().map(|key| {
-            let data = nested_tree.get(key).unwrap().unwrap();
+            let Some(data) = nested_tree.get(key).unwrap() else {
+              panic!("Not found value in tree {}. Key: {:?}", str::from_utf8(include.model.tree_name()).unwrap(), key);
+            };
             return self.process_data(key, data.as_ref(), rx, &include.select, include.model, f);
           }).collect();
 
@@ -306,16 +308,14 @@ impl MarciDB {
           if include.select_only_id {
             let items = st_tree.prefix_keys(&id).unwrap().map(|item| {
               let key = item.unwrap();
-              let st_item_id = &key[id.len()..];
-              return self.process_data(st_item_id, &[], rx, &include.select, include.model, f);
+              return self.process_data(&key, &[], rx, &include.select, include.model, f);
             }).collect();
             return IncludeResult::Many(include.field, items);
           }
 
           let items = st_tree.prefix(&id).unwrap().map(|item| {
             let (key, data) = item.unwrap();
-            let st_item_id = &key[id.len()..];
-            return self.process_data(st_item_id, data.as_ref(), rx, &include.select, include.model, f);
+            return self.process_data(&key, data.as_ref(), rx, &include.select, include.model, f);
           }).collect();
 
           return IncludeResult::Many(include.field, items);
@@ -323,7 +323,7 @@ impl MarciDB {
       }
     }).collect();
 
-    return f(DecodeCtx { id, data, fields: model.fields(), key_fields: model.key_fields(), payload_offset: model.payload_offset(), select: &select.select, includes });
+    return f(DecodeCtx { id, data, fields: model.fields(), payload_offset: model.payload_offset(), select: &select.select, includes });
   }
 
   pub fn get_all<U, F, T>(
@@ -402,13 +402,12 @@ impl MarciDB {
         InsertStruct::Many { st, data: new_data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           for (item_id, item_data) in new_data {
-            let mut new_item_id = Vec::with_capacity(id.len() + item_id.len());
-            new_item_id.extend_from_slice(id);
-            new_item_id.extend_from_slice(item_id);
+            let mut new_item_id = item_id.clone();
+            new_item_id[0..8].copy_from_slice(id);
             
             println!("Insert to {} {:?}", st.name, new_item_id);
             // TODO: Do not insert counter value in UPDATE struct request
-            self.insert_counter_value(*st, &mut new_item_id[id.len()..]);
+            self.insert_counter_value(*st, &mut new_item_id);
 
             tree.insert(&new_item_id, item_data).unwrap();
             indexes.extend(get_indexes(item_data, &new_item_id, *st, None));
@@ -481,11 +480,14 @@ impl MarciDB {
 #[inline(always)]
 fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], size: usize) -> Option<&'a[u8]> {
   if let Some(id_idx) = field.id_idx {
+    if id.len() < id_idx*8+8 {
+      panic!("ID too small. Field: {}, ID: {:?}, idx: {}", field.name, id, id_idx);
+    }
     let value = &id[id_idx*8..id_idx*8+8];
     return Some(value)
   } else {
     if field.offset_pos == 0 {
-      panic!("ERROR: Try to get zero offset value")
+      panic!("ERROR: Try to get zero offset value {}", field.name)
     }
     let offset = get_offset(data, field.offset_pos);
     if offset == 0 {
@@ -660,6 +662,9 @@ fn get_foreign_keys<'a, T>(id: &'a[u8], data: &'a[u8], model: &'a T, schema: &'a
   for field in model.fields().iter() {
     match field.ty {
         FieldType::ModelRef(model_index) => {
+          if field.name.starts_with("@") {
+            continue;
+          }
           if let Some(bytes) = get_value_from_data(field, id, data, 8) {
             foreign_keys.push(ForeignKey { model: &schema.models[model_index], field, id: bytes });
           }
@@ -715,7 +720,7 @@ fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Vec
     .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
 
   let iter = index_tree.prefix_keys(&item_id).unwrap();
-  iter.map(|k| k.unwrap()[8..].to_vec()).collect()
+  iter.map(|k| k.unwrap()[8..16].to_vec()).collect()
 }
 
 // #[inline(always)]
@@ -734,6 +739,7 @@ fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) {
   tree.insert(&key, &[1]).unwrap();
 }
 
+#[derive(Debug)]
 struct IndexData<'a> {
   tree_name: &'a[u8],
   key: Vec<u8>
@@ -745,9 +751,14 @@ fn get_indexes<'a, T>(data: &[u8], id: &[u8], model: &'a T, mask: Option<&BitVec
 
   let mut indexes = vec![];
   for (field_index, field) in model.fields().iter().enumerate(){
-    if field.offset_pos == 0 || field.inserted_indexes.is_empty() { continue; }
+    // Skip values without indexes
+    if field.inserted_indexes.is_empty() { continue; }
+    // Skip derived values
+    if field.id_idx.is_none() && field.offset_pos == 0 { continue; } 
+    // Skip not changed values
     if mask.is_some_and(|f| !f[field_index]) { continue; }
-    let Some(value) = get_value_with_len(data, field.offset_pos, model.payload_offset()) else {
+
+    let Some(value) = get_value_from_data(field, id, data, 8) else {
       continue;
     };
     for index in &field.inserted_indexes {

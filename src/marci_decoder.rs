@@ -13,7 +13,7 @@ pub enum DecodeError {
 }
 
 pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
-    let DecodeCtx { data, fields, key_fields, payload_offset, id, select, includes } = ctx;
+    let DecodeCtx { data, fields, payload_offset, id, select, includes } = ctx;
 
     if !data.is_empty() {
         if data.len() < 3 {
@@ -36,25 +36,23 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     }
 
     let mut obj = Map::new();
-    let mut pos = 0;
-    for i in key_fields {
-        if !select[*i] {
-            continue;
-        }
-        let field = &fields[*i];
-        match &field.ty {
-            FieldType::Primitive(primitive) => {
-                let value = decode_value(primitive, id, 0, pos, 0)?;
-                obj.insert(field.name.clone(), value);
-            }
-            _ => {}
-        }
-        pos += 8;
-    }
 
     for (field_index, field) in fields.iter().enumerate() {
-        if field.offset_pos == 0 { continue; }
         if !select[field_index] { continue;  }
+
+        if let Some(id_idx) = field.id_idx {
+            match &field.ty {
+                FieldType::Primitive(primitive) => {
+                    // TODO: correct calc offset
+                    let value = decode_value(primitive, id, 0, id_idx*8, 0)?;
+                    obj.insert(field.name.clone(), value);
+                }
+                _ => {}
+            }
+        }
+
+        if field.offset_pos == 0 { continue; }
+        
         if data.is_empty() {
             return Err(DecodeError::EmptyPayload);
         }
@@ -160,17 +158,19 @@ fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset_pos: usize, offset:
 
 pub fn decode_id(id: &[u8], model: &Model) -> Result<Value, DecodeError> {
     let mut obj = Map::new();
-    let mut pos = 0;
-    for i in model.key_fields.iter() {
-        let field = &model.fields[*i];
+
+    for field in model.fields.iter() {
+        let Some(id_idx) = field.id_idx else {
+            continue;
+        };
         match &field.ty {
             FieldType::Primitive(primitive) => {
-                let value = decode_value(primitive, id, 0, pos, 0)?;
+                let value = decode_value(primitive, id, 0, id_idx * 8, 0)?;
                 obj.insert(field.name.clone(), value);
             }
             _ => {}
         }
-        pos += 8;
     }
+
     Ok(Value::Object(obj))
 }

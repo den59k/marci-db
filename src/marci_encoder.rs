@@ -1,23 +1,18 @@
-use std::borrow::Borrow;
 
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{marci_db::InsertStruct, schema::{Field, FieldType, InsertedIndex, Model, PrimitiveFieldType, Schema, WithFields}};
+use crate::{marci_db::InsertStruct, schema::{Field, FieldType, PrimitiveFieldType, Schema, WithFields}};
 
 #[derive(Debug)]
 pub enum EncodeError {
     NotAnObject,
-    MissingField(String),
     MissingIdField(String),
     TypeMismatch { field: String, expected: &'static str },
-    OffsetOverflow,
     TryWriteToVirtualField,
     UnavailableKeyField,
     EmptyObject
 }
-
-static EMPTY_ARRAY: Value = Value::Array(vec![]);
 
 /// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные и changed_mask
 /// Не все данные записываются в document, используйте также функцию encode_id для кодирования полей в ID
@@ -70,7 +65,7 @@ pub fn encode_document<'a, T>(schema: &'a Schema, model: &'a T, json: &Value, st
         match field.ty {
             FieldType::Primitive(primitive_type) => {
                 if field.offset_pos != 0 {
-                    write_header(&mut buf, field);
+                    write_header(&mut buf, field)?;
                     encode_value(&mut buf, field, &primitive_type,  value)?;
                 }
             }
@@ -327,12 +322,17 @@ pub fn encode_id_with_prefix<T>(model: &T, obj: &Value, prefix: &[u8], skip_coun
 
 fn encode_id_internal<T>(key_buf: &mut Vec<u8>, model: &T, obj: &Value, skip_counters: bool) -> Result<(), EncodeError> where T : WithFields {
 
-    for field in model.key_fields().iter().map(|i| model.get_field(*i)) {
+    for field in model.fields() {
+        if field.id_idx.is_none() { continue; }
         if field.counter_idx.is_some() && skip_counters {
             key_buf.extend_from_slice(&[ 0u8;8 ]);
             continue;
         }
         let Some(value): Option<&Value> = obj.get(&field.name) else {
+            if field.name.starts_with("@") {
+                key_buf.extend_from_slice(&[ 0u8;8 ]);
+                continue;
+            }
             return Err(EncodeError::MissingIdField(field.name.clone()))
         };
         match field.ty {
@@ -360,7 +360,7 @@ fn encode_id_internal<T>(key_buf: &mut Vec<u8>, model: &T, obj: &Value, skip_cou
 
 #[cfg(test)]
 mod tests {
-    use crate::{marci_db::{InsertStruct, get_end, get_offsets}, marci_encoder::{encode_document, encode_id}, schema::{FieldType, Model, PrimitiveFieldType, parse_schema}};
+    use crate::{marci_db::{InsertStruct, get_end, get_offsets}, marci_encoder::{encode_document, encode_id}, schema::parse_schema};
     use serde_json::json;
 
     #[test]
@@ -461,8 +461,8 @@ mod tests {
         };
 
         assert_eq!(data.len(), 1);
-        // Мы записываем user в ключ
-        assert_eq!(&data[0].0, &[0, 0, 0, 0, 0, 0, 0, 1]);
+        // В InsertStruct::Many в ключе первые 8 байт - ID родителя, остальное - ID структуры
+        assert_eq!(&data[0].0, &[0, 0, 0, 0, 0, 0, 0, 0,   0, 0, 0, 0, 0, 0, 0, 1]);
         assert_eq!(get_offsets(&data[0].1, *st), vec![7]);
 
         // assert_eq!()

@@ -182,6 +182,10 @@ async fn main() {
 
     let schema = parse_schema(&fs::read_to_string("schema.marci").unwrap());
 
+    for model in schema.models.iter() {
+        println!("{:#?}", model);
+    }
+
     let db: Arc<MarciDB> = Arc::new(MarciDB::new(schema));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
