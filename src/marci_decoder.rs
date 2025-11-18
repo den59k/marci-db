@@ -13,7 +13,7 @@ pub enum DecodeError {
 }
 
 pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
-    let DecodeCtx { data, entity, id, select, includes } = ctx;
+    let DecodeCtx { data, entity, id, select, includes, inject, aliases } = ctx;
 
     if !data.is_empty() {
         if data.len() < 3 {
@@ -78,7 +78,15 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
 
         // Декодируем
         let value = decode_value(primitive, &data, field.offset_pos, offset, entity.payload_offset)?;
-        obj.insert(field.name.clone(), value);
+        let name = aliases
+            .and_then(|a| a.get(&field_index))
+            .map(|i|i.to_string())
+            .unwrap_or_else(|| field.name.clone());
+        obj.insert(name, value);
+    }
+    
+    if let Some(Value::Object(mut map)) = inject {
+        obj.append(&mut map);
     }
 
     for include in includes {

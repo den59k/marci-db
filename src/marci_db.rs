@@ -18,6 +18,14 @@ pub struct MarciSelectInclude<'a> {
   pub select: MarciSelect<'a>,
   pub select_only_id: bool,
   pub binding: MarciSelectBinding<'a>,
+  pub injected: Option<Injected<'a>>
+}
+
+#[derive(Debug)]
+pub struct Injected<'a> {
+  pub st: &'a Entity,
+  pub select: BitVec,
+  pub aliases: Option<HashMap<usize,&'a str>>
 }
 
 #[derive(Debug)]
@@ -47,6 +55,8 @@ pub struct DecodeCtx<'a, U> {
   pub entity: &'a Entity,
   pub select: &'a BitVec,
   pub includes: Vec<IncludeResult<'a, U>>,
+  pub inject: Option<U>,
+  pub aliases: Option<&'a HashMap<usize,&'a str>>
 }
 
 #[derive(Debug)]
@@ -243,6 +253,7 @@ impl MarciDB {
       select: &MarciSelect,
       model: &Entity,
       f: &F,
+      inject: Option<U>
   ) -> U
   where
       F: Fn(DecodeCtx<U>) -> U,
@@ -254,9 +265,14 @@ impl MarciDB {
           let Some(item_id) = get_value_from_data(include.field, id, data, 8) else {
             return IncludeResult::None(include.field);
           };
+
+          let injected_tree = include.injected.as_ref()
+            .and_then(|i| Some((i, rx.get_tree(i.st.name.as_bytes()).unwrap().unwrap())));
+
           if include.select_only_id {
+            let injected_data = get_injected_data(item_id, &injected_tree, f);
             // We send empty data because only ID bytes is using
-            let item = self.process_data(item_id, &[], rx, &include.select, include.model, f); 
+            let item = self.process_data(item_id, &[], rx, &include.select, include.model, f, injected_data); 
             return IncludeResult::One(include.field, item);
           }
           let nested_tree = rx.get_tree(include.model.name.as_bytes()).unwrap().unwrap();
@@ -264,7 +280,8 @@ impl MarciDB {
             println!("Warning: not found entry for key {:?}", item_id);
             return IncludeResult::None(include.field);
           };
-          let item = self.process_data(item_id, data.as_ref(), rx, &include.select, include.model, f);
+          let injected_data: Option<U> = get_injected_data(item_id, &injected_tree, f);
+          let item = self.process_data(item_id, data.as_ref(), rx, &include.select, include.model, f, injected_data);
           return IncludeResult::One(include.field, item);
         },
         MarciSelectBinding::Many(tree_name) => {
@@ -273,10 +290,14 @@ impl MarciDB {
           if keys.is_empty() {
             return IncludeResult::Many(include.field, vec![]);
           }
+          
+          let injected_tree = include.injected.as_ref()
+            .and_then(|i| Some((i, rx.get_tree(i.st.name.as_bytes()).unwrap().unwrap())));
 
           if include.select_only_id {
             let items = keys.iter().map(|key| {
-              return self.process_data(key, &[], rx, &include.select, include.model, f);
+              let injected_data = get_injected_data(key, &injected_tree, f);
+              return self.process_data(key, &[], rx, &include.select, include.model, f, injected_data);
             }).collect();
 
             return IncludeResult::Many(include.field, items);
@@ -284,10 +305,11 @@ impl MarciDB {
 
           let nested_tree = rx.get_tree(include.model.name.as_bytes()).unwrap().unwrap();
           let items = keys.iter().map(|key| {
-            let Some(data) = nested_tree.get(key).unwrap() else {
+            let Some(data) = nested_tree.get(&key[..8]).unwrap() else {
               panic!("Not found value in tree {}. Key: {:?}", str::from_utf8(include.model.name.as_bytes()).unwrap(), key);
             };
-            return self.process_data(key, data.as_ref(), rx, &include.select, include.model, f);
+            let injected_data = get_injected_data(key, &injected_tree, f);
+            return self.process_data(key, data.as_ref(), rx, &include.select, include.model, f, injected_data);
           }).collect();
 
           return IncludeResult::Many(include.field, items);
@@ -297,7 +319,7 @@ impl MarciDB {
           let Some(data) = st_tree.get(id).unwrap() else {
             return IncludeResult::None(include.field);
           };
-          let item = self.process_data(id, data.as_ref(), rx, &include.select, include.model, f);
+          let item = self.process_data(id, data.as_ref(), rx, &include.select, include.model, f, None);
           return IncludeResult::One(include.field, item);
         },
         MarciSelectBinding::ManyStruct() => {
@@ -307,14 +329,14 @@ impl MarciDB {
           if include.select_only_id {
             let items = st_tree.prefix_keys(&id).unwrap().map(|item| {
               let key = item.unwrap();
-              return self.process_data(&key, &[], rx, &include.select, include.model, f);
+              return self.process_data(&key, &[], rx, &include.select, include.model, f, None);
             }).collect();
             return IncludeResult::Many(include.field, items);
           }
 
           let items = st_tree.prefix(&id).unwrap().map(|item| {
             let (key, data) = item.unwrap();
-            return self.process_data(&key, data.as_ref(), rx, &include.select, include.model, f);
+            return self.process_data(&key, data.as_ref(), rx, &include.select, include.model, f, None);
           }).collect();
 
           return IncludeResult::Many(include.field, items);
@@ -322,7 +344,7 @@ impl MarciDB {
       }
     }).collect();
 
-    return f(DecodeCtx { id, data, entity: model, select: &select.select, includes });
+    return f(DecodeCtx { id, data, entity: model, select: &select.select, includes, inject, aliases: None });
   }
 
   pub fn get_all<U, F>(
@@ -340,7 +362,7 @@ impl MarciDB {
       tree.iter().unwrap().map(|item| {
           let (id, value) = item.unwrap();
           
-          self.process_data(&id, &value, &rx, select, model, &f)
+          self.process_data(&id, &value, &rx, select, model, &f, None)
       }).collect()
   }
 
@@ -718,7 +740,25 @@ fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Vec
     .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
 
   let iter = index_tree.prefix_keys(&item_id).unwrap();
-  iter.map(|k| k.unwrap()[8..16].to_vec()).collect()
+  iter.map(|k| k.unwrap()[8..].to_vec()).collect()
+}
+
+#[inline(always)]
+fn get_injected_data<U,F>(id: &[u8], injected_tree: &Option<(&Injected<'_>, Tree<'_>)>, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U, {
+  let Some((injected, tree)) = injected_tree else { return None };
+
+  let Some(data) = tree.get(id).unwrap() else {
+    panic!("Not found key {:?} in tree {}", id, injected.st.name)
+  };
+  return Some(f(DecodeCtx { 
+    id, 
+    data: &data, 
+    entity: injected.st, 
+    select: &injected.select,
+     includes: vec![], 
+    inject: None, 
+    aliases: injected.aliases.as_ref() 
+  }))
 }
 
 // #[inline(always)]
@@ -845,7 +885,7 @@ pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: &[u8]) {
       let InsertedIndex::Rev { tree_name } = index else { continue };
       let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
       for key in keys.iter() {
-        tree.delete(&key).unwrap();
+        tree.delete(&key[..8]).unwrap();
       }
     }
   }
