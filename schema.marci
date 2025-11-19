@@ -23,9 +23,16 @@ model Project {
   users       UserRole[]
 }
 
+enum Role {
+  creator
+  admin {
+    features  String[]
+  }
+}
+
 struct UserRole {
   user        User          @id
-  role        String
+  role        Role
 }
 
 model File {

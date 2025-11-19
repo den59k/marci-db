@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use serde_json::Value;
 use bitvec::prelude::*;

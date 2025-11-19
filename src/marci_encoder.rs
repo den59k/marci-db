@@ -9,6 +9,7 @@ pub enum EncodeError {
     NotAnObject,
     MissingIdField(String),
     TypeMismatch { field: String, expected: &'static str },
+    TypeMismatchEnum { field: String, expected: String },
     TryWriteToVirtualField,
     UnavailableKeyField,
     EmptyObject
@@ -62,12 +63,14 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
             continue;
         }
 
-        match field.ty {
+        match &field.ty {
             FieldType::Primitive(primitive_type) => {
-                if field.offset_pos != 0 {
-                    write_header(&mut buf, field)?;
-                    encode_value(&mut buf, field, &primitive_type,  value)?;
+                if field.offset_pos == 0 {
+                    println!("Warn: try to write to field {}.{} has not offset_pos", model.name, field.name);
+                    continue;
                 }
+                write_header(&mut buf, field)?;
+                encode_value(&mut buf, field, &primitive_type,  value)?;
             }
             FieldType::ModelRef(_) => {
                 if !value.is_object() {
@@ -89,20 +92,20 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
                 };
 
-                let ref_model = &schema.models[model_index];
+                let ref_model = &schema.models[*model_index];
 
                 let mut ids = Vec::with_capacity(value.len());
                 for obj in value.iter() {
                     let id = encode_id(ref_model, obj, false)?;
                     ids.push(id);
                 }
-                structs.push(InsertStruct::Connect { field, ref_model: model_index, ids });
+                structs.push(InsertStruct::Connect { field, ref_model: *model_index, ids });
             }
-            FieldType::Struct(ref st) => {
+            FieldType::Struct(st) => {
                 let (data, changed_values) = encode_document(schema, st, value, structs)?;
                 structs.push(InsertStruct::One { st, changed_mask: changed_values, data });
             }
-            FieldType::StructList(ref st) => {
+            FieldType::StructList(st) => {
                 let Some(value) = value.as_array() else {
                     return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
                 };
@@ -121,6 +124,20 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
                     }
                     structs.push(InsertStruct::Many { st, data: vec_many });
                 }
+            }
+            FieldType::Enum(en) => {
+                if field.offset_pos == 0 {
+                    println!("Warn: try to write to enum {}.{} has not offset_pos", model.name, field.name);
+                    continue;
+                }
+                let Some(variant_index) = value.as_str().and_then(|f| en.variants_map.get(f)) else {
+                    return Err(EncodeError::TypeMismatchEnum { 
+                        field: field.name.clone(), 
+                        expected: format!("One of: {}", en.variants_str())
+                    })
+                };
+                write_header(&mut buf, field)?;
+                buf.extend_from_slice(&variant_index.to_be_bytes());
             }
             _ => {
 

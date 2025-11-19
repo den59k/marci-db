@@ -57,32 +57,36 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
             return Err(DecodeError::EmptyPayload);
         }
 
-        let FieldType::Primitive(ref primitive) = field.ty else {
-            // пропускаем derived / relation
-            continue;
-        };
+        match &field.ty {
+            FieldType::Primitive(primitive) => {
+                let offset = get_offset_checked(data, field.offset_pos)?;
+                // Поле = null
+                if offset == 0 {
+                    obj.insert(field.name.clone(), Value::Null);
+                    continue;
+                }
 
-        // читаем offset
-        let offset = get_offset(data, field.offset_pos);
+                // Декодируем
+                let value = decode_value(primitive, &data, field.offset_pos, offset, entity.payload_offset)?;
+                let name = aliases
+                    .and_then(|a| a.get(&field_index))
+                    .map(|i|i.to_string())
+                    .unwrap_or_else(|| field.name.clone());
+                obj.insert(name, value);
+            }
+            FieldType::Enum(en) => {
+                let offset = get_offset_checked(data, field.offset_pos)?;
+                // Поле = null
+                if offset == 0 {
+                    obj.insert(field.name.clone(), Value::Null);
+                    continue;
+                }
 
-        // Поле = null
-        if offset == 0 {
-          obj.insert(field.name.clone(), Value::Null);
-          continue;
+                let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap()) as usize;
+                obj.insert(field.name.clone(), Value::String(en.variants[variant_index].name.clone()));
+            }
+            _ => {}
         }
-
-        let offset = offset as usize;
-        if offset >= data.len() {
-            return Err(DecodeError::OffsetOutOfRange);
-        }
-
-        // Декодируем
-        let value = decode_value(primitive, &data, field.offset_pos, offset, entity.payload_offset)?;
-        let name = aliases
-            .and_then(|a| a.get(&field_index))
-            .map(|i|i.to_string())
-            .unwrap_or_else(|| field.name.clone());
-        obj.insert(name, value);
     }
     
     if let Some(Value::Object(mut map)) = inject {
@@ -181,4 +185,13 @@ pub fn decode_id(id: &[u8], model: &Entity) -> Result<Value, DecodeError> {
     }
 
     Ok(Value::Object(obj))
+}
+
+#[inline(always)]
+pub fn get_offset_checked<'a>(data: &'a [u8], offset_pos: usize) -> Result<usize,DecodeError> {
+  let offset = get_offset(data, offset_pos);
+  if offset >= data.len() {
+    return Err(DecodeError::OffsetOutOfRange);
+  }
+  return Ok(offset);
 }
