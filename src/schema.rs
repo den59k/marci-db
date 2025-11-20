@@ -570,8 +570,6 @@ mod tests {
 
         let users_field = &schema.models[1].fields[2];
 
-        println!("{:#?}", users_field);
-
         assert_eq!(users_field.inserted_indexes.len(), 0);
 
         let FieldType::StructList(st) = &users_field.ty else {

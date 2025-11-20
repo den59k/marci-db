@@ -79,6 +79,10 @@ fn write_fields<'a>(
 
         changed_mask.set(field_index, true);
 
+        if field.id_idx.is_some() {
+            continue;
+        }
+
         if value.is_null() {
             match field.ty {
                 FieldType::Struct(ref st) => {
@@ -207,10 +211,11 @@ fn write_fields<'a>(
                     new_buf[2..4].copy_from_slice(&(current_variant.payload_offset as u16).to_be_bytes());
 
                     let enum_name = &[ model_name, ".", &field.name ].concat();
-                    let _mask = write_fields(obj, &mut new_buf, &current_variant.fields, schema, enum_name, structs)?;
+                    let mut enum_mask = write_fields(obj, &mut new_buf, &current_variant.fields, schema, enum_name, structs)?;
 
                     buf.append(&mut new_buf);
-                    // TODO: use enum mask to update data
+
+                    changed_mask.append(&mut enum_mask);
                 } else {
                     buf.extend_from_slice(&variant_index.to_be_bytes());
                 }
@@ -602,8 +607,6 @@ mod tests {
 
         let first_item_offset = u32::from_be_bytes(enum_variant_body[4..8].try_into().unwrap()) as usize;
         let second_item_offset = u32::from_be_bytes(enum_variant_body[8..12].try_into().unwrap()) as usize;
-
-        println!("{:?}", enum_variant_body);
 
         let first_item = str::from_utf8(&enum_variant_body[first_item_offset..second_item_offset]).unwrap();
         assert_eq!(first_item, "root");

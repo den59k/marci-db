@@ -1,9 +1,11 @@
-use bitvec::vec::BitVec;
+use bitvec::{slice::BitSlice, vec::BitVec};
 
-use crate::{marci_db::{get_end, get_offset, move_offsets, set_offset, set_offset_null}, schema::Field};
+use crate::{marci_db::{get_end, get_offset, move_offsets, set_offset, set_offset_null}, schema::{Field, FieldType}};
 
-pub fn update_data(fields: &[Field], payload_offset: usize, data: &[u8], new_data: &[u8], changed_mask: &BitVec) -> Vec<u8> {
+pub fn update_data(fields: &[Field], payload_offset: usize, data: &[u8], new_data: &[u8], changed_mask: &BitSlice) -> Vec<u8> {
   let mut data = data.to_vec();
+  let mut enum_data = vec![];
+  let mut bitslice_idx = fields.len();
 
   for (field_index, field) in fields.iter().enumerate() {
 
@@ -26,13 +28,31 @@ pub fn update_data(fields: &[Field], payload_offset: usize, data: &[u8], new_dat
     let end = get_end(&data, field.offset_pos, payload_offset);
     let update_end = if update_offset == 0 { 0 } else { get_end(new_data, field.offset_pos, payload_offset) };
 
-    let update_len = if update_offset == 0 { 0 } else { update_end-update_offset };
+    if update_offset == 0 {
+      let diff = -((end - offset) as isize);
+      shift_and_resize(&mut data, end, offset, diff);
+      move_offsets(&mut data, field.offset_pos+4, payload_offset, diff);
+      set_offset_null(&mut data, field.offset_pos);
+      continue;
+    }
+
+    let mut new_data = &new_data[update_offset..update_end];
+    if offset != 0 && let FieldType::Enum(en) = &field.ty {
+      if &new_data[0..2] == &data[offset..offset+2] {
+        let variant = &en.variants[u16::from_be_bytes(new_data[0..2].try_into().unwrap()) as usize];
+        enum_data = update_data(&variant.fields, variant.payload_offset, &data[offset..], &new_data, &changed_mask[bitslice_idx..]);
+        new_data = &enum_data;
+
+        bitslice_idx += variant.fields.len();
+      }
+    }
+
     let len = if offset == 0 { 0 } else { end - offset };
 
-    let diff = update_len as isize - len as isize;
+    let diff = new_data.len() as isize - len as isize;
     
     let new_offset = if offset == 0 { end } else { offset };
-    let new_end = (new_offset + update_len) as usize;
+    let new_end = (new_offset + new_data.len()) as usize;
 
     // Сдвигаем offsets, если изменилась длина поля
     if diff != 0 {
@@ -40,14 +60,10 @@ pub fn update_data(fields: &[Field], payload_offset: usize, data: &[u8], new_dat
       move_offsets(&mut data, field.offset_pos+4, payload_offset, diff);
     }
 
-    if update_offset == 0 {
-      set_offset_null(&mut data, field.offset_pos);
-    } else {
-      data[new_offset..new_end].copy_from_slice(&new_data[update_offset..update_end]);
+    data[new_offset..new_end].copy_from_slice(&new_data);
 
-      if new_offset != offset {
-        set_offset(&mut data, field.offset_pos, new_offset);
-      }
+    if new_offset != offset {
+      set_offset(&mut data, field.offset_pos, new_offset);
     }
   }
 
@@ -76,9 +92,9 @@ fn shift_and_resize(data: &mut Vec<u8>, from: usize, to: usize, diff: isize) {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, Value, json};
 
-    use crate::{marci_db::{InsertStruct, get_offsets}, marci_encoder::encode_document, schema::parse_schema, update_data::update_data};
+    use crate::{marci_db::{DecodeCtx, InsertStruct, MarciSelect, get_offsets}, marci_decoder::{decode_document, decode_fields}, marci_encoder::encode_document, marci_select::parse_select, schema::{FieldType, parse_schema}, update_data::update_data};
 
 
   #[test]
@@ -97,11 +113,10 @@ model User {
       "name": "Bob"
     });
     let model = &schema.models[0];
-    let (mut data, _) = encode_document(&schema, model, &json, &mut structs).unwrap();
+    let (data, _) = encode_document(&schema, model, &json, &mut structs).unwrap();
 
     let payload_offset = u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize;
     assert_eq!(payload_offset, 3 + 4 * 3);
-    println!("{:?} {}", data, data.len());
 
     assert_eq!(data.len(), payload_offset + 3);
     assert_eq!(get_offsets(&data, model), vec![payload_offset, 0, 0]);
@@ -112,7 +127,7 @@ model User {
     });
     let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
 
-    data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
+    let data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
 
     let payload_offset = u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize;
     assert_eq!(payload_offset, 3 + 4 * 3);
@@ -126,7 +141,7 @@ model User {
     });
     let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
 
-    data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
+    let data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
 
     let payload_offset = u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize;
     assert_eq!(payload_offset, 3 + 4 * 3);
@@ -140,11 +155,78 @@ model User {
     });
     let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
 
-    data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
+    let data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
 
     let payload_offset = u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize;
     assert_eq!(payload_offset, 3 + 4 * 3);
     assert_eq!(get_offsets(&data, model), vec![0, payload_offset, payload_offset]);
+
+  }
+
+  #[test]
+  pub fn test_update_enum() {
+    let schema_str = "
+      model Role {
+        role        RoleKind
+      }
+      enum RoleKind {
+        creator
+        admin {
+          admin_count    Int
+          admin_features String[]
+        }
+      }
+    ";
+
+    let schema = parse_schema(schema_str);
+    let model = &schema.models[0];
+    let FieldType::Enum(en) = &model.fields[1].ty else {
+      panic!("Field [0] is not a enum");
+    };
+
+    let json = json!({
+      "role": "creator"
+    });
+
+    let mut structs = vec![];
+    let (data, _) = encode_document(&schema, model, &json, &mut structs).unwrap();
+    let mask = &bitvec::bitvec!(1;en.variants[1].fields.len());
+
+
+    let json_update = json!({
+      "role": "admin",
+      "admin_count": 3,
+      "admin_features": [ "tester", "tester2" ]
+    });
+    let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
+
+    let data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
+    assert_eq!(&data[model.payload_offset..model.payload_offset+2], &[0,1]);
+
+    let mut obj = Map::new();
+    decode_fields(&[], &data[model.payload_offset..], &en.variants[1].fields, &mut obj, mask, None, en.variants[1].payload_offset).unwrap();
+    assert_eq!(Value::Object(obj), json!({
+      "admin_count": 3,
+      "admin_features": [ "tester", "tester2" ]
+    }));
+
+
+
+    let json_update = json!({
+      "role": "admin",
+      "admin_count": 10
+    });
+    let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
+    
+    let data = update_data(&model.fields, model.payload_offset, &data, &new_data, &changed_mask);
+    assert_eq!(&data[model.payload_offset..model.payload_offset+2], &[0,1]);
+
+    let mut obj = Map::new();
+    decode_fields(&[], &data[model.payload_offset..], &en.variants[1].fields, &mut obj, mask, None, en.variants[1].payload_offset).unwrap();
+    assert_eq!(Value::Object(obj), json!({
+      "admin_count": 10,
+      "admin_features": [ "tester", "tester2" ]
+    }));
 
   }
 

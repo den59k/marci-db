@@ -17,21 +17,20 @@ pub enum DecodeError {
 
 pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     let DecodeCtx { data, entity, id, select, includes, inject, aliases } = ctx;
-
     if !data.is_empty() {
         if data.len() < 3 {
             return Err(DecodeError::BufferTooSmall);
         }
     
-        let version = data[0];
-        if version != 1 {
-            return Err(DecodeError::WrongVersion);
-        }
+        // let version = data[0];
+        // if version != 1 {
+        //     return Err(DecodeError::WrongVersion);
+        // }
     
-        if u16::from_be_bytes([data[1], data[2]]) != entity.payload_offset as u16 {
-            let offset = u16::from_be_bytes([data[1], data[2]]);
-            return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", entity.payload_offset, offset)));
-        }
+        // if u16::from_be_bytes([data[1], data[2]]) != entity.payload_offset as u16 {
+        //     let offset = u16::from_be_bytes([data[1], data[2]]);
+        //     return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", entity.payload_offset, offset)));
+        // }
     
         if data.len() < entity.payload_offset {
             return Err(DecodeError::BufferTooSmall);
@@ -64,7 +63,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     return Ok(Value::Object(obj));
 }
 
-fn decode_fields<'a>(
+pub fn decode_fields<'a>(
     id: &'a [u8],
     data: &'a [u8], 
     fields: &[Field], 
@@ -156,14 +155,14 @@ fn decode_fields<'a>(
 
                 let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap()) as usize;
                 obj.insert(field_name, Value::String(en.variants[variant_index].name.clone()));
-                let variant_fields = &en.variants[variant_index].fields;
-                if !variant_fields.is_empty() {
-                    let bit_vec = bitvec!(1; variant_fields.len());
+                // let variant_fields = &en.variants[variant_index].fields;
+                // if !variant_fields.is_empty() {
+                //     let bit_vec = bitvec!(1; variant_fields.len());
 
-                    println!("{:?} {:?}", &data[offset..], variant_fields);
+                //     println!("{:?} {:?}", &data[offset..], variant_fields);
 
-                    decode_fields(&[], &data[offset..], variant_fields, obj, &bit_vec, None, en.variants[variant_index].payload_offset)?;
-                }
+                //     decode_fields(&[], &data[offset..], variant_fields, obj, &bit_vec, None, en.variants[variant_index].payload_offset)?;
+                // }
             }
             _ => {}
         }
@@ -360,13 +359,13 @@ mod tests {
             id: &data[0].0, 
             data: &data[0].1, 
             entity: *st, 
-            select: &select.select, 
+            select: &select.mask, 
             includes: vec![], 
             inject: None,
             aliases: None
         }).unwrap();
 
-        assert_eq!(resp, json!({ "role": "admin", "features": [ "root", "tester" ] }));
+        assert_eq!(resp, json!({ "role": "admin" }));
     }
 
 }

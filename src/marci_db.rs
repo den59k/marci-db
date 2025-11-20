@@ -24,7 +24,7 @@ pub struct MarciSelectInclude<'a> {
 #[derive(Debug)]
 pub struct Injected<'a> {
   pub st: &'a Entity,
-  pub select: BitVec,
+  pub mask: BitVec,
   pub aliases: Option<HashMap<usize,&'a str>>
 }
 
@@ -36,17 +36,13 @@ pub enum MarciSelectBinding<'a> {
   ManyStruct(),
 }
 
-pub struct MarciSelectVirtual<'a> {
-  pub field_index: usize,
-  pub index_name: &'a[u8],
-  pub model: &'a Entity,
-  pub select: Box<MarciSelect<'a>>
-}
+pub type EnumSelect<'a> = HashMap<usize, HashMap<u16, MarciSelect<'a>>>;
 
 #[derive(Debug)]
 pub struct MarciSelect<'a> {
-  pub select: BitVec,
-  pub includes: Vec<MarciSelectInclude<'a>>
+  pub mask: BitVec,
+  pub includes: Vec<MarciSelectInclude<'a>>,
+  pub enum_selects: EnumSelect<'a>
 }
 
 pub struct DecodeCtx<'a, U> {
@@ -251,9 +247,9 @@ impl MarciDB {
       data: &[u8],
       rx: &ReadTransaction,
       select: &MarciSelect,
-      model: &Entity,
+      entity: &Entity,
       f: &F,
-      inject: Option<U>
+      mut inject: Option<U>
   ) -> U
   where
       F: Fn(DecodeCtx<U>) -> U,
@@ -344,7 +340,21 @@ impl MarciDB {
       }
     }).collect();
 
-    return f(DecodeCtx { id, data, entity: model, select: &select.select, includes, inject, aliases: None });
+    for (field_index, variants_map) in &select.enum_selects {
+      let field = &entity.fields[*field_index];
+      let FieldType::Enum(en) = &field.ty else {
+        panic!("Field type is not enum");
+      };
+      let offset = get_offset(data, field.offset_pos);
+      if offset != 0 {
+        let variant = &u16::from_be_bytes(data[offset..offset+2].try_into().unwrap());
+        if let Some(variant_select) = variants_map.get(variant) {
+          let variant_resp = self.process_data(&[], &data[offset..], rx, variant_select, &en.variants[*variant as usize], f, inject.take());
+          inject = Some(variant_resp);
+        }
+      }
+    }
+    return f(DecodeCtx { id, data, entity, select: &select.mask, includes, inject, aliases: None });
   }
 
   pub fn get_all<U, F>(
@@ -425,7 +435,6 @@ impl MarciDB {
             let mut new_item_id = item_id.clone();
             new_item_id[0..8].copy_from_slice(id);
             
-            println!("Insert to {} {:?}", st.name, new_item_id);
             // TODO: Do not insert counter value in UPDATE struct request
             self.insert_counter_value(*st, &mut new_item_id);
 
@@ -754,8 +763,8 @@ fn get_injected_data<U,F>(id: &[u8], injected_tree: &Option<(&Injected<'_>, Tree
     id, 
     data: &data, 
     entity: injected.st, 
-    select: &injected.select,
-     includes: vec![], 
+    select: &injected.mask,
+    includes: vec![], 
     inject: None, 
     aliases: injected.aliases.as_ref() 
   }))

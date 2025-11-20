@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use crate::schema::{Field, parse_field_raw, parse_fields};
+use crate::schema::{Entity, Field, parse_field_raw, parse_fields};
 
 
 #[derive(Debug,Clone)]
 pub struct EnumDef {
     pub name: String,
-    pub variants: Vec<EnumVariant>,
+    pub variants: Vec<Entity>,
     pub variants_map: HashMap<String, u16>
 }
 
@@ -17,12 +17,6 @@ impl EnumDef {
     }
 }
 
-#[derive(Debug,Clone)]
-pub struct EnumVariant {
-    pub name: String,
-    pub fields: Vec<Field>,
-    pub payload_offset: usize
-}
 
 pub fn parse_enum_block(
     name: String,
@@ -53,14 +47,14 @@ pub fn parse_enum_block(
             let variant_name = name_part.trim().to_string();
             // Offsets in enum has pre_header_size 4 bytes: 2 bytes - enum variant, 2 bytes - payload_offset
             let (fields, payload_offset) = parse_fields(lines, 4); 
-            variants.push(EnumVariant {
+            variants.push(Entity {
                 name: variant_name,
                 fields,
                 payload_offset
             });
         } else {
             let variant_name = line.to_string();
-            variants.push(EnumVariant {
+            variants.push(Entity {
                 name: variant_name,
                 fields: Vec::new(),
                 payload_offset: 0
