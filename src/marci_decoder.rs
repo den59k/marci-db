@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
+use bitvec::{bitvec, vec::BitVec};
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{FieldType, Entity, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{Entity, Field, FieldType, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -37,57 +40,7 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
 
     let mut obj = Map::new();
 
-    for (field_index, field) in entity.fields.iter().enumerate() {
-        if !select[field_index] { continue;  }
-
-        if let Some(id_idx) = field.id_idx {
-            match &field.ty {
-                FieldType::Primitive(primitive) => {
-                    // TODO: correct calc offset
-                    let value = decode_value(primitive, id, 0, id_idx*8, 0)?;
-                    obj.insert(field.name.clone(), value);
-                }
-                _ => {}
-            }
-        }
-
-        if field.offset_pos == 0 { continue; }
-        
-        if data.is_empty() {
-            return Err(DecodeError::EmptyPayload);
-        }
-
-        match &field.ty {
-            FieldType::Primitive(primitive) => {
-                let offset = get_offset_checked(data, field.offset_pos)?;
-                // Поле = null
-                if offset == 0 {
-                    obj.insert(field.name.clone(), Value::Null);
-                    continue;
-                }
-
-                // Декодируем
-                let value = decode_value(primitive, &data, field.offset_pos, offset, entity.payload_offset)?;
-                let name = aliases
-                    .and_then(|a| a.get(&field_index))
-                    .map(|i|i.to_string())
-                    .unwrap_or_else(|| field.name.clone());
-                obj.insert(name, value);
-            }
-            FieldType::Enum(en) => {
-                let offset = get_offset_checked(data, field.offset_pos)?;
-                // Поле = null
-                if offset == 0 {
-                    obj.insert(field.name.clone(), Value::Null);
-                    continue;
-                }
-
-                let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap()) as usize;
-                obj.insert(field.name.clone(), Value::String(en.variants[variant_index].name.clone()));
-            }
-            _ => {}
-        }
-    }
+    decode_fields(id, data, &entity.fields, &mut obj, select, aliases, entity.payload_offset)?;
     
     if let Some(Value::Object(mut map)) = inject {
         obj.append(&mut map);
@@ -111,58 +64,148 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
     return Ok(Value::Object(obj));
 }
 
+fn decode_fields<'a>(
+    id: &'a [u8],
+    data: &'a [u8], 
+    fields: &[Field], 
+    obj: &mut Map<String, Value>, 
+    select: &BitVec, 
+    aliases: Option<&HashMap<usize, &str>>,
+    payload_offset: usize
+) -> Result<(), DecodeError> {
+    for (field_index, field) in fields.iter().enumerate() {
+        if !select[field_index] { continue;  }
+
+        if let Some(id_idx) = field.id_idx {
+            match &field.ty {
+                FieldType::Primitive(primitive) => {
+                    // TODO: correct calc offset
+                    let value = decode_value(primitive, id, id_idx*8, None)?;
+                    obj.insert(field.name.clone(), value);
+                }
+                _ => {}
+            }
+        }
+
+        if field.offset_pos == 0 { continue; }
+        
+        if data.is_empty() {
+            return Err(DecodeError::EmptyPayload);
+        }
+
+        let field_name = aliases
+            .and_then(|a| a.get(&field_index))
+            .map(|i|i.to_string())
+            .unwrap_or_else(|| field.name.clone());
+
+        match &field.ty {
+            FieldType::Primitive(primitive) => {
+                let offset = get_offset_checked(data, field.offset_pos)?;
+                // Поле = null
+                if offset == 0 {
+                    obj.insert(field.name.clone(), Value::Null);
+                    continue;
+                }
+
+                let offset_end = primitive.is_dynamic_size().then(|| {
+                    return get_end(&data, field.offset_pos, payload_offset)
+                });
+
+                // Декодируем
+                let value = decode_value(primitive, &data, offset, offset_end)?;
+
+                obj.insert(field_name, value);
+            }
+            FieldType::PrimitiveList(primitive) => {
+                let offset = get_offset_checked(data, field.offset_pos)?;
+                if offset == 0 {
+                    // NOTE: If field is not nullable, it must write empty list on value
+                    obj.insert(field.name.clone(), Value::Null);
+                    continue;
+                }
+
+                let size = u32::from_be_bytes(data[offset..offset+4].try_into().unwrap()) as usize;
+                let mut vec = Vec::with_capacity(size);
+
+                let is_dynamic_size = primitive.is_dynamic_size();
+                let static_size = primitive.get_size();
+
+                for i in 0..size {
+                    let offset_pos = offset+4 + i * 4;
+
+                    let item_offset = if is_dynamic_size {
+                        offset + u32::from_be_bytes(data[offset_pos .. offset_pos + 4].try_into().unwrap()) as usize
+                    } else {
+                        offset + 4 + static_size * i
+                    };
+                    let offset_end = is_dynamic_size.then(|| {
+                        offset + u32::from_be_bytes(data[offset_pos + 4 .. offset_pos + 8].try_into().unwrap()) as usize
+                    });
+                    vec.push(decode_value(primitive, &data, item_offset, offset_end)?);
+                }
+                
+                obj.insert(field_name, Value::Array(vec));
+            },
+            FieldType::Enum(en) => {
+                let offset = get_offset_checked(data, field.offset_pos)?;
+                // Поле = null
+                if offset == 0 {
+                    obj.insert(field_name, Value::Null);
+                    continue;
+                }
+
+                let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap()) as usize;
+                obj.insert(field_name, Value::String(en.variants[variant_index].name.clone()));
+                let variant_fields = &en.variants[variant_index].fields;
+                if !variant_fields.is_empty() {
+                    let bit_vec = bitvec!(1; variant_fields.len());
+
+                    println!("{:?} {:?}", &data[offset..], variant_fields);
+
+                    decode_fields(&[], &data[offset..], variant_fields, obj, &bit_vec, None, en.variants[variant_index].payload_offset)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    return Ok(());
+}
+
 #[inline(always)]
-fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset_pos: usize, offset: usize, payload_offset: usize) -> Result<Value, DecodeError> {
+fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset: usize, offset_end: Option<usize>) -> Result<Value, DecodeError> {
+    if !ty.is_dynamic_size() && data.len() < offset + ty.get_size() {
+        return Err(DecodeError::BufferTooSmall);
+    }
     match ty {
         // TODO: Create string decoder supports 2 mode: read len from header and read len by terminate character
         PrimitiveFieldType::String => {
-            if data.len() < 4 {
-                return Err(DecodeError::BufferTooSmall);
-            }
-            let end = get_end(data, offset_pos, payload_offset);
-            let s = std::str::from_utf8(&data[offset..end]).map_err(|_| DecodeError::Utf8Error)?;
+            let offset_end = offset_end.expect("offset_end must be defined for decode string");
+            let s = std::str::from_utf8(&data[offset..offset_end]).map_err(|_| DecodeError::Utf8Error)?;
             Ok(Value::String(s.to_string()))
         }
         PrimitiveFieldType::DateTime => {
-            if data.len() < 8 {
-                return Err(DecodeError::BufferTooSmall);
-            }
             let epoch = i64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             // Возвращаем как число (или можно форматировать обратно в ISO)
             Ok(Value::Number(epoch.into()))
         }
         PrimitiveFieldType::Int64 => {
-            if data.len() < 8 {
-                return Err(DecodeError::BufferTooSmall);
-            }
             let n = i64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             Ok(Value::Number(n.into()))
         }
         PrimitiveFieldType::UInt64 => {
-            if data.len() < 8 {
-                return Err(DecodeError::BufferTooSmall);
-            }
             let n = u64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             Ok(Value::Number(n.into()))
         }
         PrimitiveFieldType::Float => {
-            if data.len() < 4 {
-                return Err(DecodeError::BufferTooSmall);
-            }
             let n = f32::from_be_bytes(data[offset..offset+4].try_into().unwrap());
             Ok(Value::Number(serde_json::Number::from_f64(n as f64).unwrap()))
         }
         PrimitiveFieldType::Double => {
-            if data.len() < 8 {
-                return Err(DecodeError::BufferTooSmall);
-            }
             let n = f64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
         }
         PrimitiveFieldType::Bool => {
-            if data.is_empty() {
-                return Err(DecodeError::BufferTooSmall);
-            }
             Ok(Value::Bool(data[offset] != 0))
         }
     }
@@ -177,7 +220,7 @@ pub fn decode_id(id: &[u8], model: &Entity) -> Result<Value, DecodeError> {
         };
         match &field.ty {
             FieldType::Primitive(primitive) => {
-                let value = decode_value(primitive, id, 0, id_idx * 8, 0)?;
+                let value = decode_value(primitive, id, id_idx * 8, None)?;
                 obj.insert(field.name.clone(), value);
             }
             _ => {}
@@ -194,4 +237,136 @@ pub fn get_offset_checked<'a>(data: &'a [u8], offset_pos: usize) -> Result<usize
     return Err(DecodeError::OffsetOutOfRange);
   }
   return Ok(offset);
+}
+
+#[cfg(test)]
+mod tests {
+    use bitvec::bitvec;
+    use serde_json::json;
+
+    use crate::{marci_db::{DecodeCtx, InsertStruct}, marci_decoder::decode_document, marci_encoder::{encode_document, encode_id}, marci_select::parse_select, schema::{FieldType, parse_schema}};
+
+    #[test]
+    fn test_decode_list() {
+
+        let schema_str = "
+            model Project {
+                features     String[]
+                counters     Int[]
+            }
+        ";
+        let schema = parse_schema(schema_str);
+
+        let input = json!({
+            "features": []
+        });
+
+        let mut structs = vec![];
+        let (data, _) = encode_document(&schema, &schema.models[0], &input, &mut structs).unwrap();
+
+        // First 4 bytes - array size, second 4 bytes - last item offset
+        // Field "counters" is null
+        assert_eq!(&data[schema.models[0].payload_offset..], &[0, 0, 0, 0,  0, 0, 0, 8]);
+
+
+        let input = json!({
+            "features": ["tester", "tests"],
+            "counters": [ 4, 5 ]
+        });
+
+        let mut structs = vec![];
+        let (data, _) = encode_document(&schema, &schema.models[0], &input, &mut structs).unwrap();
+        let id = encode_id(&schema.models[0], &input, true).unwrap();
+
+        let resp = decode_document(DecodeCtx { 
+            id: &id, 
+            data: &data, 
+            entity: &schema.models[0], 
+            select: &bitvec!(1;  &schema.models[0].fields.len() + 1), 
+            includes: vec![], 
+            inject: None,
+            aliases: None
+        }).unwrap();
+
+        assert_eq!(resp, json!({
+            "id": 0,
+            "features": ["tester", "tests"],
+            "counters": [ 4, 5 ]
+        }))
+    }
+
+    #[test]
+    fn test_decode_enum() {
+
+        let schema_str = "
+            model User {
+                name        String
+            }
+
+            model Project {
+                name        String
+                users       UserRole[]
+            }
+
+            enum RoleKind {
+                viewer
+                admin {
+                    features String[]
+                }
+            }
+
+            struct UserRole {
+                user        User          @id
+                role        RoleKind
+            }
+        ";
+
+        let schema = parse_schema(schema_str);
+
+        let project_model = &schema.models[1];
+        let FieldType::StructList(user_role_st) = &project_model.fields[2].ty else {
+            panic!("Project field type is not a struct list");
+        };
+
+        let FieldType::Enum(role_field) = &user_role_st.fields[2].ty else {
+            panic!("ProjectRole field type is not a enum");
+        };
+        assert_eq!(role_field.variants.len(), 2);
+        
+        let input = json!({
+            "name": "First project",
+            "users": [{ 
+                "user": { "id": 1 },
+                "role": "admin",
+                "features": [ "root", "tester" ]
+            }]
+        });
+
+        let mut structs = vec![];
+        let _ = encode_document(&schema, project_model, &input, &mut structs).unwrap();
+
+        assert_eq!(structs.len(), 1);
+        let InsertStruct::Many { st, data } = &structs[0] else {
+            panic!("Inserted data is not a InsertStruct::Many");
+        };
+
+        let input_select = json!({
+            "role": true,
+            "features": true
+        });
+        let select = parse_select(&st.fields, &input_select, &schema).unwrap();
+
+        let resp = decode_document(DecodeCtx { 
+            id: &data[0].0, 
+            data: &data[0].1, 
+            entity: *st, 
+            select: &select.select, 
+            includes: vec![], 
+            inject: None,
+            aliases: None
+        }).unwrap();
+
+        assert_eq!(resp, json!({ "role": "admin", "features": [ "root", "tester" ] }));
+    }
+
 }

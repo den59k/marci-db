@@ -13,7 +13,7 @@ pub struct EnumDef {
 impl EnumDef {
     pub fn variants_str(&self) -> String {
         let vec: Vec<&str> = self.variants.iter().map(|f| f.name.as_str()).collect();
-        return vec.join(",");
+        return vec.join(", ");
     }
 }
 
@@ -51,8 +51,8 @@ pub fn parse_enum_block(
         if let Some(brace_pos) = line.find('{') {
             let name_part = &line[..brace_pos];
             let variant_name = name_part.trim().to_string();
-
-            let (fields, payload_offset) = parse_fields(lines, 2);
+            // Offsets in enum has pre_header_size 4 bytes: 2 bytes - enum variant, 2 bytes - payload_offset
+            let (fields, payload_offset) = parse_fields(lines, 4); 
             variants.push(EnumVariant {
                 name: variant_name,
                 fields,

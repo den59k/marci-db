@@ -76,7 +76,7 @@ impl ModelRef {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PrimitiveFieldType {
     String,
     Int64,
@@ -85,6 +85,24 @@ pub enum PrimitiveFieldType {
     Double,
     Bool,
     DateTime,
+}
+
+impl PrimitiveFieldType {
+    pub fn is_dynamic_size(&self) -> bool {
+        return *self == PrimitiveFieldType::String
+    }
+    pub fn get_size(&self) -> usize {
+        return match *self {
+            PrimitiveFieldType::Bool => 1,
+            PrimitiveFieldType::Float => 4,
+            PrimitiveFieldType::Int64 | 
+                PrimitiveFieldType::UInt64 | 
+                PrimitiveFieldType::Double | 
+                PrimitiveFieldType::DateTime => 8,
+
+            _ => 0
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +119,8 @@ pub enum FieldType {
     StructList(Entity),
     Enum(EnumDef)
 }
+
+
 
 fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>, pre_header_size: usize) -> (Vec<Field>, usize) {
     let mut offset_index: usize = 0;

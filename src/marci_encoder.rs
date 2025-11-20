@@ -1,5 +1,5 @@
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
 use crate::{marci_db::InsertStruct, schema::{Entity, Field, FieldType, PrimitiveFieldType, Schema}};
@@ -36,10 +36,42 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
 
     let initial_size = buf.len();
 
-    let mut changed_mask = bitvec![0; model.fields.len()];
+    let changed_mask = write_fields(obj, &mut buf, &model.fields, &schema, &model.name, structs)?;
+
+    if buf.len() == initial_size && structs.len() == 0 {
+        return Err(EncodeError::EmptyObject);
+    }
+
+    Ok((buf, changed_mask))
+}
+
+/// Кодирует массив значений и дописывает в конец `dst`
+// fn encode_list<T>(
+//     dst: &mut Vec<u8>,
+//     ty: &PrimitiveFieldType,
+//     field_name: &str,
+//     v: &[T],
+// )  -> Result<(), EncodeError> where T: Borrow<Value> {
+//     dst.extend_from_slice(&(v.len() as u32).to_be_bytes());
+//     for (index, val) in v.iter().enumerate() {
+//         // TODO: remove format! from this
+//         encode_value(dst, ty, &format!("{}[{}]", field_name, index), val.borrow())?;
+//     }
+//     Ok(())
+// }
+
+fn write_fields<'a>(
+    obj: &Map<String, Value>, 
+    buf: &mut Vec<u8>, 
+    fields: &'a [Field], 
+    schema: &'a Schema, 
+    model_name: &str, 
+    structs: &mut Vec<InsertStruct<'a>>
+) -> Result<BitVec, EncodeError> {
+    let mut changed_mask = bitvec![0; fields.len()];
 
     // Тело
-    for (field_index, field) in model.fields.iter().enumerate() {
+    for (field_index, field) in fields.iter().enumerate() {
         let Some(value) = obj.get(&field.name) else {
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
@@ -66,11 +98,41 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
         match &field.ty {
             FieldType::Primitive(primitive_type) => {
                 if field.offset_pos == 0 {
-                    println!("Warn: try to write to field {}.{} has not offset_pos", model.name, field.name);
+                    println!("Warn: try to write to field {}.{} has not offset_pos", model_name, field.name);
                     continue;
                 }
-                write_header(&mut buf, field)?;
-                encode_value(&mut buf, field, &primitive_type,  value)?;
+                write_header(buf, field)?;
+                encode_value(buf, field, primitive_type,  value)?;
+            }
+            FieldType::PrimitiveList(primitive_type) => {
+                let Some(arr) = value.as_array() else {
+                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                };
+                let byte_start = buf.len();
+                write_header(buf, field)?;
+                buf.extend_from_slice(&(arr.len() as u32).to_be_bytes());
+
+                let mut offset_index = buf.len();
+                let is_dynamic_len = primitive_type.is_dynamic_size();
+                if is_dynamic_len {
+                    buf.resize(offset_index + arr.len()*4 + 4, 0);
+
+                    // Write offset for first element
+                    let el_offset = (buf.len() - byte_start) as u32;
+                    buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
+                    offset_index += 4;
+                }
+
+                for arr_item in arr.iter() {
+                    encode_value(buf, field, primitive_type,  arr_item)?;
+
+                    // Write offset for next element. (Also write sentinel offset)
+                    if is_dynamic_len {
+                        let el_offset = (buf.len() - byte_start) as u32;
+                        buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
+                        offset_index += 4;
+                    }
+                }
             }
             FieldType::ModelRef(_) => {
                 if !value.is_object() {
@@ -82,9 +144,9 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
                 };
 
                 if field.offset_pos != 0 {
-                    write_header(&mut buf, field)?;
+                    write_header(buf, field)?;
                     // TODO: write all key from model, not only id
-                    encode_value(&mut buf, field, &PrimitiveFieldType::UInt64,  item_id)?;
+                    encode_value(buf, field, &PrimitiveFieldType::UInt64,  item_id)?;
                 }
             }
             FieldType::ModelRefList(model_index) => {
@@ -127,17 +189,31 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
             }
             FieldType::Enum(en) => {
                 if field.offset_pos == 0 {
-                    println!("Warn: try to write to enum {}.{} has not offset_pos", model.name, field.name);
+                    println!("Warn: try to write to enum {}.{} has not offset_pos", model_name, field.name);
                     continue;
                 }
                 let Some(variant_index) = value.as_str().and_then(|f| en.variants_map.get(f)) else {
                     return Err(EncodeError::TypeMismatchEnum { 
                         field: field.name.clone(), 
-                        expected: format!("One of: {}", en.variants_str())
+                        expected: format!("One of: [{}]", en.variants_str())
                     })
                 };
-                write_header(&mut buf, field)?;
-                buf.extend_from_slice(&variant_index.to_be_bytes());
+                write_header(buf, field)?;
+
+                let current_variant = &en.variants[*variant_index as usize];
+                if !current_variant.fields.is_empty() {
+                    let mut new_buf = vec![0u8; current_variant.payload_offset];
+                    new_buf[0..2].copy_from_slice(&variant_index.to_be_bytes());
+                    new_buf[2..4].copy_from_slice(&(current_variant.payload_offset as u16).to_be_bytes());
+
+                    let enum_name = &[ model_name, ".", &field.name ].concat();
+                    let _mask = write_fields(obj, &mut new_buf, &current_variant.fields, schema, enum_name, structs)?;
+
+                    buf.append(&mut new_buf);
+                    // TODO: use enum mask to update data
+                } else {
+                    buf.extend_from_slice(&variant_index.to_be_bytes());
+                }
             }
             _ => {
 
@@ -145,30 +221,11 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
         }
     }
 
-    if buf.len() == initial_size && structs.len() == 0 {
-        return Err(EncodeError::EmptyObject);
-    }
-
-    Ok((buf, changed_mask))
+    return Ok(changed_mask)
 }
 
-/// Кодирует массив значений и дописывает в конец `dst`
-// fn encode_list<T>(
-//     dst: &mut Vec<u8>,
-//     ty: &PrimitiveFieldType,
-//     field_name: &str,
-//     v: &[T],
-// )  -> Result<(), EncodeError> where T: Borrow<Value> {
-//     dst.extend_from_slice(&(v.len() as u32).to_be_bytes());
-//     for (index, val) in v.iter().enumerate() {
-//         // TODO: remove format! from this
-//         encode_value(dst, ty, &format!("{}[{}]", field_name, index), val.borrow())?;
-//     }
-//     Ok(())
-// }
-
 /// Записывает в offset текущий курсор на buf
-fn write_header(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
+fn write_header(dst: &mut [u8], field: &Field) -> Result<(), EncodeError> {
     if field.offset_pos == 0 {
         return Err(EncodeError::TryWriteToVirtualField);
     }
@@ -194,12 +251,6 @@ fn encode_value(
                     expected: "string",
                 })?;
             let bytes = s.as_bytes();
-            // let len = bytes.len();
-            // if len > u32::MAX as usize {
-            //     // на практике вряд ли, но проверка не помешает
-            //     return Err(EncodeError::OffsetOverflow);
-            // }
-            // dst.extend_from_slice(&(len as u32).to_be_bytes());
             dst.extend_from_slice(bytes);
         }
         PrimitiveFieldType::DateTime => {
@@ -377,7 +428,7 @@ fn encode_id_internal(key_buf: &mut Vec<u8>, model: &Entity, obj: &Value, skip_c
 
 #[cfg(test)]
 mod tests {
-    use crate::{marci_db::{InsertStruct, get_end, get_offsets}, marci_encoder::{encode_document, encode_id}, schema::parse_schema};
+    use crate::{marci_db::{InsertStruct, get_end, get_offsets}, marci_encoder::{encode_document, encode_id}, schema::{FieldType, parse_schema}};
     use serde_json::json;
 
     #[test]
@@ -485,6 +536,82 @@ mod tests {
         // assert_eq!()
 
     }   
+
+    #[test]
+    fn test_encode_enum_data() {
+        let schema_str = "
+            model User {
+                name        String
+            }
+
+            model Project {
+                name        String
+                users       UserRole[]
+            }
+
+            enum RoleKind {
+                viewer
+                admin {
+                    features String[]
+                }
+            }
+
+            struct UserRole {
+                user        User          @id
+                role        RoleKind
+            }
+        ";
+
+        let schema = parse_schema(schema_str);
+        let project_model = &schema.models[1];
+        let FieldType::StructList(user_role_st) = &project_model.fields[2].ty else {
+            panic!("Project field type is not a struct list");
+        };
+
+        let FieldType::Enum(role_field) = &user_role_st.fields[2].ty else {
+            panic!("ProjectRole field type is not a enum");
+        };
+        assert_eq!(role_field.variants.len(), 2);
+        
+        let input = json!({
+            "name": "First project",
+            "users": [{ 
+                "user": { "id": 1 },
+                "role": "admin",
+                "features": [ "root", "tester" ]
+            }]
+        });
+
+        let mut structs = vec![];
+        let _ = encode_document(&schema, project_model, &input, &mut structs).unwrap();
+
+        assert_eq!(structs.len(), 1);
+        let InsertStruct::Many { st, data: inserted_roles } = &structs[0] else {
+            panic!("Inserted data is not a InsertStruct::Many");
+        };
+        
+        assert_eq!(inserted_roles.len(), 1);
+
+        let body = &inserted_roles[0].1[st.payload_offset..];
+        let enum_variant = u16::from_be_bytes(body[0..2].try_into().unwrap()) as usize;
+        assert_eq!(enum_variant, 1);
+
+        let enum_variant_body = &body[role_field.variants[enum_variant].payload_offset..];
+        let arr_size = u32::from_be_bytes(enum_variant_body[0..4].try_into().unwrap()) as usize;
+        assert_eq!(arr_size, 2);
+
+        let first_item_offset = u32::from_be_bytes(enum_variant_body[4..8].try_into().unwrap()) as usize;
+        let second_item_offset = u32::from_be_bytes(enum_variant_body[8..12].try_into().unwrap()) as usize;
+
+        println!("{:?}", enum_variant_body);
+
+        let first_item = str::from_utf8(&enum_variant_body[first_item_offset..second_item_offset]).unwrap();
+        assert_eq!(first_item, "root");
+
+        let second_item = str::from_utf8(&enum_variant_body[second_item_offset..]).unwrap();
+        assert_eq!(second_item, "tester");            
+    }
+
 
 }
 
