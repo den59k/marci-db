@@ -1,6 +1,6 @@
-use std::{collections::{HashMap, HashSet}, fmt::Debug};
+use std::{collections::{HashMap, HashSet}, fmt::Debug, ops::Not};
 
-use crate::schema::{schema_attributes::{Attribute, parse_attribute}, schema_enum::{EnumDef, parse_enum_block}};
+use crate::schema::{schema_attributes::{Attribute, parse_attribute, split_once_end}, schema_enum::{EnumDef, parse_enum_block}};
 
 mod schema_enum;
 mod schema_attributes;
@@ -40,6 +40,8 @@ impl InsertedIndex {
     }
 }
 
+pub type Aliases = HashMap<String,String>;
+
 #[derive(Debug,Clone)]
 pub struct Field {
     pub name: String,
@@ -54,7 +56,7 @@ pub struct Field {
     pub select_index: Option<String>,
     pub attributes: Vec<Attribute>,
     /// Ключи, которые можно добавить через inject (используется при запросе на derived элемент в структуре)
-    pub injected_fields: Vec<(ModelRef,String)>
+    pub injected_fields: Option<(ModelRef,Aliases)>
 }
 
 impl Field {
@@ -170,7 +172,7 @@ pub fn update_key_fields(fields: &mut Vec<Field>) -> () {
             id_idx: Some(0),
             attributes: vec![Attribute::Id], 
             counter_idx: Some(0),
-            injected_fields: vec![]
+            injected_fields: None
         });
     }
 }
@@ -263,7 +265,7 @@ fn parse_field_raw(line: &str) -> Field {
         select_index: None,
         counter_idx: None,
         id_idx: is_id.then_some(0),
-        injected_fields: vec![]
+        injected_fields: None
     }
 }
 
@@ -354,7 +356,7 @@ fn resolve_fields(
                         inserted_indexes: vec![], 
                         select_index: None, 
                         attributes: vec![Attribute::Id],
-                        injected_fields: vec![]
+                        injected_fields: None
                     });
 
                     resolve_fields(&mut st.fields, model_index, &st.name, model_by_name, structs, enums);
@@ -377,7 +379,7 @@ fn resolve_fields(
 
 // Разрешаем аттрибуты
 fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize>) {
-    let mut injects: Vec<(ModelRef, ModelRef, String)> = vec![];
+    let mut injects: HashMap<ModelRef, (ModelRef, Aliases)> = HashMap::new();
     let mut bindings: HashSet<(ModelRef,ModelRef)> = HashSet::new();
 
     schema.walk(|field, field_ref| {
@@ -393,9 +395,20 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
                 }
                 Attribute::InjectUnresolved(items) => {
                     for (key, alias) in items {
-                        let ref_model_ref = get_model_ref(key, &schema, &model_by_name);
+                        let Some((base_name,field_name)) = split_once_end(key, '.') else {
+                            panic!("Inject syntax must include path to struct")
+                        };
+                        let ref_model_ref = &get_model_ref(base_name, &schema, &model_by_name);
 
-                        injects.push((field_ref.clone(), ref_model_ref, alias.clone()));
+                        let field_injects = injects
+                            .entry(field_ref.clone())
+                            .or_insert_with(|| (ref_model_ref.clone(), HashMap::new()));
+
+                        if &field_injects.0 != ref_model_ref {
+                            panic!("You cannot inject from multiple structs");
+                        }
+
+                        field_injects.1.insert(field_name.to_string(), alias.to_string());
                     }
                 }
                 _ => {}
@@ -404,9 +417,15 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
     });
 
     // Добавляем inject_fields
-    for (field_ref, ref_model_ref, alias) in injects {
+    for (field_ref, (st_ref, aliases)) in injects {
+        let st_field = schema.get_field(&st_ref);
+        let _st = match &st_field.ty {
+            FieldType::Struct(st) | FieldType::StructList(st) => st,
+            _ => panic!("You cannot inject from non-struct field")
+        };
+        
         let field = schema.get_field_mut(&field_ref);
-        field.injected_fields.push((ref_model_ref, alias));
+        field.injected_fields = Some((st_ref, aliases ));
     }
 
     // Добавляем inserted_indexes
@@ -469,7 +488,7 @@ fn rev_indexes(field: &Field) -> Vec<InsertedIndex> {
 
 
 impl Schema {
-    fn get_field(&self, key: &ModelRef) -> &Field {
+    pub fn get_field(&self, key: &ModelRef) -> &Field {
         let model = &self.models[key.model_index];
         let field = &model.fields[key.field_index];
         if let Some(struct_field_index) = &key.struct_field_index {

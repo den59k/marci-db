@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{marci_db::{EnumSelect, Injected, MarciSelect, MarciSelectBinding, MarciSelectInclude}, schema::{Entity, Field, FieldType, Schema}};
+use crate::{marci_db::{EnumSelect, Injected, MarciSelect, MarciSelectBinding, MarciSelectInclude}, schema::{Aliases, Entity, Field, FieldType, Schema}};
 
 #[derive(Debug)]
 pub enum MarciSelectError {
@@ -16,6 +16,7 @@ impl MarciSelect<'_> {
     return MarciSelect { 
       mask: bitvec![1; fields.len()], 
       includes: vec![], 
+      aliases: None,
       enum_selects: fields.iter().enumerate().filter_map(|(i, field)| {
         let FieldType::Enum(en) = &field.ty else { return None; };
         
@@ -40,7 +41,7 @@ impl MarciSelect<'_> {
   }
 }
 
-pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -> Result<MarciSelect<'a>, MarciSelectError> {
+pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, aliases: Option<&'a Aliases>) -> Result<MarciSelect<'a>, MarciSelectError> {
 
   if json.is_boolean() {
     return Ok(MarciSelect::all(fields));
@@ -51,7 +52,18 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
   let mut enum_selects: EnumSelect<'_> = HashMap::new();
 
   for (field_index, field) in fields.iter().enumerate() {
-    let Some(val) = json.get(&field.name) else {
+
+    let field_name: &str = {
+      if let Some(aliases) = aliases {
+        // Skip field if it not presented in aliases
+        let Some(str) = aliases.get(&field.name) else { continue; };
+        str
+      } else {
+        &field.name
+      }
+    };
+    
+    let Some(val) = json.get(field_name) else {
       continue;
     };
     if matches!(val, Value::Bool(false)) {
@@ -61,7 +73,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
     match &field.ty {
       FieldType::ModelRef(model_index) => {
         let model = &schema.models[*model_index];
-        let select = parse_select(&model.fields, &val, schema)?;
+        let select = parse_select(&model.fields, &val, schema, None)?;
       
         includes.push(MarciSelectInclude {
           field,
@@ -69,12 +81,12 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
           select,
           select_only_id: false,
           binding: MarciSelectBinding::One(),
-          injected: parse_injected(schema, field, val)
+          injected: parse_injected(schema, field, val)?
         });
       },
       FieldType::ModelRefList(model_index) => {
         let model = &schema.models[*model_index];
-        let select = parse_select(&model.fields, &val, schema)?;
+        let select = parse_select(&model.fields, &val, schema, None)?;
         let tree_name = field.select_index.as_ref().expect("Index not found").as_bytes();
         includes.push(MarciSelectInclude {
           field,
@@ -82,11 +94,11 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
           select,
           select_only_id: false,
           binding: MarciSelectBinding::Many(tree_name),
-          injected: parse_injected(schema, field, val)
+          injected: parse_injected(schema, field, val)?
         });
       },
       FieldType::Struct(st) => {
-        let select = parse_select(&st.fields, &val, schema)?;
+        let select = parse_select(&st.fields, &val, schema, None)?;
         includes.push(MarciSelectInclude {
           field,
           model: st,
@@ -97,7 +109,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
         });
       },
       FieldType::StructList(st) => {
-        let select = parse_select(&st.fields, &val, schema)?;
+        let select = parse_select(&st.fields, &val, schema, None)?;
         includes.push(MarciSelectInclude {
           field,
           model: st,
@@ -112,7 +124,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
         for (variant_index, variant) in en.variants.iter().enumerate() {
           if variant.fields.is_empty() { continue; }
 
-          let select = parse_select(&variant.fields, json, schema)?;
+          let select = parse_select(&variant.fields, json, schema, aliases)?;
           if !select.includes.is_empty() || select.mask.any() {
             enum_selects
               .entry(field_index)
@@ -139,38 +151,24 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema) -
     }
   }
 
-  return Ok(MarciSelect { mask: changed_mask, includes: includes, enum_selects })
+  return Ok(MarciSelect { mask: changed_mask, includes: includes, enum_selects, aliases })
 }
 
-fn parse_injected<'a>(schema: &'a Schema, field: &'a Field, val: &Value) -> Option<Injected<'a>> {
-  if !val.is_object() || val.is_null() { return None }
+fn parse_injected<'a>(schema: &'a Schema, field: &'a Field, val: &Value) -> Result<Option<Injected<'a>>, MarciSelectError> {
+  if !val.is_object() || val.is_null() { return Ok(None) }
 
-  let mut injected: Option<Injected<'_>> = None;
-  for (field_ref, alias) in field.injected_fields.iter() {
-    let field = &schema.models[field_ref.model_index].fields[field_ref.field_index];
+  if let Some((st_ref, aliases)) = &field.injected_fields {
+    let field = schema.get_field(&st_ref);
+    let st = match &field.ty {
+      FieldType::Struct(st) | FieldType::StructList(st) => st,
+      _ => panic!("Trying to inject field from non-struct")
+    };
 
-    if val.get(alias) != Some(&Value::Bool(true)) { continue };
+    let select = parse_select(&st.fields, val, schema, Some(aliases))?;
 
-    match &field.ty {
-      FieldType::Struct(st) | FieldType::StructList(st) => {
-        if injected.as_ref().is_some_and(|f: &Injected<'_>| f.st.name != st.name) {
-          panic!("Invalid inject fields from different structs");
-        }
-        let injected = injected
-          .get_or_insert(Injected { st, mask: bitvec!(0; st.fields.len()), aliases: None } );
-
-        let struct_field_index = field_ref.struct_field_index.unwrap();
-        injected.mask.set(struct_field_index, true);
-        if *alias != field.name {
-          injected.aliases
-            .get_or_insert_default()
-            .insert(struct_field_index, &alias);
-        }
-      },
-      _ => { panic!("Trying to inject field from non-struct") }
-    } 
+    return Ok(Some(Injected { st, select }));
   }
-  return injected;
+  return Ok(None);
 }
 
 #[cfg(test)]
@@ -199,7 +197,7 @@ struct UserInfo {
     let input = json!({
         "name": true
     });
-    let parsed = parse_select(&model.fields, &input, &schema).unwrap();
+    let parsed = parse_select(&model.fields, &input, &schema, None).unwrap();
     let mut expect = bitvec::bitvec![0; model.fields.len()];
     expect.set(1, true);
     assert_eq!(parsed.mask, expect);
@@ -209,7 +207,7 @@ struct UserInfo {
         "name": true,
         "info": true
     });
-    let parsed = parse_select(&model.fields, &input, &schema).unwrap();
+    let parsed = parse_select(&model.fields, &input, &schema, None).unwrap();
     let mut expect = bitvec::bitvec![0; model.fields.len()];
     expect.set(1, true);
     assert_eq!(parsed.mask, expect);
@@ -229,7 +227,7 @@ struct UserInfo {
 model User {
   name        String
   surname     String
-  projects    Project[]     @derived(Project.users.user) @inject(Project.users.role)
+  projects    Project[]     @derived(Project.users.user) @inject(Project.users.role as role2)
 }
 
 model Project {
@@ -248,12 +246,12 @@ struct UserRole {
     let input = json!({
         "name": true,
         "projects": {
-          "role": true,
+          "role2": true,
           "name": true
         }
     });
     let model = &schema.models[0];
-    let parsed = parse_select(&model.fields, &input, &schema).unwrap();
+    let parsed = parse_select(&model.fields, &input, &schema, None).unwrap();
     assert_eq!(parsed.includes.len(), 1);
 
     assert!(parsed.includes[0].injected.is_some());
@@ -263,7 +261,7 @@ struct UserRole {
 
     let mut bitvec = bitvec!(0; injected.st.fields.len());
     bitvec.set(2, true);
-    assert_eq!(injected.mask, bitvec);
+    assert_eq!(injected.select.mask, bitvec);
 
   }
 }

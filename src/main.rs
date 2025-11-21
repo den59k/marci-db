@@ -97,7 +97,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let select = match parse_select(&model.fields, &select, &db.schema) {
+            let select = match parse_select(&model.fields, &select, &db.schema, None) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use bitvec::{bitvec, vec::BitVec};
+use bitvec::vec::BitVec;
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{Entity, Field, FieldType, PrimitiveFieldType}};
+use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{Aliases, Entity, Field, FieldType, PrimitiveFieldType}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -69,7 +69,7 @@ pub fn decode_fields<'a>(
     fields: &[Field], 
     obj: &mut Map<String, Value>, 
     select: &BitVec, 
-    aliases: Option<&HashMap<usize, &str>>,
+    aliases: Option<&Aliases>,
     payload_offset: usize
 ) -> Result<(), DecodeError> {
     for (field_index, field) in fields.iter().enumerate() {
@@ -93,7 +93,7 @@ pub fn decode_fields<'a>(
         }
 
         let field_name = aliases
-            .and_then(|a| a.get(&field_index))
+            .and_then(|a| a.get(&field.name))
             .map(|i|i.to_string())
             .unwrap_or_else(|| field.name.clone());
 
@@ -353,7 +353,7 @@ mod tests {
             "role": true,
             "features": true
         });
-        let select = parse_select(&st.fields, &input_select, &schema).unwrap();
+        let select = parse_select(&st.fields, &input_select, &schema, None).unwrap();
 
         let resp = decode_document(DecodeCtx { 
             id: &data[0].0, 
