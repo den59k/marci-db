@@ -4,9 +4,17 @@ pub enum Attribute {
     Index,
     DerivedUnresolved (String),
     Id,
-    InjectUnresolved(Vec<(String,String)>)
+    InjectUnresolved(Vec<(String,String)>),
+    OnDelete(DeleteConstraint)
 }
 
+#[derive(Debug,Clone,PartialEq)]
+pub enum DeleteConstraint {
+    SetNull,
+    Restrict,
+    Cascade,
+    RemoveItem
+}
 
 pub fn parse_attribute(s: &str) -> Attribute {
     if s.starts_with("index") {
@@ -23,6 +31,16 @@ pub fn parse_attribute(s: &str) -> Attribute {
 
     if let Some(inside) = s.strip_prefix("inject(").and_then(|x| x.strip_suffix(')')) {
         return Attribute::InjectUnresolved(parse_inject_attrs(inside));
+    }
+
+    if let Some(inside) = s.strip_prefix("onDelete(").and_then(|x| x.strip_suffix(')')) {
+        return Attribute::OnDelete(match inside.to_uppercase().as_str() {
+            "CASCADE" => DeleteConstraint::Cascade,
+            "RESTRICT" => DeleteConstraint::Restrict,
+            "SETNULL" => DeleteConstraint::SetNull,
+            "SET_NULL" => DeleteConstraint::SetNull,
+            _ => panic!("Unknown onDelete constraint: {}", inside)
+        });
     }
 
     panic!("Unknown attribute {}", s)

@@ -1,6 +1,8 @@
-use std::{collections::{HashMap, HashSet}, fmt::Debug, ops::Not};
+use std::{collections::{HashMap, HashSet}, fmt::Debug};
 
-use crate::schema::{schema_attributes::{Attribute, parse_attribute, split_once_end}, schema_enum::{EnumDef, parse_enum_block}};
+use crate::schema::{schema_attributes::{parse_attribute, split_once_end}, schema_enum::{EnumDef, parse_enum_block}};
+
+pub use crate::schema::{schema_attributes::DeleteConstraint,schema_attributes::Attribute};
 
 mod schema_enum;
 mod schema_attributes;
@@ -8,6 +10,7 @@ mod schema_attributes;
 #[derive(Debug)]
 pub struct Schema {
     pub models: Vec<Entity>,
+    pub foreign_bindings: Vec<Vec<(FieldRef,DeleteConstraint)>>
 }
 
 #[derive(Debug,Clone)]
@@ -45,6 +48,7 @@ pub type Aliases = HashMap<String,String>;
 #[derive(Debug,Clone)]
 pub struct Field {
     pub name: String,
+    pub full_name: String,
     pub ty: FieldType,
     /// Offset in bytes  (3 + offset_index*4)
     pub offset_pos: usize,
@@ -56,25 +60,43 @@ pub struct Field {
     pub select_index: Option<String>,
     pub attributes: Vec<Attribute>,
     /// Ключи, которые можно добавить через inject (используется при запросе на derived элемент в структуре)
-    pub injected_fields: Option<(ModelRef,Aliases)>
+    pub injected_fields: Option<(FieldRef,Aliases)>
 }
 
 impl Field {
     pub fn is_derived(&self) -> bool {
         self.attributes.iter().any(|attr| matches!(attr, Attribute::DerivedUnresolved { .. }))
     }
+
+    pub fn get_direct_index(&self) -> Option<&InsertedIndex> {
+        return self.inserted_indexes.iter()
+            .find(|i| matches!(i, InsertedIndex::Direct { tree_name: _ }));
+    }
+    pub fn get_direct_indexes(&self) -> Vec<&InsertedIndex> {
+        return self.inserted_indexes.iter()
+            .filter(|i| matches!(i, InsertedIndex::Direct { tree_name: _ })).collect()
+    }
+
+    pub fn get_rev_index(&self) -> Option<&InsertedIndex> {
+        return self.inserted_indexes.iter()
+            .find(|i| matches!(i, InsertedIndex::Rev { tree_name: _ }));
+    }
+    pub fn get_rev_indexes(&self) -> Vec<&InsertedIndex> {
+        return self.inserted_indexes.iter()
+            .filter(|i| matches!(i, InsertedIndex::Rev { tree_name: _ })).collect()
+    }
 }
 
 #[derive(Debug,Clone,PartialEq, Eq,Hash,PartialOrd)]
-pub struct ModelRef {
+pub struct FieldRef {
     pub model_index: usize,
     pub field_index: usize,
     pub struct_field_index: Option<usize>,
     pub enum_variant_index: Option<(usize, usize)>
 }
-impl ModelRef {
-    pub fn new(model_index: usize, field_index: usize) ->  ModelRef {
-        return ModelRef { model_index, field_index, struct_field_index: None, enum_variant_index: None };
+impl FieldRef {
+    pub fn new(model_index: usize, field_index: usize) ->  FieldRef {
+        return FieldRef { model_index, field_index, struct_field_index: None, enum_variant_index: None };
     }
 }
 
@@ -144,6 +166,7 @@ fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>, pre_header
         fields.push(field);
     }
 
+    // Sentinel offset здесь не нужен, поскольку у нас фиксированное кол-во полей
     let payload_offset = pre_header_size + offset_index * 4;
 
     return (fields, payload_offset);
@@ -164,6 +187,7 @@ pub fn update_key_fields(fields: &mut Vec<Field>) -> () {
     if idx_counter == 0 {
         fields.insert(0, Field { 
             name: "id".to_string(), 
+            full_name: String::new(),
             ty: FieldType::Primitive(PrimitiveFieldType::UInt64), 
             offset_pos: 0, 
             is_nullable: false, 
@@ -219,7 +243,7 @@ pub fn parse_schema(input: &str) -> Schema {
         }
     }
 
-    let mut schema = Schema { models };
+    let mut schema = Schema { models, foreign_bindings: vec![] };
 
     let model_by_name = build_model_map(&schema);
 
@@ -228,6 +252,8 @@ pub fn parse_schema(input: &str) -> Schema {
     }
 
     resolve_attributes(&mut schema, &model_by_name);
+
+    resolve_foreign_constraints(&mut schema);
 
     schema
 }
@@ -257,6 +283,7 @@ fn parse_field_raw(line: &str) -> Field {
 
     Field {
         name,
+        full_name: String::new(),
         ty,
         offset_pos: 0,
         attributes,
@@ -306,23 +333,30 @@ fn resolve_fields(
     enums: &HashMap<String, EnumDef>,
 ) {
     for field in fields.iter_mut(){
+        let field_full_name: String = [ model_name, ".", &field.name ].concat();
+        field.full_name = field_full_name.clone();
+
         match &field.ty {
             FieldType::RefUnresolved(name) => {
                 if let Some(en) = enums.get(name) {
                     let mut en = en.clone();
                     for variant in en.variants.iter_mut() {
-                        resolve_fields(&mut variant.fields, model_index, model_name, model_by_name, structs, enums);
+                        // Example key for enum fields - User[role=admin].features
+                        let name = [ model_name, "[", &field.name, "=", &variant.name, "]" ].concat();
+                        resolve_fields(&mut variant.fields, model_index, &name, model_by_name, structs, enums);
                     }
                     field.ty = FieldType::Enum(en);
                 } else if let Some(st) = structs.get(name) {
                     let mut st = st.clone();
-                    st.name = format!("{}.{}", model_name, field.name);
+                    st.name = field_full_name.clone();
                     resolve_fields(&mut st.fields, model_index, &st.name, model_by_name, structs, enums);
                     field.ty = FieldType::Struct(st);
                     // StructOne идет вообще без ключа, поскольку она полностью наследует ключ родителя
 
+                } else if let Some(model_index) = model_by_name.get(name) {
+                    field.ty = FieldType::ModelRef(*model_index);
                 } else {
-                    field.ty = FieldType::ModelRef(*model_by_name.get(name).expect(&format!("Not found model {}", name)));
+                    panic!("Unknown type {}", name)
                 }
             }
             FieldType::RefListUnresolved(name) => {
@@ -336,7 +370,7 @@ fn resolve_fields(
                     field.ty = FieldType::Enum(en);
                 } else if let Some(st) = structs.get(name) {
                     let mut st = st.clone();
-                    st.name = format!("{}.{}", model_name, field.name);
+                    st.name = field_full_name.clone();
                     update_key_fields(&mut st.fields);
 
                     // Мы увеличиваем ключ, сдвигая его, поскольку у нас в структуре первым идет ID родителя
@@ -348,6 +382,7 @@ fn resolve_fields(
     
                     st.fields.insert(0, Field { 
                         name: "@parent".to_string(), 
+                        full_name: [ &st.name, ".@parent" ].concat(),
                         ty: FieldType::ModelRef(model_index), 
                         offset_pos: 0, 
                         is_nullable: true, 
@@ -379,8 +414,8 @@ fn resolve_fields(
 
 // Разрешаем аттрибуты
 fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize>) {
-    let mut injects: HashMap<ModelRef, (ModelRef, Aliases)> = HashMap::new();
-    let mut bindings: HashSet<(ModelRef,ModelRef)> = HashSet::new();
+    let mut injects: HashMap<FieldRef, (FieldRef, Aliases)> = HashMap::new();
+    let mut bindings: HashSet<(FieldRef,FieldRef)> = HashSet::new();
 
     schema.walk(|field, field_ref| {
         for attr in field.attributes.iter() {
@@ -390,7 +425,7 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
                 
                     let field_ref = field_ref.clone();
                     // TODO: Create modelRef also from struct
-                    let key: (ModelRef,ModelRef) = if derived_ref > field_ref { (field_ref,derived_ref) } else { (field_ref,derived_ref) };
+                    let key: (FieldRef,FieldRef) = if derived_ref > field_ref { (field_ref,derived_ref) } else { (field_ref,derived_ref) };
                     bindings.insert(key);
                 }
                 Attribute::InjectUnresolved(items) => {
@@ -438,8 +473,57 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
     }
 }
 
+fn resolve_foreign_constraints(schema: &mut Schema) {
 
-fn get_model_ref(s: &str, schema: &Schema, model_by_name: &HashMap<String, usize>) -> ModelRef {
+    let mut foreign_bindings: Vec<Vec<(FieldRef,DeleteConstraint)>> = schema.models.iter().map(|_| Vec::new()).collect();
+
+    schema.walk(| field, field_ref | {
+        match &field.ty {
+            FieldType::ModelRefList(ref_model_idx) => {
+                let constraint = field.attributes.iter().find_map(|f| match f {
+                    Attribute::OnDelete(c) => Some(c.clone()),
+                    _ => None,
+                }).unwrap_or(DeleteConstraint::RemoveItem);
+
+                // Если у текущего поля есть reverse index -> у таблицы есть поле с direct индексом, и она сама удалит элемент при зачистке индексов
+                if matches!(constraint, DeleteConstraint::RemoveItem) {
+                    if field.inserted_indexes.iter().any(|i| matches!(i, InsertedIndex::Rev { tree_name: _ })) {
+                        return;
+                    }
+                }
+                if matches!(constraint, DeleteConstraint::SetNull) {
+                    panic!("Use RemoveItem instead SetNull in list field {}", field.full_name);
+                }         
+
+                foreign_bindings[*ref_model_idx].push((field_ref, constraint));
+            },
+            FieldType::ModelRef(ref_model_idx) => {
+                let constraint = field.attributes.iter().find_map(|f| match f {
+                    Attribute::OnDelete(c) => Some(c.clone()),
+                    _ => None,
+                }).unwrap_or_else(|| {
+                    if field.id_idx.is_some() {
+                        DeleteConstraint::Restrict
+                    } else {
+                        DeleteConstraint::SetNull
+                    }
+                });
+
+                if matches!(constraint, DeleteConstraint::RemoveItem) {
+                    panic!("Use SetNull instead RemoveItem in non-list field {}", field.full_name);
+                }
+
+                foreign_bindings[*ref_model_idx].push((field_ref, constraint));
+            }
+            _ => {}
+        }
+    });
+
+    schema.foreign_bindings = foreign_bindings;
+}
+
+
+fn get_model_ref(s: &str, schema: &Schema, model_by_name: &HashMap<String, usize>) -> FieldRef {
     let mut parts = s.split('.');
     let ref_model_name = parts.next().unwrap();
     let Some(&m) = model_by_name.get(ref_model_name) else {
@@ -451,7 +535,7 @@ fn get_model_ref(s: &str, schema: &Schema, model_by_name: &HashMap<String, usize
     let Some((f, field)) = model.fields.iter().enumerate().find(|i| i.1.name == ref_field_name) else {
         panic!("ERROR: Not found field {} in model {}", &ref_model_name, model.name);
     };
-    let mut model_ref = ModelRef::new(m, f);
+    let mut model_ref = FieldRef::new(m, f);
 
     if let Some(ref_struct_field_name) = parts.next() {
         let st = match &field.ty {
@@ -488,62 +572,85 @@ fn rev_indexes(field: &Field) -> Vec<InsertedIndex> {
 
 
 impl Schema {
-    pub fn get_field(&self, key: &ModelRef) -> &Field {
+    pub fn get_field(&self, key: &FieldRef) -> &Field {
         let model = &self.models[key.model_index];
         let field = &model.fields[key.field_index];
         if let Some(struct_field_index) = &key.struct_field_index {
             let st = match &field.ty {
                 FieldType::Struct(st) => st,
                 FieldType::StructList(st) => st,
-                _ => { panic!("Trying to get index from non-struct {}.{}", model.name, field.name); }
+                _ => { panic!("Trying to get index from non-struct {}", field.full_name); }
             };
             return &st.fields[*struct_field_index];
         } else if let Some(enum_variant_index) = &key.enum_variant_index {
             let en = match &field.ty {
                 FieldType::Enum(en) => en,
-                _ => { panic!("Trying to get index from non-enum {}.{}", model.name, field.name); }
+                _ => { panic!("Trying to get index from non-enum {}", field.full_name); }
             };
             return &en.variants[enum_variant_index.0].fields[enum_variant_index.1];
         } else {
             return field;
         }
     }
-    fn get_field_mut(&mut self, key: &ModelRef) -> &mut Field {
+
+    pub fn get_field_entity(&self, key: &FieldRef) -> &Entity {
+        let model = &self.models[key.model_index];
+        let field = &model.fields[key.field_index];
+        if let Some(_) = &key.struct_field_index {
+            let st = match &field.ty {
+                FieldType::Struct(st) => st,
+                FieldType::StructList(st) => st,
+                _ => { panic!("Trying to get index from non-struct {}", field.full_name); }
+            };
+            return st;
+        } else if let Some(enum_variant_index) = &key.enum_variant_index {
+            // let en = match &field.ty {
+            //     FieldType::Enum(en) => en,
+            //     _ => { panic!("Trying to get index from non-enum {}", field.full_name); }
+            // };
+            // return &en.variants[enum_variant_index.0];
+            todo!("Get entity from enum are not supported yet")
+        } else {
+            return model;
+        }
+    }
+
+    fn get_field_mut(&mut self, key: &FieldRef) -> &mut Field {
         let model = &mut self.models[key.model_index];
         let field = &mut model.fields[key.field_index];
         if let Some(struct_field_index) = &key.struct_field_index {
             let st = match &mut field.ty {
                 FieldType::Struct(st) => st,
                 FieldType::StructList(st) => st,
-                _ => { panic!("Trying to get index from non-struct {}.{}", model.name, field.name); }
+                _ => { panic!("Trying to get index from non-struct {}", field.full_name); }
             };
             return &mut st.fields[*struct_field_index];
         } else if let Some(enum_variant_index) = &key.enum_variant_index {
             let en = match &mut field.ty {
                 FieldType::Enum(en) => en,
-                _ => { panic!("Trying to get index from non-enum {}.{}", model.name, field.name); }
+                _ => { panic!("Trying to get index from non-enum {}", field.full_name); }
             };
             return &mut en.variants[enum_variant_index.0].fields[enum_variant_index.1];
         } else {
             return field;
         }
     }
-    pub fn walk<F: FnMut(&Field, ModelRef)>(&self, mut f: F) {
+    pub fn walk<F: FnMut(&Field, FieldRef)>(&self, mut f: F) {
         for (model_index, model) in self.models.iter().enumerate() {
             for (field_index, field) in model.fields.iter().enumerate() {
                 
-                f(field, ModelRef::new(model_index, field_index));
+                f(field, FieldRef::new(model_index, field_index));
 
                 match &field.ty {
                     FieldType::Struct(st) | FieldType::StructList(st) => {
                         for (sub_index, _subfield) in st.fields.iter().enumerate() {
-                            f(field, ModelRef { model_index, field_index, struct_field_index: Some(sub_index), enum_variant_index: None });
+                            f(field, FieldRef { model_index, field_index, struct_field_index: Some(sub_index), enum_variant_index: None });
                         }
                     },
                     FieldType::Enum(en) => {
                         for (variant_idx, variant) in en.variants.iter().enumerate() {
                             for (field_index, field) in variant.fields.iter().enumerate() {
-                                f(field, ModelRef { model_index, field_index, struct_field_index: None, enum_variant_index: Some((variant_idx, field_index)) })
+                                f(field, FieldRef { model_index, field_index, struct_field_index: None, enum_variant_index: Some((variant_idx, field_index)) })
                             }
                         }
                     }

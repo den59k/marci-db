@@ -14,7 +14,7 @@ struct UserInfo {
 model Post {
   title       String
   createdAt   DateTime
-  author      User
+  author      User          @onDelete(SetNull)
   images      File[]
 }
 
@@ -31,7 +31,7 @@ enum Role {
 }
 
 struct UserRole {
-  user        User          @id
+  user        User          @id   @onDelete(Cascade)
   role        Role
 }
 

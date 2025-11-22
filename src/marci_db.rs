@@ -3,12 +3,13 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, u64}
 use bitvec::{index, vec::BitVec};
 use canopydb::{Database, Environment, ReadTransaction, Transaction, Tree, WriteTransaction};
 
-use crate::{schema::{Aliases, Entity, Field, FieldType, InsertedIndex, Schema}, update_data::update_data};
+use crate::{schema::{Aliases, DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, update_data::{set_field_null, update_data}};
 
 pub struct MarciDB {
   pub db: Database,
   pub schema: Schema,
-  counters: Vec<Arc<AtomicU64>>
+  counters: Vec<Arc<AtomicU64>>,
+  model_by_name: HashMap<String, usize>
 }
 
 #[derive(Debug)]
@@ -99,6 +100,12 @@ pub enum InsertError {
   ItemNotFound
 }
 
+#[derive(Debug)]
+pub enum DeleteError {
+  ItemNotFound,
+  RestrictConstraints(String,Vec<u64>)
+}
+
 pub enum IncludeResult<'a, U> {
   None(&'a Field),
   One(&'a Field,U),
@@ -155,10 +162,17 @@ impl MarciDB {
     }
     tx.commit().unwrap();
 
+    let model_by_name: HashMap<String, usize> = schema
+      .models
+      .iter()
+      .enumerate()
+      .map(|(i, model)| (model.name.clone(), i)).collect();
+
     MarciDB {
       db,
       schema,
-      counters
+      counters,
+      model_by_name
     }
   }
   
@@ -166,8 +180,10 @@ impl MarciDB {
     self.counters[counter_idx].fetch_add(1, Ordering::Relaxed)
   }
   
-  pub fn get_model(&self, name: &str) -> Option<&Entity> {
-    return self.schema.models.iter().find(|i| i.name == name);
+  pub fn get_model(&self, name: &str) -> Option<(usize, &Entity)> {
+    self.model_by_name.get(name).and_then(|model_index| {
+      Some((*model_index, &self.schema.models[*model_index]))
+    })
   }
 
   pub fn insert_counter_value(&self, model: &Entity, id: &mut [u8]) {
@@ -266,13 +282,13 @@ impl MarciDB {
       let FieldType::Enum(en) = &field.ty else {
         panic!("Field type is not enum");
       };
-      let offset = get_offset(data, field.offset_pos);
-      if offset != 0 {
-        let variant = &u16::from_be_bytes(data[offset..offset+2].try_into().unwrap());
-        if let Some(variant_select) = variants_map.get(variant) {
-          let variant_resp = self.process_data(&[], &data[offset..], rx, variant_select, &en.variants[*variant as usize], f, inject.take());
-          inject = Some(variant_resp);
-        }
+      let offset = get_offset_from_field(data, field);
+      if offset == 0 { continue; }
+
+      let variant = &u16::from_be_bytes(data[offset..offset+2].try_into().unwrap());
+      if let Some(variant_select) = variants_map.get(variant) {
+        let variant_resp = self.process_data(&[], &data[offset..], rx, variant_select, &en.variants[*variant as usize], f, inject.take());
+        inject = Some(variant_resp);
       }
     }
     
@@ -436,7 +452,7 @@ impl MarciDB {
         return Err(InsertError::ItemNotFound)
       };
 
-      let updated_data = update_data(&model.fields, model.payload_offset, &data, new_data, &changed_mask);
+      let updated_data = update_data(&model, &data, new_data, &changed_mask);
       tree.insert(id, &updated_data).unwrap();
 
       indexes_to_remove.extend(get_indexes(&data, id, model, Some(&changed_mask)));
@@ -472,7 +488,7 @@ impl MarciDB {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           if let Some(data) = tree.get(id).unwrap() {
 
-            let updated_data = update_data(&st.fields, st.payload_offset, &data.as_ref(), new_data, &changed_mask);
+            let updated_data = update_data(&st, &data.as_ref(), new_data, &changed_mask);
             tree.insert(id, &updated_data).unwrap();
 
             indexes_to_remove.extend(get_indexes(&data, id, *st, Some(&changed_mask)));
@@ -515,16 +531,123 @@ impl MarciDB {
     return Ok(());
   }
 
-  pub fn delete(&self, model: &Entity, id: u64) -> bool {
+  pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<(), DeleteError> {
     let tx = self.db.begin_write().unwrap();
     {
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-      if !tree.delete(&id.to_be_bytes()).unwrap() {
-        return false;
+      if !tree.delete(id).unwrap() {
+        return Err(DeleteError::ItemNotFound);
       }
     }
+
+    for field in model.fields.iter() {
+      match &field.ty {
+          FieldType::Struct(st) => {
+            let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+            tree.delete(id).unwrap();
+          },
+          FieldType::StructList(st) => {
+            let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+            let end = increment_bytes_be(id);
+            tree.delete_range(id..&end).unwrap();
+          }
+          _ => {}
+      }
+    }
+
+    for (field_ref, constraint) in self.schema.foreign_bindings[model_index].iter() {
+      let field = self.schema.get_field(field_ref);
+      let entity = self.schema.get_field_entity(field_ref);
+
+      match &field.ty {
+          FieldType::ModelRef(idx) => {
+            if *idx != model_index { println!("Wrong foreign_key. Skip it"); continue; }
+
+            // В обратном поле rev_index - это direct к нашему. И также direct_index - это reverse к нам
+            let keys = match field.get_rev_index()  {
+              Some(rev_index) => {
+                find_by_direct(&tx, rev_index.tree_name(), id)
+              }
+              None => {
+                find_keys_by_field(&tx, entity, field, id)
+              }
+            };
+            if keys.is_empty() {
+              continue;
+            }
+
+            match constraint {
+                &DeleteConstraint::Cascade => {
+                  let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+                  for key in keys.iter() {
+                    tree.delete(key).unwrap();
+                  }
+                  println!("Cascade delete {} documents from {}", keys.len(), entity.name);
+                }
+                &DeleteConstraint::SetNull => {
+                  let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+                  for key in keys.iter() {
+                    let data = tree.get(key).unwrap().unwrap();
+                    let Some(new_data) = set_field_null(entity, &data, field_ref.field_index, field_ref.enum_variant_index) else {
+                      continue;
+                    };
+                    tree.insert(key, &new_data).unwrap();
+                  }
+                }
+                &DeleteConstraint::Restrict => {
+                  return Err(DeleteError::RestrictConstraints(
+                    field.full_name.clone(), 
+                    keys.iter().map(|i| u64::from_be_bytes(i.as_slice().try_into().unwrap())).collect()
+                  ));
+                }
+                _ => {}
+            }
+          },
+          FieldType::ModelRefList(idx) => {
+            if *idx != model_index { println!("Wrong foreign_key. Skip it"); continue; }
+            
+            // В обратном поле rev_index - это direct к нашему. И также direct_index - это reverse к нам
+            let keys = match field.get_rev_index()  {
+              Some(rev_index) => {
+                find_by_direct(&tx, rev_index.tree_name(), id)
+              }
+              None => match field.get_direct_index() {
+                Some(direct) => find_by_rev(&tx, direct.tree_name(), id),
+                None => vec![]
+              }
+            };
+            if keys.is_empty() {
+              continue;
+            }
+            
+            match constraint {
+              &DeleteConstraint::Cascade => {
+                panic!("You cannot using cascade delete in list field {}", field.name)
+              }
+              &DeleteConstraint::RemoveItem => {
+                let rev_indexes = field.get_direct_indexes();
+                remove_indexes_by_keys(&tx, id, &rev_indexes, &keys);
+              }
+              &DeleteConstraint::Restrict => {
+                return Err(DeleteError::RestrictConstraints(
+                  field.full_name.clone(), 
+                  keys.iter().map(|i| u64::from_be_bytes(i.as_slice().try_into().unwrap())).collect()
+                ));
+              }
+              _ => {}
+            }
+          },
+          _ => {}
+      }
+    }
+
+    // Delete another keys
+    for field in model.fields.iter() {
+      remove_indexes(&tx, field, id);
+    }
+
     tx.commit().unwrap();
-    return true;
+    return Ok(());
   }
 
 }
@@ -533,11 +656,7 @@ impl MarciDB {
 #[inline(always)]
 fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], size: usize) -> Option<&'a[u8]> {
   if let Some(id_idx) = field.id_idx {
-    if id.len() < id_idx*8+8 {
-      panic!("ID too small. Field: {}, ID: {:?}, idx: {}", field.name, id, id_idx);
-    }
-    let value = &id[id_idx*8..id_idx*8+8];
-    return Some(value)
+    return Some(get_value_from_id(id, id_idx, field))
   } else {
     if field.offset_pos == 0 {
       panic!("ERROR: Try to get zero offset value {}", field.name)
@@ -551,23 +670,42 @@ fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], size: u
 }
 
 #[inline(always)]
-fn get_value<'a, const SIZE: usize>(
-    data: &'a [u8],
-    offset_pos: usize,
-) -> Option<&'a [u8; SIZE]> {
-    if offset_pos == 0 {
-      panic!("ERROR: Try to get zero offset value")
-    }
-    let offset = get_offset(data, offset_pos);
-    if offset == 0 {
-        return None;
-    }
-    Some(data[offset..offset + SIZE].try_into().ok()?)
+fn get_value_from_id<'a>(id: &'a [u8], id_idx: usize, field: &'a Field) -> &'a [u8] {
+  if id.len() < id_idx*8+8 {
+    panic!("ID too small. Field: {}, ID: {:?}, idx: {}", field.name, id, id_idx);
+  }
+  return &id[id_idx*8..id_idx*8+8];
 }
+
+// #[inline(always)]
+// fn get_value<'a, const SIZE: usize>(
+//     data: &'a [u8],
+//     offset_pos: usize,
+// ) -> Option<&'a [u8; SIZE]> {
+//     if offset_pos == 0 {
+//       panic!("ERROR: Try to get zero offset value")
+//     }
+//     let offset = get_offset(data, offset_pos);
+//     if offset == 0 {
+//         return None;
+//     }
+//     Some(data[offset..offset + SIZE].try_into().ok()?)
+// }
 
 #[inline(always)]
 pub fn get_offset<'a>(data: &'a [u8], offset_pos: usize) -> usize {
   return u32::from_be_bytes(data[offset_pos..offset_pos + 4].try_into().unwrap()) as usize;
+}
+
+pub fn get_offset_from_field<'a>(data: &'a [u8], field: &Field) -> usize {
+  if field.offset_pos == 0 {
+    if field.id_idx.is_some() {
+      panic!("ERROR: Try to get offet from ID field {}", field.full_name);
+    } else {
+      panic!("ERROR: Try to get offet from virtual field {}", field.full_name);
+    }
+  }
+  return u32::from_be_bytes(data[field.offset_pos..field.offset_pos + 4].try_into().unwrap()) as usize;
 }
 
 #[inline(always)]
@@ -776,6 +914,62 @@ fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Vec
   iter.map(|k| k.unwrap()[8..].to_vec()).collect()
 }
 
+#[inline(always)]
+/// **Перебирает** все ключи, и находит нужные
+fn find_by_rev(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Vec<u8>> {
+  let index_tree = rx.get_tree(tree_name).unwrap()
+    .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
+
+  let mut arr = vec![];
+  for key in index_tree.keys().unwrap() {
+    let key = key.unwrap();
+    if &key[8..] == item_id {
+      arr.push(key[..8].to_vec());
+    }
+  }
+
+  return arr;
+}
+
+fn find_keys_by_field(rx: &Transaction, entity: &Entity, field: &Field, value: &[u8]) -> Vec<Vec<u8>> {
+  let tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+
+  let mut arr = vec![];
+  if let Some(id_idx) = field.id_idx {
+    if id_idx == 0 {
+      return tree
+        .prefix_keys(&value)
+        .unwrap()
+        .map(|i| i.unwrap().to_vec()).collect()
+    };
+
+    for entry in tree.keys().unwrap() {
+      let id = entry.unwrap();
+      if get_value_from_id(&id, id_idx, field) == value {
+        arr.push(id.to_vec());
+      }
+    }
+    return arr;
+  }
+
+  if field.offset_pos == 0 {
+    println!("Trying to find by virtual field {}", field.name);
+    return vec![];
+  }
+
+  for entry in tree.iter().unwrap() {
+    let (id, data) = &entry.unwrap();
+
+    let offset = get_offset(data, field.offset_pos);
+    if offset == 0 { continue; }
+    
+    if &data[offset..offset+value.len()] == value {
+      arr.push(id.to_vec());
+    }
+  }
+
+  return arr;
+}
 
 // #[inline(always)]
 // fn make_key(a: u64, b: u64) -> [u8; 16] {
@@ -879,6 +1073,16 @@ fn insert_indexes(tx: &WriteTransaction, field: &Field, id: &[u8], ids: &[Vec<u8
   }
 }
 
+#[inline(always)]
+pub fn remove_indexes_by_keys(tx: &WriteTransaction, _id: &[u8], rev_indexes: &[&InsertedIndex], keys: &[Vec<u8>]) {
+  for index in rev_indexes {
+    let mut tree = tx.get_tree(index.tree_name()).unwrap().unwrap();
+    for key in keys.iter() {
+      // Simple variant for fixed keys:
+      tree.delete(&[key,_id].concat()).unwrap();
+    }
+  }
+}
 
 #[inline(always)]
 pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: &[u8]) {
@@ -886,24 +1090,18 @@ pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: &[u8]) {
     return;
   }
 
-  let direct_index = field.inserted_indexes.iter()
-    .find(|i| matches!(i, InsertedIndex::Direct { tree_name: _ })).expect("Direct index must be defined for batch update");
+  let Some(direct_index) = field.get_direct_index() else {
+    panic!("Direct index must be defined for batch update. Field: {}", field.full_name);
+  };
   
-  let rev_indexes: Vec<&InsertedIndex> = field.inserted_indexes.iter()
-    .filter(|i| matches!(i, InsertedIndex::Rev { tree_name: _ })).collect();
+  let rev_indexes = field.get_rev_indexes();
   
   if !rev_indexes.is_empty() {
     let keys = find_by_direct(tx, direct_index.tree_name(), id);
     if keys.is_empty() {
       return;
     }
-    for index in rev_indexes {
-      let InsertedIndex::Rev { tree_name } = index else { continue };
-      let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
-      for key in keys.iter() {
-        tree.delete(&key[..8]).unwrap();
-      }
-    }
+    remove_indexes_by_keys(tx, id, &rev_indexes, &keys);
   }
 
   for index in field.inserted_indexes.iter() {

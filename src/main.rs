@@ -34,7 +34,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
     let model_name = &path[1..slash_index].to_string();
 
     let action = &path[slash_index+1..];
-    let Some(model) = db.get_model(model_name) else {
+    let Some((model_index, model)) = db.get_model(model_name) else {
         return Ok(error(StatusCode::NOT_FOUND, &format!("Model {} not found", &path[1..slash_index])));
     };
 
@@ -128,16 +128,16 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let key = match encode_id(model, &json_val, false) {
+            let id = match encode_id(model, &json_val, false) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            if let Err(err) =  db.update(model, &key, &new_data, changed_mask, &structs) {
+            if let Err(err) =  db.update(model, &id, &new_data, changed_mask, &structs) {
                return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err)));
             }
 
-            let body = Bytes::from(decode_id(&key, model).unwrap().to_string());
+            let body = Bytes::from(decode_id(&id, model).unwrap().to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
@@ -149,16 +149,17 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             let Ok(json_val): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
-            let Some(id) = json_val.get("id").and_then(|a| a.as_u64()) else {
-                return Ok(error(StatusCode::BAD_REQUEST, "ID field required"));
+
+            let id = match encode_id(model, &json_val, false) {
+                Ok(result) => result,
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to delete document: {:?}", err)))
             };
 
-            let deleted = db.delete(model, id);
-            if !deleted {
-                return Ok(error(StatusCode::BAD_REQUEST, "Object not found"));
-            }
+            if let Err(err) = db.delete(model_index, model, &id) {
+                return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to delete document: {:?}", err)));
+            };
 
-            let body = Bytes::from(format!("{{ \"id\": {} }}", id));
+            let body = Bytes::from(decode_id(&id, model).unwrap().to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::schema::{Entity, Field, parse_field_raw, parse_fields};
+use crate::schema::{Entity, parse_fields};
 
 
 #[derive(Debug,Clone)]

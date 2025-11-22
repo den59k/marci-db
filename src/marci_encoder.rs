@@ -34,13 +34,13 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
     // offsets (плейсхолдеры)
     buf.resize(model.payload_offset, 0);
 
-    let initial_size = buf.len();
+    // let initial_size = buf.len();
 
-    let changed_mask = write_fields(obj, &mut buf, &model.fields, &schema, &model.name, structs)?;
+    let changed_mask = write_fields(obj, &mut buf, &model, &schema, structs)?;
 
-    if buf.len() == initial_size && structs.len() == 0 {
-        return Err(EncodeError::EmptyObject);
-    }
+    // if buf.len() == initial_size && structs.len() == 0 {
+    //     return Err(EncodeError::EmptyObject);
+    // }
 
     Ok((buf, changed_mask))
 }
@@ -63,15 +63,14 @@ pub fn encode_document<'a>(schema: &'a Schema, model: &'a Entity, json: &Value, 
 fn write_fields<'a>(
     obj: &Map<String, Value>, 
     buf: &mut Vec<u8>, 
-    fields: &'a [Field], 
+    entity: &'a Entity,
     schema: &'a Schema, 
-    model_name: &str, 
     structs: &mut Vec<InsertStruct<'a>>
 ) -> Result<BitVec, EncodeError> {
-    let mut changed_mask = bitvec![0; fields.len()];
+    let mut changed_mask = bitvec![0; entity.fields.len()];
 
     // Тело
-    for (field_index, field) in fields.iter().enumerate() {
+    for (field_index, field) in entity.fields.iter().enumerate() {
         let Some(value) = obj.get(&field.name) else {
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
@@ -102,7 +101,7 @@ fn write_fields<'a>(
         match &field.ty {
             FieldType::Primitive(primitive_type) => {
                 if field.offset_pos == 0 {
-                    println!("Warn: try to write to field {}.{} has not offset_pos", model_name, field.name);
+                    println!("Warn: try to write to field {} has not offset_pos", field.full_name);
                     continue;
                 }
                 write_header(buf, field)?;
@@ -193,7 +192,7 @@ fn write_fields<'a>(
             }
             FieldType::Enum(en) => {
                 if field.offset_pos == 0 {
-                    println!("Warn: try to write to enum {}.{} has not offset_pos", model_name, field.name);
+                    println!("Warn: try to write to enum {} has not offset_pos", field.full_name);
                     continue;
                 }
                 let Some(variant_index) = value.as_str().and_then(|f| en.variants_map.get(f)) else {
@@ -210,8 +209,7 @@ fn write_fields<'a>(
                     new_buf[0..2].copy_from_slice(&variant_index.to_be_bytes());
                     new_buf[2..4].copy_from_slice(&(current_variant.payload_offset as u16).to_be_bytes());
 
-                    let enum_name = &[ model_name, ".", &field.name ].concat();
-                    let mut enum_mask = write_fields(obj, &mut new_buf, &current_variant.fields, schema, enum_name, structs)?;
+                    let mut enum_mask = write_fields(obj, &mut new_buf, &current_variant, schema, structs)?;
 
                     buf.append(&mut new_buf);
 
@@ -225,6 +223,10 @@ fn write_fields<'a>(
             }
         }
     }
+
+    // Sentnel offset нам здесь не нужен, так как у нас фиксированное количество полей
+    // let len = buf.len() as u32;
+    // buf[entity.payload_offset-4..entity.payload_offset].copy_from_slice(&len.to_be_bytes());
 
     return Ok(changed_mask)
 }
@@ -473,7 +475,7 @@ mod tests {
         let offset_age  = u32::from_be_bytes(encoded[7..11].try_into().unwrap()) as usize;
         let _offset_profile  = u32::from_be_bytes(encoded[11..15].try_into().unwrap()) as usize;
 
-        assert_eq!(offset_name, 15);
+        assert_eq!(offset_name, model.payload_offset);
 
         // Проверяем, что смещения действительно указывают на данные
         // name: [len=5][bytes]
@@ -526,7 +528,7 @@ mod tests {
         // Проверяем версию
         assert_eq!(encoded[0], 1);
 
-        assert_eq!(get_offsets(&encoded, model), vec![7]); // 3 bytes + 4 byte offset
+        assert_eq!(get_offsets(&encoded, model), vec![ model.payload_offset ]); // 3 bytes + 4 byte offset
         assert_eq!(structs.len(), 1);
 
         let InsertStruct::Many { st, data } = &structs[0] else {
@@ -536,7 +538,7 @@ mod tests {
         assert_eq!(data.len(), 1);
         // В InsertStruct::Many в ключе первые 8 байт - ID родителя, остальное - ID структуры
         assert_eq!(&data[0].0, &[0, 0, 0, 0, 0, 0, 0, 0,   0, 0, 0, 0, 0, 0, 0, 1]);
-        assert_eq!(get_offsets(&data[0].1, *st), vec![7]);
+        assert_eq!(get_offsets(&data[0].1, *st), vec![ model.payload_offset ]);
 
         // assert_eq!()
 
