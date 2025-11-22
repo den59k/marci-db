@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, u64};
 
-use bitvec::{index, vec::BitVec};
+use bitvec::vec::BitVec;
 use canopydb::{Database, Environment, ReadTransaction, Transaction, Tree, WriteTransaction};
 
 use crate::{schema::{Aliases, DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, update_data::{set_field_null, update_data}};
@@ -740,36 +740,6 @@ pub fn set_offset_null<'a>(data: &'a mut [u8], offset_pos: usize) {
   data[offset_pos..offset_pos+4].fill(0u8);
 }
 
-struct ManyIter<'a, const SIZE: usize> {
-    data: &'a [u8],
-    pos: usize,
-    end: usize,
-}
-
-impl<'a, const SIZE: usize> ManyIter<'a, SIZE> {
-  pub fn is_empty(&self) -> bool { return self.pos == self.end }
-}
-
-impl<'a, const SIZE: usize> ExactSizeIterator for ManyIter<'a, SIZE> {
-    fn len(&self) -> usize {
-        (self.end - self.pos) / SIZE
-    }
-}
-
-impl<'a, const SIZE: usize> Iterator for ManyIter<'a, SIZE> {
-    type Item = &'a [u8; SIZE];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.end {
-            return None;
-        }
-
-        let item = self.data[self.pos..self.pos + SIZE].try_into().ok()?;
-        self.pos += SIZE;
-        Some(item)
-    }
-}
-
 #[inline(always)]
 fn increment_bytes_be(bytes: &[u8]) -> Vec<u8> {
     let mut result = bytes.to_vec();
@@ -784,46 +754,6 @@ fn increment_bytes_be(bytes: &[u8]) -> Vec<u8> {
     // если было переполнение (все байты = 0xFF)
     result.insert(0, 1);
     result
-}
-
-fn get_array<'a, const SIZE: usize>(data: &'a[u8], offset_pos: usize) -> Option<ManyIter<'a, SIZE>> {
-
-  let offset = get_offset(data, offset_pos);
-  if offset == 0 {
-    return None;
-  }
-  
-  // читаем длину (константно 4 байта)
-  let len_bytes: &[u8; 4] = data[offset..offset+4].try_into().unwrap();
-  let len = u32::from_be_bytes(*len_bytes) as usize;
-
-  let start = offset + 4;
-  let end = start + len * SIZE;
-
-  Some(ManyIter { data, pos: start, end })
-}
-
-#[inline(always)]
-fn get_value_with_len<'a>(
-    data: &'a[u8],
-    offset_pos: usize,
-    payload_offset: usize
-) -> Option<&'a[u8]> {
-  let offset = get_offset(data, offset_pos);
-  if offset == 0 {
-    return None;
-  }
-
-  let mut offset_end = data.len();
-  for j in ((offset_pos+4)..payload_offset).step_by(4) {
-    let offset = get_offset(data, j);
-    if offset != 0 { 
-      offset_end = offset;
-      break;
-    }
-  }
-
-  return Some(&data[offset..offset_end])
 }
 
 #[derive(Debug)]
@@ -1045,18 +975,6 @@ pub fn get_max_id_struct(tree: &Tree) -> u64 {
     .unwrap_or(1);
 }
 
-pub fn get_offsets(data: &[u8], model: &Entity) -> Vec<usize> {
-  let mut arr = vec![];
-  for field in model.fields.iter() {
-    if field.offset_pos == 0 {
-      continue;
-    }
-    let offset = get_offset(data, field.offset_pos);
-    arr.push(offset);
-  }
-  return arr;
-}
-
 #[inline(always)]
 fn insert_indexes(tx: &WriteTransaction, field: &Field, id: &[u8], ids: &[Vec<u8>]) {
   if ids.is_empty() {
@@ -1110,4 +1028,17 @@ pub fn remove_indexes(tx: &WriteTransaction, field: &Field, id: &[u8]) {
     let end = increment_bytes_be(id);
     tree.delete_range(id..&end).unwrap();
   }
+}
+
+#[cfg(test)]
+pub fn get_offsets(data: &[u8], model: &Entity) -> Vec<usize> {
+  let mut arr = vec![];
+  for field in model.fields.iter() {
+    if field.offset_pos == 0 {
+      continue;
+    }
+    let offset = get_offset(data, field.offset_pos);
+    arr.push(offset);
+  }
+  return arr;
 }

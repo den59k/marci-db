@@ -1,6 +1,6 @@
-use bitvec::{slice::BitSlice, vec::BitVec};
+use bitvec::slice::BitSlice;
 
-use crate::{marci_db::{get_end, get_offset, move_offsets, set_offset, set_offset_null}, schema::{Entity, Field, FieldRef, FieldType}};
+use crate::{marci_db::{get_end, get_offset, move_offsets, set_offset, set_offset_null}, schema::{Entity, FieldType}};
 
 pub fn update_data(entity: &Entity, data: &[u8], new_data: &[u8], changed_mask: &BitSlice) -> Vec<u8> {
   let mut data = data.to_vec();
@@ -132,7 +132,7 @@ fn shift_and_resize(data: &mut Vec<u8>, from: usize, to: usize, diff: isize) {
 mod tests {
     use serde_json::{Map, Value, json};
 
-    use crate::{marci_db::{DecodeCtx, InsertStruct, MarciSelect, get_offset, get_offset_from_field, get_offsets}, marci_decoder::{decode_document, decode_fields}, marci_encoder::encode_document, marci_select::parse_select, schema::{FieldType, parse_schema}, update_data::{set_field_null, update_data}};
+    use crate::{marci_db::{InsertStruct, get_offset_from_field, get_offsets}, marci_decoder::decode_fields, marci_encoder::encode_document, schema::{FieldType, parse_schema}, update_data::{set_field_null, update_data}};
 
 
   #[test]

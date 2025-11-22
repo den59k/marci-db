@@ -386,14 +386,14 @@ pub fn encode_id(model: &Entity, obj: &Value, skip_counters: bool) -> Result<Vec
     return Ok(key_buf);
 }
 
-pub fn encode_id_with_prefix(model: &Entity, obj: &Value, prefix: &[u8], skip_counters: bool) -> Result<Vec<u8>, EncodeError> {
-    let mut key_buf = Vec::with_capacity(prefix.len() + model.key_min_size());
+// pub fn encode_id_with_prefix(model: &Entity, obj: &Value, prefix: &[u8], skip_counters: bool) -> Result<Vec<u8>, EncodeError> {
+//     let mut key_buf = Vec::with_capacity(prefix.len() + model.key_min_size());
 
-    key_buf.extend_from_slice(prefix);
-    encode_id_internal(&mut key_buf, model, obj, skip_counters)?;
+//     key_buf.extend_from_slice(prefix);
+//     encode_id_internal(&mut key_buf, model, obj, skip_counters)?;
 
-    return Ok(key_buf);
-}
+//     return Ok(key_buf);
+// }
 
 fn encode_id_internal(key_buf: &mut Vec<u8>, model: &Entity, obj: &Value, skip_counters: bool) -> Result<(), EncodeError> {
 

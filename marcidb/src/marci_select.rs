@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{marci_db::{EnumSelect, Injected, MarciSelect, MarciSelectBinding, MarciSelectInclude}, schema::{Aliases, Entity, Field, FieldType, Schema}};
+use crate::{marci_db::{EnumSelect, Injected, MarciSelect, MarciSelectBinding, MarciSelectInclude}, schema::{Aliases, Field, FieldType, Schema}};
 
 #[derive(Debug)]
 pub enum MarciSelectError {
@@ -176,7 +176,7 @@ mod tests {
 use bitvec::prelude::*;
 use serde_json::json;
 
-use crate::{marci_db::Injected, marci_select::parse_select, schema::parse_schema};
+use crate::{marci_select::parse_select, schema::parse_schema};
 
   #[test]
   fn test_parse_select() {

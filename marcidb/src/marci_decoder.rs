@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bitvec::vec::BitVec;
 use serde_json::{Map, Value};
 
