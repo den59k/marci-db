@@ -1,3 +1,4 @@
+use std::fmt;
 use std::{collections::HashMap, fmt::Debug};
 
 use crate::schema::schema_enum::EnumDef;
@@ -114,20 +115,33 @@ pub enum PrimitiveFieldType {
 }
 
 impl PrimitiveFieldType {
-    pub fn is_dynamic_size(&self) -> bool {
-        return *self == PrimitiveFieldType::String
-    }
-    pub fn get_size(&self) -> usize {
+
+    pub fn get_size(&self) -> Option<usize> {
         return match *self {
-            PrimitiveFieldType::Bool => 1,
-            PrimitiveFieldType::Float => 4,
+            PrimitiveFieldType::Bool => Some(1),
+            PrimitiveFieldType::Float => Some(4),
             PrimitiveFieldType::Int64 | 
                 PrimitiveFieldType::UInt64 | 
                 PrimitiveFieldType::Double | 
-                PrimitiveFieldType::DateTime => 8,
+                PrimitiveFieldType::DateTime => Some(8),
 
-            _ => 0
+            _ => None
         }
+    }
+}
+
+impl fmt::Display for PrimitiveFieldType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            PrimitiveFieldType::String => "string",
+            PrimitiveFieldType::Int64 => "i64",
+            PrimitiveFieldType::UInt64 => "u64",
+            PrimitiveFieldType::Float => "float",
+            PrimitiveFieldType::Double => "double",
+            PrimitiveFieldType::Bool => "bool",
+            PrimitiveFieldType::DateTime => "datetime",
+        };
+        write!(f, "{}", s)
     }
 }
 
@@ -141,6 +155,7 @@ pub enum FieldType {
     ModelRef(usize),
     ModelRefList(usize),
     PrimitiveList(PrimitiveFieldType),
+    PrimitiveFixedList(PrimitiveFieldType,usize),
     Struct(Entity),
     StructList(Entity),
     Enum(EnumDef)

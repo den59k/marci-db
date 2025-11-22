@@ -155,18 +155,31 @@ fn parse_field_raw(line: &str) -> Field {
 }
 
 fn parse_type(s: &str) -> FieldType {
-    if let Some(inner) = s.strip_suffix("[]") {
-        if let Some(primitive_field) = get_primitive_type(inner) {
-            FieldType::PrimitiveList(primitive_field)
-        } else {
-            FieldType::RefListUnresolved(inner.to_string())
+    if let Some((ty, bracket)) = s.strip_suffix(']').and_then(|s| s.split_once('[')) {
+        let bracket = bracket.trim();
+        if bracket.is_empty() {
+            if let Some(prim) = get_primitive_type(ty) {
+                return FieldType::PrimitiveList(prim);
+            }
+            return FieldType::RefListUnresolved(ty.to_string());
         }
-    } else if let Some(primitive_field) = get_primitive_type(s) {
-        FieldType::Primitive(primitive_field)
-    } else {
-        FieldType::RefUnresolved(s.to_string())
+
+        if let Ok(len) = bracket.parse::<usize>() {
+            if let Some(prim) = get_primitive_type(ty) {
+                return FieldType::PrimitiveFixedList(prim, len);
+            }
+            panic!("Fixed list is allowed only for primitive types: {}", s);
+        }
+        panic!("Invalid array syntax: {}", s);
     }
+
+    if let Some(prim) = get_primitive_type(s) {
+        return FieldType::Primitive(prim);
+    }
+
+    FieldType::RefUnresolved(s.to_string())
 }
+
 
 fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
     match s {

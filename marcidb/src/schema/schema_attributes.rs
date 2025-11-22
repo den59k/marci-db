@@ -4,6 +4,7 @@ pub enum Attribute {
     Index,
     DerivedUnresolved (String),
     Id,
+    VectorIndex,
     InjectUnresolved(Vec<(String,String)>),
     OnDelete(DeleteConstraint)
 }
@@ -23,6 +24,10 @@ pub fn parse_attribute(s: &str) -> Attribute {
 
     if s.starts_with("id") {
         return Attribute::Id
+    }
+
+    if s.starts_with("vectorindex") {
+        return Attribute::VectorIndex
     }
 
     if let Some(inside) = s.strip_prefix("derived(").and_then(|x| x.strip_suffix(')')) {

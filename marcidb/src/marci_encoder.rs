@@ -1,4 +1,4 @@
-
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
@@ -8,8 +8,7 @@ use crate::{marci_db::InsertStruct, schema::{Entity, Field, FieldType, Primitive
 pub enum EncodeError {
     NotAnObject,
     MissingIdField(String),
-    TypeMismatch { field: String, expected: &'static str },
-    TypeMismatchEnum { field: String, expected: String },
+    TypeMismatch { field: String, expected: String },
     TryWriteToVirtualField,
     UnavailableKeyField,
     EmptyObject
@@ -88,10 +87,10 @@ fn write_fields<'a>(
                     structs.push(InsertStruct::None { st: &st });
                 },
                 FieldType::StructList(_) => {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                    return Err(type_mismatch(field, "Array"))
                 },
                 FieldType::ModelRefList(_) => {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
+                    return Err(type_mismatch(field, "Array<{ id: u64 }>"))
                 },
                 _ => { }
             }
@@ -109,41 +108,41 @@ fn write_fields<'a>(
             }
             FieldType::PrimitiveList(primitive_type) => {
                 let Some(arr) = value.as_array() else {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                    return Err(type_mismatch(field, "Array"))
                 };
+
                 let byte_start = buf.len();
                 write_header(buf, field)?;
+
                 buf.extend_from_slice(&(arr.len() as u32).to_be_bytes());
-
-                let mut offset_index = buf.len();
-                let is_dynamic_len = primitive_type.is_dynamic_size();
-                if is_dynamic_len {
-                    buf.resize(offset_index + arr.len()*4 + 4, 0);
-
-                    // Write offset for first element
-                    let el_offset = (buf.len() - byte_start) as u32;
-                    buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
-                    offset_index += 4;
+                
+                match primitive_type.get_size() {
+                    None => encode_list_dynamic(buf, arr, field, primitive_type, byte_start)?,
+                    Some(_) => encode_list_static(buf, arr, field, primitive_type)?
+                };
+            },
+            FieldType::PrimitiveFixedList(primitive_type, fixed_size) => {
+                let Some(arr) = value.as_array() else {
+                    return Err(type_mismatch(field, "Array"))
+                };
+                if arr.len() != *fixed_size {
+                    return Err(type_mismatch(field, format!("{}[{}]", primitive_type.to_string(), fixed_size)))
                 }
+                write_header(buf, field)?;
 
-                for arr_item in arr.iter() {
-                    encode_value(buf, field, primitive_type,  arr_item)?;
-
-                    // Write offset for next element. (Also write sentinel offset)
-                    if is_dynamic_len {
-                        let el_offset = (buf.len() - byte_start) as u32;
-                        buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
-                        offset_index += 4;
-                    }
+                match primitive_type.get_size() {
+                    None => encode_list_dynamic(buf, arr, field, primitive_type, buf.len())?,
+                    Some(_) => encode_list_static(buf, arr, field, primitive_type)?
                 }
-            }
+            },
             FieldType::ModelRef(_) => {
                 if !value.is_object() {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "object" })
+                    return Err(type_mismatch(field, "object"))
                 }
 
+                // TODO: indexing by custom ID
                 let Some(item_id) = value.get("id") else {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "{ id: u64 }" })
+                    return Err(type_mismatch(field, "{ id: u64 }"))
                 };
 
                 if field.offset_pos != 0 {
@@ -153,8 +152,10 @@ fn write_fields<'a>(
                 }
             }
             FieldType::ModelRefList(model_index) => {
+
+                // TODO: indexing by custom ID
                 let Some(value) = value.as_array() else {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array<{ id: u64 }>" })
+                    return Err(type_mismatch(field,  "Array<{ id: u64 }>"))
                 };
 
                 let ref_model = &schema.models[*model_index];
@@ -172,7 +173,7 @@ fn write_fields<'a>(
             }
             FieldType::StructList(st) => {
                 let Some(value) = value.as_array() else {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "Array" })
+                    return Err(type_mismatch(field, "Array"))
                 };
                 if value.len() == 0 {
                     structs.push(InsertStruct::Empty { st });
@@ -196,10 +197,7 @@ fn write_fields<'a>(
                     continue;
                 }
                 let Some(variant_index) = value.as_str().and_then(|f| en.variants_map.get(f)) else {
-                    return Err(EncodeError::TypeMismatchEnum { 
-                        field: field.name.clone(), 
-                        expected: format!("One of: [{}]", en.variants_str())
-                    })
+                    return Err(type_mismatch(field, format!("One of: [{}]", en.variants_str())))
                 };
                 write_header(buf, field)?;
 
@@ -242,6 +240,31 @@ fn write_header(dst: &mut [u8], field: &Field) -> Result<(), EncodeError> {
     Ok(())
 }
 
+fn type_mismatch(field: &Field, expected: impl Into<String>) -> EncodeError {
+    EncodeError::TypeMismatch {
+        field: field.name.clone(),
+        expected: expected.into(),
+    }
+}
+
+fn as_i64(v: &Value, field: &Field) -> Result<i64, EncodeError> {
+    v.as_i64().ok_or_else(|| type_mismatch(field, "i64"))
+}
+
+fn as_u64(v: &Value, field: &Field) -> Result<u64, EncodeError> {
+    v.as_u64().ok_or_else(|| type_mismatch(field, "u64"))
+}
+
+fn as_f32(v: &Value, field: &Field) -> Result<f32, EncodeError> {
+    v.as_f64()
+        .map(|f| f as f32)
+        .ok_or_else(|| type_mismatch(field, "float"))
+}
+
+fn as_f64(v: &Value, field: &Field) -> Result<f64, EncodeError> {
+    v.as_f64().ok_or_else(|| type_mismatch(field, "double"))
+}
+
 /// Кодирует одно значение и дописывает в конец `dst`
 fn encode_value(
     dst: &mut Vec<u8>,
@@ -251,130 +274,46 @@ fn encode_value(
 ) -> Result<(), EncodeError> {
     match ty {
         PrimitiveFieldType::String => {
-            let s = v
-                .as_str()
-                .ok_or_else(|| EncodeError::TypeMismatch {
-                    field: field.name.clone(),
-                    expected: "string",
-                })?;
-            let bytes = s.as_bytes();
-            dst.extend_from_slice(bytes);
+            let s = v.as_str().ok_or_else(|| type_mismatch(field, "string"))?;
+            dst.extend_from_slice(s.as_bytes());
         }
+
         PrimitiveFieldType::DateTime => {
-          let epoch: i64 = match v {
-              // Путь 1: число — уже epoch
-              Value::Number(num) => num
-                  .as_i64()
-                  .ok_or_else(|| EncodeError::TypeMismatch {
-                      field: field.name.clone(),
-                      expected: "int64 (epoch) or string (ISO-8601)",
-                  })?,
+            let epoch = match v {
+                Value::Number(_) => as_i64(v, field)?,
+                Value::String(s) => {
+                    let dt: DateTime<Utc> = s.parse().map_err(|_| {
+                        type_mismatch(field, "ISO-8601 datetime string or int64 epoch")
+                    })?;
+                    dt.timestamp_millis()
+                }
+                _ => return Err(type_mismatch(field, "ISO-8601 string or int64 epoch")),
+            };
 
-              // Путь 2: ISO-строка → парсим
-              Value::String(s) => {
-                  use chrono::{DateTime, Utc};
-
-                  let dt: DateTime<Utc> = s
-                      .parse()
-                      .map_err(|_| EncodeError::TypeMismatch {
-                          field: field.name.clone(),
-                          expected: "valid ISO-8601 datetime string",
-                      })?;
-
-                  dt.timestamp_millis()
-              }
-
-              _ => {
-                  return Err(EncodeError::TypeMismatch {
-                      field: field.name.clone(),
-                      expected: "int64 (epoch) or ISO-8601 string",
-                  });
-              }
-          };
-
-          // Записываем epoch как i64 (8 байт)
-          dst.extend_from_slice(&epoch.to_be_bytes());
+            dst.extend_from_slice(&epoch.to_be_bytes());
         }
+
         PrimitiveFieldType::Int64 => {
-            let n = match v {
-                Value::Number(num) => num
-                    .as_i64()
-                    .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "int64",
-                    })?,
-                _ => {
-                    return Err(EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "int64",
-                    })
-                }
-            };
-            dst.extend_from_slice(&n.to_be_bytes());
+            dst.extend_from_slice(&as_i64(v, field)?.to_be_bytes());
         }
+
         PrimitiveFieldType::UInt64 => {
-            let n = match v {
-                Value::Number(num) => num
-                    .as_u64()
-                    .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "uint64",
-                    })?,
-                _ => {
-                    return Err(EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "uint64",
-                    })
-                }
-            };
-            dst.extend_from_slice(&n.to_be_bytes());
+            dst.extend_from_slice(&as_u64(v, field)?.to_be_bytes());
         }
+
         PrimitiveFieldType::Float => {
-            let n = match v {
-                Value::Number(num) => num
-                    .as_f64()
-                    .map(|f| f as f32)
-                    .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "float",
-                    })?,
-                _ => {
-                    return Err(EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "float",
-                    })
-                }
-            };
-            dst.extend_from_slice(&n.to_be_bytes());
+            dst.extend_from_slice(&as_f32(v, field)?.to_be_bytes());
         }
+
         PrimitiveFieldType::Double => {
-            let n = match v {
-                Value::Number(num) => num
-                    .as_f64()
-                    .ok_or_else(|| EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "double",
-                    })?,
-                _ => {
-                    return Err(EncodeError::TypeMismatch {
-                        field: field.name.clone(),
-                        expected: "double",
-                    })
-                }
-            };
-            dst.extend_from_slice(&n.to_be_bytes());
+            dst.extend_from_slice(&as_f64(v, field)?.to_be_bytes());
         }
+
         PrimitiveFieldType::Bool => {
-            let b = v
-                .as_bool()
-                .ok_or_else(|| EncodeError::TypeMismatch {
-                    field: field.name.clone(),
-                    expected: "bool",
-                })?;
+            let b = v.as_bool().ok_or_else(|| type_mismatch(field, "bool"))?;
             dst.push(if b { 1 } else { 0 });
         }
     }
-
     Ok(())
 }
 
@@ -416,10 +355,10 @@ fn encode_id_internal(key_buf: &mut Vec<u8>, model: &Entity, obj: &Value, skip_c
             }
             FieldType::ModelRef(_) => {
                 if !value.is_object() {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "object" })
+                    return Err(type_mismatch(field, "object"))
                 }
                 let Some(item_id) = value.get("id") else {
-                    return Err(EncodeError::TypeMismatch { field: field.name.clone(), expected: "{ id: u64 }" })
+                    return Err(type_mismatch(field,  "{ id: u64 }"))
                 };
                 // TODO: write all key from model, not only id
                 encode_value(key_buf, field, &PrimitiveFieldType::UInt64, item_id)?;
@@ -430,6 +369,38 @@ fn encode_id_internal(key_buf: &mut Vec<u8>, model: &Entity, obj: &Value, skip_c
         }
     }
 
+    return Ok(());
+}
+
+fn encode_list_dynamic(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive_type: &PrimitiveFieldType, byte_start: usize) -> Result<(), EncodeError> {
+
+    let mut offset_index = buf.len();
+
+    buf.resize(offset_index + arr.len()*4 + 4, 0);
+
+    // Write offset for first element
+    let el_offset = (buf.len() - byte_start) as u32;
+    buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
+    offset_index += 4;
+
+
+    for arr_item in arr.iter() {
+        encode_value(buf, field, primitive_type,  arr_item)?;
+
+        // Write offset for next element. (Also write sentinel offset)
+
+        let el_offset = (buf.len() - byte_start) as u32;
+        buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
+        offset_index += 4;
+    }
+
+    return Ok(());
+}
+
+fn encode_list_static(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive_type: &PrimitiveFieldType) -> Result<(), EncodeError> {
+    for arr_item in arr.iter() {
+        encode_value(buf, field, primitive_type,  arr_item)?;
+    }
     return Ok(());
 }
 

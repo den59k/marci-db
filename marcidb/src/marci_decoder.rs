@@ -7,6 +7,7 @@ use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{
 pub enum DecodeError {
     WrongVersion,
     BufferTooSmall,
+    OffsetOverflow,
     EmptyPayload,
     Utf8Error,
     TypeMismatch(String),
@@ -104,7 +105,7 @@ pub fn decode_fields<'a>(
                     continue;
                 }
 
-                let offset_end = primitive.is_dynamic_size().then(|| {
+                let offset_end = primitive.get_size().is_none().then(|| {
                     return get_end(&data, field.offset_pos, payload_offset)
                 });
 
@@ -116,31 +117,28 @@ pub fn decode_fields<'a>(
             FieldType::PrimitiveList(primitive) => {
                 let offset = get_offset_checked(data, field.offset_pos)?;
                 if offset == 0 {
-                    // NOTE: If field is not nullable, it must write empty list on value
                     obj.insert(field.name.clone(), Value::Null);
                     continue;
                 }
 
                 let size = u32::from_be_bytes(data[offset..offset+4].try_into().unwrap()) as usize;
-                let mut vec = Vec::with_capacity(size);
-
-                let is_dynamic_size = primitive.is_dynamic_size();
-                let static_size = primitive.get_size();
-
-                for i in 0..size {
-                    let offset_pos = offset+4 + i * 4;
-
-                    let item_offset = if is_dynamic_size {
-                        offset + u32::from_be_bytes(data[offset_pos .. offset_pos + 4].try_into().unwrap()) as usize
-                    } else {
-                        offset + 4 + static_size * i
-                    };
-                    let offset_end = is_dynamic_size.then(|| {
-                        offset + u32::from_be_bytes(data[offset_pos + 4 .. offset_pos + 8].try_into().unwrap()) as usize
-                    });
-                    vec.push(decode_value(primitive, &data, item_offset, offset_end)?);
-                }
+                let vec = match primitive.get_size() {
+                    None => parse_array_dynamic(data, primitive, size, offset, offset + 4)?,
+                    Some(el_size) => parse_array_static(data, primitive, size, offset + 4, el_size)?
+                };
                 
+                obj.insert(field_name, Value::Array(vec));
+            },
+            FieldType::PrimitiveFixedList(primitive, fixed_size) => {
+                let offset = get_offset_checked(data, field.offset_pos)?;
+                if offset == 0 {
+                    obj.insert(field.name.clone(), Value::Null);
+                    continue;
+                }
+                let vec = match primitive.get_size() {
+                    None => parse_array_dynamic(data, primitive, *fixed_size, offset, offset)?,
+                    Some(el_size) => parse_array_static(data, primitive, *fixed_size, offset, el_size)?
+                };
                 obj.insert(field_name, Value::Array(vec));
             },
             FieldType::Enum(en) => {
@@ -169,10 +167,39 @@ pub fn decode_fields<'a>(
     return Ok(());
 }
 
+fn parse_array_dynamic(
+    data: &[u8], 
+    primitive: &PrimitiveFieldType, 
+    size: usize, 
+    field_offset: usize, 
+    field_header_offset: usize
+) -> Result<Vec<Value>, DecodeError> {
+    let mut vec = Vec::with_capacity(size);
+    for i in 0..size {
+        let offset_pos = field_header_offset + i * 4;
+
+        let item_offset = field_offset + u32::from_be_bytes(data[offset_pos .. offset_pos + 4].try_into().unwrap()) as usize;
+        let offset_end = field_offset + u32::from_be_bytes(data[offset_pos + 4 .. offset_pos + 8].try_into().unwrap()) as usize;
+
+        vec.push(decode_value(primitive, &data, item_offset, Some(offset_end))?);
+    }
+    
+    return Ok(vec);
+}
+
+fn parse_array_static(data: &[u8], primitive: &PrimitiveFieldType, size: usize, payload_offset: usize, static_size: usize) -> Result<Vec<Value>, DecodeError> {
+    let mut vec = Vec::with_capacity(size);
+    for i in 0..size {
+        let item_offset = payload_offset + static_size * i;
+        vec.push(decode_value(primitive, &data, item_offset, None)?);
+    }
+    return Ok(vec);
+}
+
 #[inline(always)]
 fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset: usize, offset_end: Option<usize>) -> Result<Value, DecodeError> {
-    if !ty.is_dynamic_size() && data.len() < offset + ty.get_size() {
-        return Err(DecodeError::BufferTooSmall);
+    if let Some(el_size) = ty.get_size() && data.len() < offset + el_size {
+        return Err(DecodeError::OffsetOverflow);
     }
     match ty {
         // TODO: Create string decoder supports 2 mode: read len from header and read len by terminate character
