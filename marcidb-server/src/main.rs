@@ -10,7 +10,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{MarciDB, MarciSelect, decode_document, decode_id, encode_document, encode_id, parse_schema, parse_select};
+use marcidb::{MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -70,7 +70,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 return decode_document(ctx).unwrap();
             });
 
-            let body = Bytes::from(Value::Array(data).to_string());
+            let body = Bytes::from(array_to_json(&data));
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
@@ -91,13 +91,11 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };
 
-            println!("Decode time: {:?}", now.elapsed());
-
             let data = db.get_all(model, &select, |ctx | {
                 return decode_document(ctx).unwrap();
             });
 
-            let body = Bytes::from(Value::Array(data).to_string());
+            let body = Bytes::from(array_to_json(&data));
             let resp = Response::new(Full::new(body));
 
             println!("Query time: {:?}", now.elapsed());

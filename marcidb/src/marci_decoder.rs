@@ -1,5 +1,4 @@
 use bitvec::vec::BitVec;
-use serde_json::{Map, Value};
 
 use crate::{marci_db::{get_end, get_offset}, schema::{Aliases, Entity, Field, FieldType, PrimitiveFieldType}, select::{DecodeCtx, IncludeResult}};
 
@@ -14,7 +13,108 @@ pub enum DecodeError {
     OffsetOutOfRange,
 }
 
-pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
+pub trait FieldName {
+    fn field_name(&self) -> &str;
+}
+
+impl FieldName for &Field {
+    fn field_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl FieldName for &String {
+    fn field_name(&self) -> &str {
+        self
+    }
+}
+
+
+#[inline(always)]
+pub fn insert_null<F: FieldName>(str: &mut String, field: F) {
+    if str.len() > 1 {
+        str.push(',');
+    }
+    str.push('"');
+    str.push_str(&field.field_name());
+    str.push_str("\": null");
+}
+
+#[inline(always)]
+pub fn insert_value<F: FieldName>(str: &mut String, field: F, val: &String) {
+    if str.len() > 1 {
+        str.push(',');
+    }
+    str.push('"');
+    str.push_str(&field.field_name());
+    str.push_str("\":");
+    str.push_str(&val);
+}
+
+#[inline(always)]
+pub fn insert_array<F: FieldName>(str: &mut String, field: F, arr: &[String]) {
+    if str.len() > 1 {
+        str.push(',');
+    }
+    str.push('"');
+    str.push_str(&field.field_name());
+    str.push_str("\":[");
+    let mut is_first = true;
+    for item in arr {
+        if !is_first {
+            str.push(',');
+        }
+        is_first = false;
+        str.push_str(&item);
+    }
+    str.push(']');
+}
+
+#[inline(always)]
+/// NOTE: this method does not encode string
+pub fn insert_string<F: FieldName>(str: &mut String, field: F, val: &String) {
+    if str.len() > 1 {
+        str.push(',');
+    }
+    str.push('"');
+    str.push_str(&field.field_name());
+    str.push_str("\":\"");
+    str.push_str(&val);
+    str.push('"');
+}
+
+#[inline(always)]
+pub fn array_to_json(arr: &[String]) -> String {
+    if arr.is_empty() {
+        return "[]".to_owned();
+    }
+
+    let mut total_len = 2; // '[' и ']'
+    total_len += arr.len().saturating_sub(1); // запятые
+
+    for s in arr {
+        total_len += s.len();
+    }
+
+    let mut out = String::with_capacity(total_len);
+
+    out.push('[');
+
+    let mut first = true;
+    for s in arr {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(s);
+    }
+
+    out.push(']');
+
+    out
+}
+
+pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     let DecodeCtx { data, entity, id, select, includes, inject, aliases } = ctx;
     if !data.is_empty() {
         if data.len() < 3 {
@@ -36,37 +136,46 @@ pub fn decode_document(ctx: DecodeCtx<Value>) -> Result<Value, DecodeError>  {
         }
     }
 
-    let mut obj = Map::new();
+    // let mut obj = Map::new();
+    let mut str = String::with_capacity(256);
+    str.push('{');
 
-    decode_fields(id, data, &entity.fields, &mut obj, select, aliases, entity.payload_offset)?;
+    decode_fields(id, data, &entity.fields, &mut str, select, aliases, entity.payload_offset)?;
     
-    if let Some(Value::Object(mut map)) = inject {
-        obj.append(&mut map);
+    if let Some(inject_str) = inject {
+        str.push_str(&inject_str[1..inject_str.len()-1]);
+        // obj.append(&mut map);
     }
 
     for include in includes {
         match include {
             IncludeResult::None(field) => {
-                obj.insert(field.name.clone(), Value::Null);
+                insert_null(&mut str, field);
+                // obj.insert(field.name.clone(), Value::Null);
             },
             IncludeResult::One(field, val) => {
-                obj.insert(field.name.clone(), val);
+                insert_value(&mut str, field, &val);
+                // obj.insert(field.name.clone(), val);
             },
             IncludeResult::Many(field, val) => {
-                let vec = Value::Array(val);
-                obj.insert(field.name.clone(), vec);
+                insert_array(&mut str, field, &val);
+                // let vec = Value::Array(val);
+                // obj.insert(field.name.clone(), vec);
             }
         }
     }
 
-    return Ok(Value::Object(obj));
+    str.push('}');
+
+    return Ok(str);
+    // return Ok(Value::Object(obj));
 }
 
 pub fn decode_fields<'a>(
     id: &'a [u8],
     data: &'a [u8], 
     fields: &[Field], 
-    obj: &mut Map<String, Value>, 
+    obj: &mut String, 
     select: &BitVec, 
     aliases: Option<&Aliases>,
     payload_offset: usize
@@ -79,7 +188,7 @@ pub fn decode_fields<'a>(
                 FieldType::Primitive(primitive) => {
                     // TODO: correct calc offset
                     let value = decode_value(primitive, id, id_idx*8, None)?;
-                    obj.insert(field.name.clone(), value);
+                    insert_value(obj, field, &value);
                 }
                 _ => {}
             }
@@ -101,7 +210,8 @@ pub fn decode_fields<'a>(
                 let offset = get_offset_checked(data, field.offset_pos)?;
                 // Поле = null
                 if offset == 0 {
-                    obj.insert(field.name.clone(), Value::Null);
+                    insert_null(obj, field);
+                    // obj.insert(field.name.clone(), Value::Null);
                     continue;
                 }
 
@@ -111,13 +221,15 @@ pub fn decode_fields<'a>(
 
                 // Декодируем
                 let value = decode_value(primitive, &data, offset, offset_end)?;
-
-                obj.insert(field_name, value);
+                
+                insert_value(obj, &field_name, &value);
+                // obj.insert(field_name, value);
             }
             FieldType::PrimitiveList(primitive) => {
                 let offset = get_offset_checked(data, field.offset_pos)?;
                 if offset == 0 {
-                    obj.insert(field.name.clone(), Value::Null);
+                    insert_null(obj, field);
+                    // obj.insert(field.name.clone(), Value::Null);
                     continue;
                 }
 
@@ -127,30 +239,36 @@ pub fn decode_fields<'a>(
                     Some(el_size) => parse_array_static(data, primitive, size, offset + 4, el_size)?
                 };
                 
-                obj.insert(field_name, Value::Array(vec));
+                insert_array(obj, &field_name, &vec);
+                // obj.insert(field_name, Value::Array(vec));
             },
             FieldType::PrimitiveFixedList(primitive, fixed_size) => {
                 let offset = get_offset_checked(data, field.offset_pos)?;
                 if offset == 0 {
-                    obj.insert(field.name.clone(), Value::Null);
+                    insert_null(obj, &field_name);
+                    // obj.insert(field.name.clone(), Value::Null);
                     continue;
                 }
                 let vec = match primitive.get_size() {
                     None => parse_array_dynamic(data, primitive, *fixed_size, offset, offset)?,
                     Some(el_size) => parse_array_static(data, primitive, *fixed_size, offset, el_size)?
                 };
-                obj.insert(field_name, Value::Array(vec));
+                insert_array(obj, field, &vec);
+                // obj.insert(field_name, Value::Array(vec));
             },
             FieldType::Enum(en) => {
                 let offset = get_offset_checked(data, field.offset_pos)?;
                 // Поле = null
                 if offset == 0 {
-                    obj.insert(field_name, Value::Null);
+                    insert_null(obj, &field_name);
+                    // obj.insert(field_name, Value::Null);
                     continue;
                 }
 
                 let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap()) as usize;
-                obj.insert(field_name, Value::String(en.variants[variant_index].name.clone()));
+                insert_string(obj, &field_name, &en.variants[variant_index].name);
+                // obj.insert(field_name, Value::String(en.variants[variant_index].name.clone()));
+
                 // let variant_fields = &en.variants[variant_index].fields;
                 // if !variant_fields.is_empty() {
                 //     let bit_vec = bitvec!(1; variant_fields.len());
@@ -173,7 +291,7 @@ fn parse_array_dynamic(
     size: usize, 
     field_offset: usize, 
     field_header_offset: usize
-) -> Result<Vec<Value>, DecodeError> {
+) -> Result<Vec<String>, DecodeError> {
     let mut vec = Vec::with_capacity(size);
     for i in 0..size {
         let offset_pos = field_header_offset + i * 4;
@@ -187,7 +305,7 @@ fn parse_array_dynamic(
     return Ok(vec);
 }
 
-fn parse_array_static(data: &[u8], primitive: &PrimitiveFieldType, size: usize, payload_offset: usize, static_size: usize) -> Result<Vec<Value>, DecodeError> {
+fn parse_array_static(data: &[u8], primitive: &PrimitiveFieldType, size: usize, payload_offset: usize, static_size: usize) -> Result<Vec<String>, DecodeError> {
     let mut vec = Vec::with_capacity(size);
     for i in 0..size {
         let item_offset = payload_offset + static_size * i;
@@ -197,7 +315,7 @@ fn parse_array_static(data: &[u8], primitive: &PrimitiveFieldType, size: usize, 
 }
 
 #[inline(always)]
-fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset: usize, offset_end: Option<usize>) -> Result<Value, DecodeError> {
+fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset: usize, offset_end: Option<usize>) -> Result<String, DecodeError> {
     if let Some(el_size) = ty.get_size() && data.len() < offset + el_size {
         return Err(DecodeError::OffsetOverflow);
     }
@@ -206,37 +324,50 @@ fn decode_value(ty: &PrimitiveFieldType, data: &[u8], offset: usize, offset_end:
         PrimitiveFieldType::String => {
             let offset_end = offset_end.expect("offset_end must be defined for decode string");
             let s = std::str::from_utf8(&data[offset..offset_end]).map_err(|_| DecodeError::Utf8Error)?;
-            Ok(Value::String(s.to_string()))
+
+            let json = serde_json::to_string(s).unwrap();
+            Ok(json)
+            // Ok(Value::String(s.to_string()))
         }
         PrimitiveFieldType::DateTime => {
             let epoch = i64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
             // Возвращаем как число (или можно форматировать обратно в ISO)
-            Ok(Value::Number(epoch.into()))
+            Ok(epoch.to_string())
+            // Ok(Value::Number(epoch.into()))
         }
         PrimitiveFieldType::Int64 => {
             let n = i64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
-            Ok(Value::Number(n.into()))
+            Ok(n.to_string())
+            // Ok(Value::Number(n.into()))
         }
         PrimitiveFieldType::UInt64 => {
             let n = u64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
-            Ok(Value::Number(n.into()))
+            Ok(n.to_string())
+            // Ok(Value::Number(n.into()))
         }
         PrimitiveFieldType::Float => {
             let n = f32::from_be_bytes(data[offset..offset+4].try_into().unwrap());
-            Ok(Value::Number(serde_json::Number::from_f64(n as f64).unwrap()))
+            Ok(n.to_string())
+            // Ok(Value::Number(serde_json::Number::from_f64(n as f64).unwrap()))
         }
         PrimitiveFieldType::Double => {
             let n = f64::from_be_bytes(data[offset..offset+8].try_into().unwrap());
-            Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
+            Ok(n.to_string())
+            // Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
         }
         PrimitiveFieldType::Bool => {
-            Ok(Value::Bool(data[offset] != 0))
+            Ok((data[offset] != 0).to_string())
+            // Ok(Value::Bool(data[offset] != 0))
         }
     }
 }
 
-pub fn decode_id(id: &[u8], model: &Entity) -> Result<Value, DecodeError> {
-    let mut obj = Map::new();
+pub fn decode_id(id: &[u8], model: &Entity) -> Result<String, DecodeError> {
+    // let mut obj = Map::new();
+
+    let mut str = String::with_capacity(256);
+    str.push('{');
+    let mut is_first = true;
 
     for field in model.fields.iter() {
         let Some(id_idx) = field.id_idx else {
@@ -244,14 +375,24 @@ pub fn decode_id(id: &[u8], model: &Entity) -> Result<Value, DecodeError> {
         };
         match &field.ty {
             FieldType::Primitive(primitive) => {
+                if !is_first {
+                    str.push(',');
+                }
+                is_first = false;
                 let value = decode_value(primitive, id, id_idx * 8, None)?;
-                obj.insert(field.name.clone(), value);
+                str.push('"');
+                str.push_str(&field.name);
+                str.push_str("\":");
+                str.push_str(&value);
+                // obj.insert(field.name.clone(), value);
             }
             _ => {}
         }
     }
 
-    Ok(Value::Object(obj))
+    str.push('}');
+
+    Ok(str)
 }
 
 #[inline(always)]
@@ -266,7 +407,7 @@ pub fn get_offset_checked<'a>(data: &'a [u8], offset_pos: usize) -> Result<usize
 #[cfg(test)]
 mod tests {
     use bitvec::bitvec;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use crate::{marci_db::InsertStruct, marci_decoder::decode_document, marci_encoder::{encode_document, encode_id}, marci_select::parse_select, schema::{FieldType, parse_schema}, select::DecodeCtx};
 
@@ -312,7 +453,7 @@ mod tests {
             aliases: None
         }).unwrap();
 
-        assert_eq!(resp, json!({
+        assert_eq!(serde_json::from_str::<Value>(&resp).unwrap(), json!({
             "id": 0,
             "features": ["tester", "tests"],
             "counters": [ 4, 5 ]
@@ -390,7 +531,7 @@ mod tests {
             aliases: None
         }).unwrap();
 
-        assert_eq!(resp, json!({ "role": "admin" }));
+        assert_eq!(serde_json::from_str::<Value>(&resp).unwrap(), json!({ "role": "admin" }));
     }
 
 }
