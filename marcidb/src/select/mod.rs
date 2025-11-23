@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use bitvec::vec::BitVec;
 use crate::{marci_db::get_offset_from_field, schema::{Aliases, Entity, Field}};
 
-pub use crate::select::process_select::{process_data, ProcessDataContext};
+pub use crate::select::process_select::{process_data, TransationContext,ProcessDataContext};
 
 mod process_select;
 

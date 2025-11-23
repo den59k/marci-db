@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, u64}
 use bitvec::vec::BitVec;
 use canopydb::{Database, Environment, Transaction, Tree, WriteTransaction};
 
-use crate::{schema::{DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, select::{DecodeCtx, MarciSelect, ProcessDataContext, get_value_from_data, get_value_from_id, process_data}, update_data::{set_field_null, update_data}};
+use crate::{schema::{DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, select::{DecodeCtx, MarciSelect, ProcessDataContext, TransationContext, get_value_from_data, get_value_from_id, process_data}, update_data::{set_field_null, update_data}};
 
 pub struct MarciDB {
   pub db: Database,
@@ -215,17 +215,19 @@ impl MarciDB {
       f: F
   ) -> Vec<U>
   where
+    U: Clone,
     F: Fn(DecodeCtx<'_, U>) -> U,
   {
       let rx = self.db.begin_read().unwrap();
       let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
-      let mut ctx = ProcessDataContext::new(&rx, f, select);
+      let mut tctx = TransationContext::new(&rx, f);
+      let mut ctx = ProcessDataContext::new(select);
 
       tree.iter().unwrap().map(|item| {
           let (id, value) = item.unwrap();
           
-          process_data(&id, &value, select, model, &mut ctx, None)
+          process_data(&id, &value, model, &mut tctx, &mut ctx, None)
       }).collect()
   }
 
