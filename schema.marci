@@ -4,7 +4,7 @@ model User {
   surname     String
   info        UserInfo
   posts       Post[]        @derived(Post.author)
-  projects    Project[]     @derived(Project.users.user) @inject(Project.users { role, sign })
+  projects    Project[]     @derived(Project.users.user) @inject(Project.users { role as user_role, sign as admin_sign })
 }
 
 struct UserInfo {

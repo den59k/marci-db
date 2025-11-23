@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use crate::{marci_db::get_offset_from_field, schema::{Aliases, Entity, Field}};
 
@@ -53,8 +53,8 @@ pub struct DecodeCtx<'a, U> {
 
 pub enum IncludeResult<'a, U> {
   None(&'a Field),
-  One(&'a Field,U),
-  Many(&'a Field,Vec<U>)
+  One(&'a Field,Arc<U>),
+  Many(&'a Field,Vec<Arc<U>>)
 }
 
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap};
+use std::{collections::HashMap, sync::Arc};
 
 use canopydb::{ReadTransaction, Tree};
 
@@ -33,12 +33,12 @@ impl<'a, F> TransationContext<'a, F> {
     }
 }
 
-pub struct ProcessDataContext<'a, U> where U: Clone {
+pub struct ProcessDataContext<'a, U> {
   pub select: &'a MarciSelect<'a>,
-  pub include_cache: Vec<HashMap<Vec<u8>, U>>
+  pub include_cache: Vec<HashMap<Vec<u8>, Arc<U>>>
 }
 
-impl<'a, U> ProcessDataContext<'a, U> where U: Clone {
+impl<'a, U> ProcessDataContext<'a, U> {
   pub fn new(select: &'a MarciSelect) -> Self {
     Self { 
       select, 
@@ -56,7 +56,7 @@ pub fn process_data<'a,'b, U, F>(
     mut inject: Option<U>,
 ) -> U
 where
-    U: Clone,
+    // U: Clone,
     F: Fn(DecodeCtx<U>) -> U,
 {
 
@@ -96,8 +96,8 @@ pub fn parse_include<'a,'b, U, F>(
   include_idx: usize
 ) -> IncludeResult<'a, U> 
 where 
-    U: Clone,
-    F: Fn(DecodeCtx<U>) -> U, 
+    // U: Clone,
+    F: Fn(DecodeCtx<U>) -> U
 {
   match include.binding {
     MarciSelectBinding::One() => {
@@ -114,7 +114,7 @@ where
         if include.select_only_id {
           // We send empty data because only ID bytes is using
           let item = process_data(item_id, &[], include.model, tctx, &mut new_ctx, Some(injected_data)); 
-          return IncludeResult::One(include.field, item);
+          return IncludeResult::One(include.field, Arc::new(item));
         }
 
         let nested_tree = tctx.get_tree(&include.model.name);
@@ -125,7 +125,9 @@ where
 
         let item = ctx.include_cache[include_idx]
                 .entry(item_id.to_vec())
-                .or_insert_with(|| process_data(item_id, data.as_ref(), include.model, tctx, &mut new_ctx, Some(injected_data)))
+                .or_insert_with(|| {
+                  Arc::new(process_data(item_id, data.as_ref(), include.model, tctx, &mut new_ctx, Some(injected_data)))
+                })
                 .clone();
 
         return IncludeResult::One(include.field, item);       
@@ -134,7 +136,7 @@ where
       if include.select_only_id {
         // We send empty data because only ID bytes is using
         let item = process_data(item_id, &[], include.model, tctx, &mut new_ctx, None); 
-        return IncludeResult::One(include.field, item);
+        return IncludeResult::One(include.field, Arc::new(item));
       }
       let nested_tree = tctx.get_tree(&include.model.name);
       let Some(data) = nested_tree.get(item_id).unwrap() else {
@@ -143,7 +145,9 @@ where
       };
       let item = ctx.include_cache[include_idx]
         .entry(item_id.to_vec())
-        .or_insert_with(|| process_data(item_id, data.as_ref(), include.model, tctx, &mut new_ctx, None))
+        .or_insert_with(|| {
+          Arc::new(process_data(item_id, data.as_ref(), include.model, tctx, &mut new_ctx, None))
+        })
         .clone();
        
       return IncludeResult::One(include.field, item);
@@ -163,13 +167,13 @@ where
         if include.select_only_id {
           let items = keys.iter().map(|key| {
             let injected_data = get_injected_data(key, injected.st, tctx, &mut injected_ctx);
-            return process_data(key, &[], include.model, tctx, &mut new_ctx, Some(injected_data));
+            return Arc::new(process_data(key, &[], include.model, tctx, &mut new_ctx, Some(injected_data)));
           }).collect();
 
           return IncludeResult::Many(include.field, items);
         }
 
-        let items: Vec<U> = keys.iter().map(|key| {
+        let items = keys.iter().map(|key| {
           ctx.include_cache[include_idx]
             .entry(key.clone())
             .or_insert_with(|| {
@@ -178,7 +182,7 @@ where
                 panic!("Not found value in tree {}. Key: {:?}", str::from_utf8(include.model.name.as_bytes()).unwrap(), key);
               };
               let injected_data = get_injected_data(key, injected.st, tctx, &mut injected_ctx);
-              process_data(key, data.as_ref(), include.model, tctx, &mut new_ctx, Some(injected_data))
+              Arc::new(process_data(key, data.as_ref(), include.model, tctx, &mut new_ctx, Some(injected_data)))
             })
             .clone()
         }).collect();
@@ -188,13 +192,13 @@ where
 
       if include.select_only_id {
         let items = keys.iter().map(|key| {
-          return process_data(key, &[], include.model, tctx, &mut new_ctx, None);
+          return Arc::new(process_data(key, &[], include.model, tctx, &mut new_ctx, None));
         }).collect();
 
         return IncludeResult::Many(include.field, items);
       }
 
-      let items: Vec<U> = keys.iter().map(|key| {
+      let items = keys.iter().map(|key| {
         ctx.include_cache[include_idx]
           .entry(key.clone())
           .or_insert_with(|| {
@@ -202,7 +206,7 @@ where
             let Some(data) = nested_tree.get(&key[..8]).unwrap() else {
               panic!("Not found value in tree {}. Key: {:?}", str::from_utf8(include.model.name.as_bytes()).unwrap(), key);
             };
-            process_data(key, data.as_ref(), include.model, tctx, &mut new_ctx, None)
+            Arc::new(process_data(key, data.as_ref(), include.model, tctx, &mut new_ctx, None))
           })
           .clone()
       }).collect();
@@ -217,7 +221,7 @@ where
 
       let mut new_ctx = ProcessDataContext::new(&include.select);
 
-      let item = process_data(id, data.as_ref(), include.model, tctx, &mut new_ctx, None);
+      let item = Arc::new(process_data(id, data.as_ref(), include.model, tctx, &mut new_ctx, None));
       return IncludeResult::One(include.field, item);
     },
     MarciSelectBinding::ManyStruct() => {
@@ -229,14 +233,14 @@ where
       if include.select_only_id {
         let items = st_tree.prefix_keys(&id).unwrap().map(|item| {
           let key = item.unwrap();
-          return process_data(&key, &[], include.model, tctx, &mut new_ctx, None);
+          return Arc::new(process_data(&key, &[], include.model, tctx, &mut new_ctx, None));
         }).collect();
         return IncludeResult::Many(include.field, items);
       }
 
       let items = st_tree.prefix(&id).unwrap().map(|item| {
         let (key, data) = item.unwrap();
-        return process_data(&key, data.as_ref(), include.model, tctx, &mut new_ctx, None);
+        return Arc::new(process_data(&key, data.as_ref(), include.model, tctx, &mut new_ctx, None));
       }).collect();
 
       return IncludeResult::Many(include.field, items);
@@ -251,7 +255,7 @@ pub fn get_injected_data<'a,U,F>(
   ctx: &mut ProcessDataContext<'a, U>
 ) -> U
 where 
-    U: Clone,
+    // U: Clone,
     F: Fn(DecodeCtx<U>) -> U
 {
   let tree = tctx.get_tree(&st.name);

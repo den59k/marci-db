@@ -165,6 +165,9 @@ fn parse_injected<'a>(schema: &'a Schema, field: &'a Field, val: &Value) -> Resu
     };
 
     let select = parse_select(&st.fields, val, schema, Some(aliases))?;
+    if select.mask.not_any() && select.includes.is_empty() {
+      return Ok(None);
+    }
 
     return Ok(Some(Injected { st, select }));
   }

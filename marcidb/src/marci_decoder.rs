@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bitvec::vec::BitVec;
 
 use crate::{marci_db::{get_end, get_offset}, schema::{Aliases, Entity, Field, FieldType, PrimitiveFieldType}, select::{DecodeCtx, IncludeResult}};
@@ -29,6 +31,28 @@ impl FieldName for &String {
     }
 }
 
+pub trait JsonStr {
+    fn as_json_str(&self) -> &str;
+}
+
+impl JsonStr for String {
+    fn as_json_str(&self) -> &str {
+        self
+    }
+}
+
+impl JsonStr for Arc<String> {
+    fn as_json_str(&self) -> &str {
+        self
+    }
+}
+
+impl JsonStr for &str {
+    fn as_json_str(&self) -> &str {
+        self
+    }
+}
+
 
 #[inline(always)]
 pub fn insert_null<F: FieldName>(str: &mut String, field: F) {
@@ -37,7 +61,7 @@ pub fn insert_null<F: FieldName>(str: &mut String, field: F) {
     }
     str.push('"');
     str.push_str(&field.field_name());
-    str.push_str("\": null");
+    str.push_str("\":null");
 }
 
 #[inline(always)]
@@ -52,7 +76,7 @@ pub fn insert_value<F: FieldName>(str: &mut String, field: F, val: &String) {
 }
 
 #[inline(always)]
-pub fn insert_array<F: FieldName>(str: &mut String, field: F, arr: &[String]) {
+pub fn insert_array_arc<F: FieldName, T: JsonStr>(str: &mut String, field: F, arr: &[T]) {
     if str.len() > 1 {
         str.push(',');
     }
@@ -65,7 +89,7 @@ pub fn insert_array<F: FieldName>(str: &mut String, field: F, arr: &[String]) {
             str.push(',');
         }
         is_first = false;
-        str.push_str(&item);
+        str.push_str(item.as_json_str());
     }
     str.push(']');
 }
@@ -143,8 +167,15 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     decode_fields(id, data, &entity.fields, &mut str, select, aliases, entity.payload_offset)?;
     
     if let Some(inject_str) = inject {
-        str.push_str(&inject_str[1..inject_str.len()-1]);
-        // obj.append(&mut map);
+        if inject_str.len() > 2 {
+            if str.len() > 1 {
+                str.push(',');
+            }
+            str.push_str(&inject_str[1..inject_str.len()-1]);
+            // obj.append(&mut map);
+        } else {
+            println!("WARN: you pass empty inject");
+        }
     }
 
     for include in includes {
@@ -158,7 +189,7 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
                 // obj.insert(field.name.clone(), val);
             },
             IncludeResult::Many(field, val) => {
-                insert_array(&mut str, field, &val);
+                insert_array_arc(&mut str, field, &val);
                 // let vec = Value::Array(val);
                 // obj.insert(field.name.clone(), vec);
             }
@@ -239,7 +270,7 @@ pub fn decode_fields<'a>(
                     Some(el_size) => parse_array_static(data, primitive, size, offset + 4, el_size)?
                 };
                 
-                insert_array(obj, &field_name, &vec);
+                insert_array_arc(obj, &field_name, &vec);
                 // obj.insert(field_name, Value::Array(vec));
             },
             FieldType::PrimitiveFixedList(primitive, fixed_size) => {
@@ -253,7 +284,7 @@ pub fn decode_fields<'a>(
                     None => parse_array_dynamic(data, primitive, *fixed_size, offset, offset)?,
                     Some(el_size) => parse_array_static(data, primitive, *fixed_size, offset, el_size)?
                 };
-                insert_array(obj, field, &vec);
+                insert_array_arc(obj, field, &vec);
                 // obj.insert(field_name, Value::Array(vec));
             },
             FieldType::Enum(en) => {
