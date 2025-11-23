@@ -1,7 +1,7 @@
 use bitvec::vec::BitVec;
 use serde_json::{Map, Value};
 
-use crate::{marci_db::{DecodeCtx, IncludeResult, get_end, get_offset}, schema::{Aliases, Entity, Field, FieldType, PrimitiveFieldType}};
+use crate::{marci_db::{get_end, get_offset}, schema::{Aliases, Entity, Field, FieldType, PrimitiveFieldType}, select::{DecodeCtx, IncludeResult}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -268,7 +268,7 @@ mod tests {
     use bitvec::bitvec;
     use serde_json::json;
 
-    use crate::{marci_db::{DecodeCtx, InsertStruct}, marci_decoder::decode_document, marci_encoder::{encode_document, encode_id}, marci_select::parse_select, schema::{FieldType, parse_schema}};
+    use crate::{marci_db::InsertStruct, marci_decoder::decode_document, marci_encoder::{encode_document, encode_id}, marci_select::parse_select, schema::{FieldType, parse_schema}, select::DecodeCtx};
 
     #[test]
     fn test_decode_list() {

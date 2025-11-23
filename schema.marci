@@ -39,7 +39,13 @@ model File {
   name        String
 }
 
+model LandmarkTag {
+  name          String
+}
+
 model Landmark {
-  name        String
-  location    Float[2]      @vectorindex
+  name          String
+  description   String
+  location      Float[2]      @vectorindex
+  tags          LandmarkTag[]
 }

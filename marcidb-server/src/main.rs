@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -75,11 +76,11 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
         }
 
         (&Method::POST, "findMany") => {
-
+            let now = Instant::now();
             let Ok(whole_body) = req.collect().await else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to get body"));
             };
-                
+            
             // Преобразуем в &str или &[u8] и парсим JSON
             let Ok(select): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
@@ -90,12 +91,17 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };
 
+            println!("Decode time: {:?}", now.elapsed());
+
             let data = db.get_all(model, &select, |ctx | {
                 return decode_document(ctx).unwrap();
             });
 
             let body = Bytes::from(Value::Array(data).to_string());
             let resp = Response::new(Full::new(body));
+
+            println!("Query time: {:?}", now.elapsed());
+
             Ok(resp)
         }
 

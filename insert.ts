@@ -1,6 +1,9 @@
+import landmarkTags from './mock/landmarkTags.json'
+import landmarks from './mock/landmarks.json'
+
 const host = "http://localhost:3000"
 
-type Model = "Post" | "User" | "Project" | "File"
+type Model = "Post" | "User" | "Project" | "File" | "LandmarkTag" | "Landmark"
 
 const insert = async (model: Model, obj: any) => {
   const resp = await fetch(`${host}/${model}/insert`, {
@@ -53,6 +56,22 @@ const insertData = async () => {
       { "id": 1 }
     ]
   })
+
+  for (let tag of landmarkTags) {
+    await insert("LandmarkTag", {
+      name: tag.name
+    })
+  }
+
+  for (let landmark of landmarks) {
+    const loc = landmark.location.split(",")
+    await insert("Landmark", {
+      name: landmark.name,
+      description: landmark.description,
+      location: [ parseFloat(loc[1]), parseFloat(loc[0]) ],
+      tags: landmark.tags
+    })
+  }
 
 }
 
