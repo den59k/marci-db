@@ -10,35 +10,15 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marci_vector::{ReadCluster, WriteCluster};
-use marcidb::{Attribute, FieldType, MarciDB, MarciIter, MarciSelect, Tree, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, iter_tree_by_prefix, parse_schema, parse_select};
+use marcidb::{Attribute, FieldType, MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-struct ServerContext {
+use marci_vector::WriteCluster;
+mod marci_vector_utils;
+
+pub struct ServerContext {
     db: MarciDB
-}
-
-impl<'a> WriteCluster<'a> for ServerContext {
-    type WriteContext = Tree<'a>;
-
-    fn write_data(&self, ctx: &mut Tree<'a>, id: Vec<u8>, data: &[u8]) {
-        ctx.insert(&id, data).unwrap()
-    }
-}
-
-
-impl<'a> ReadCluster<'a> for ServerContext {
-    type ReadContext = Tree<'a>;
-    type Iter<'b> = MarciIter<'b>;
-
-    fn read_data<'b>(
-        &'b self,
-        ctx: &'b Tree<'a>,
-        prefix: &'b [u8],
-    ) -> MarciIter<'b> {
-        iter_tree_by_prefix(ctx, prefix)
-    }
 }
 
 async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) -> Result<Response<Full<Bytes>>, Infallible> {
@@ -183,6 +163,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
             Ok(resp)
         }
 
+        // Only marci vector utils
         (&Method::POST, "index") => {
             for (field_index, field) in model.fields.iter().enumerate() {
                 if !field.attributes.iter().any(|f| matches!(f, Attribute::VectorIndex)) {

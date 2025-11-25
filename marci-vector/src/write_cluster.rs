@@ -1,95 +1,102 @@
-use kentro::KMeans;
-use ndarray::Array2;
+use std::collections::{HashMap};
 
-const MIN_POINTS_IN_CLUSTER: usize = 20;
+// use kentro::KMeans;
+use kmeans::{EuclideanDistance, KMeans, KMeansConfig};
+
+const ZERO_PATH: &[u16] = &[0];
 
 pub trait WriteCluster<'a> {
     type WriteContext: 'a;
 
-    fn write_data(&self, ctx: &mut Self::WriteContext, cluster_id: Vec<u8>, centroid: &[u8]);
+    fn write_data(&self, ctx: &mut Self::WriteContext, cluster_id: Vec<u8>, centroid: &[f32]);
 
-    fn create_cluster_internal(&self, ctx: &mut Self::WriteContext, path: &[u16], ids: &[&[u8]], data: &Array2::<f32>) {
+    /// Разделяет точки на кластеры. Если создается только один кластер - возвращает false
+    fn create_cluster_internal(&self, ctx: &mut Self::WriteContext, path: &[u16], ids: &[&[u8]], data: &[f32], dim: usize) -> usize {
         const DEFAULT_K: usize = 8;
-
-        let n = data.nrows();
-        let dim = data.ncols();
+        
+        let n = data.len() / dim;
+        if n == 0 {
+            return 0;
+        }
 
         // K не может быть больше числа точек
         let k = DEFAULT_K.min(n / 3);
         if k <= 1 {
-            for (i, point) in data.rows().into_iter().enumerate() { 
+            let path = if path.is_empty() {
+                let zero_cluster_id = build_cluster_key(ZERO_PATH);
+                // let point_data: &[u8] = bytemuck::cast_slice(&data[0..dim]);
+                self.write_data(ctx, zero_cluster_id, &data[0..dim]);
+                ZERO_PATH
+            } else {
+                path 
+            };
+                
+            for (i, point) in data.chunks(dim).enumerate() { 
                 let leaf_key = build_leaf_key(path, &ids[i]);
-                let point_data: &[u8] = bytemuck::cast_slice(point.as_slice().unwrap());
-                self.write_data(ctx, leaf_key, point_data);
+                // let point_data: &[u8] = bytemuck::cast_slice(point);
+                self.write_data(ctx, leaf_key, point);
             }
-            return;
+            return 1;
         }
 
         // Настраиваем и запускаем KMeans
-        let mut kmeans = KMeans::new(k)
-            .with_euclidean(true)  // стандартная евклидова метрика
-            .with_iterations(100)
-            .with_verbose(false);
+        let kmeans: KMeans<f32, 8, EuclideanDistance> = KMeans::new(data, n, dim, EuclideanDistance);
 
         // train возвращает разбиение на кластеры:
         // Vec<Vec<usize>>, где каждый внутренний вектор — индексы точек
-        let clusters = kmeans
-            .train(data.view(), None)
-            .expect("k-means training failed");
+        let result = kmeans.kmeans_lloyd(k, 100, KMeans::init_kmeanplusplus, &KMeansConfig::default());
 
-        let count_clusters = clusters.iter()
-            .filter(|c| !c.is_empty())
-            .count();
-
-        if count_clusters <= 1 {
-            for (i, point) in data.rows().into_iter().enumerate() { 
-                let leaf_key = build_leaf_key(path, &ids[i]);
-                let point_data: &[u8] = bytemuck::cast_slice(point.as_slice().unwrap());
-                self.write_data(ctx, leaf_key, point_data);
-            }
-            return;
+        let mut points_map = HashMap::new();
+        for (point_id, &cluster_id) in result.assignments.iter().enumerate() {
+            points_map
+                .entry(cluster_id)
+                .or_insert(vec![])
+                .push(point_id);
         }
 
-        // Получаем центроиды после обучения
-        let centroids = kmeans
-            .centroids()
-            .expect("centroids not available after training");
+        let clusters_count = points_map.len();
+
+        if clusters_count <= 1 {
+            for (i, point) in data.chunks(dim).enumerate() { 
+                let leaf_key = build_leaf_key(path, &ids[i]);
+                // let point_data: &[u8] = bytemuck::cast_slice(point);
+                self.write_data(ctx, leaf_key, point);
+            }
+            return clusters_count;
+        }
         
-        println!("Layer: {}. Write {} clusters ({} points)", path.len(), count_clusters, n);
+        println!("Layer: {}. Write {} clusters ({} points)", path.len(), clusters_count, n);
 
         // // 1) Записываем центры кластеров
-        for (cluster_id, centroid_row) in centroids.outer_iter().enumerate() {
+        for (cluster_id, point_ids) in points_map {
 
-            let points = &clusters[cluster_id];
-            if points.is_empty() { continue; }
+            if point_ids.is_empty() { continue; }
 
             let item_cluster_id = [ path, &[cluster_id as u16] ].concat();
 
-            if points.len() < MIN_POINTS_IN_CLUSTER {
-                for &point_index in points { 
-                    let point = &data.row(point_index);
-                    let point_id = &ids[point_index];
-                    let leaf_key = build_leaf_key( &item_cluster_id, point_id);
+            let centroid_center = &result.centroids[cluster_id];
 
-                    let point_data: &[u8] = bytemuck::cast_slice(point.as_slice().unwrap());
+            let cluster_key = build_cluster_key( &item_cluster_id);
+            // let centroid_data: &[u8] = bytemuck::cast_slice(centroid_center);
 
-                    self.write_data(ctx, leaf_key, point_data);
-                }
-            } else {
-                let cluster_key = build_cluster_key( &item_cluster_id);
-                let centroid_data: &[u8] = bytemuck::cast_slice(centroid_row.as_slice().unwrap());
-                self.write_data(ctx, cluster_key, centroid_data);
+            let mut sub_ids = Vec::with_capacity(point_ids.len());
+            let mut sub_data= Vec::with_capacity(point_ids.len() * dim);
+            // let mut sub_data = Array2::<f32>::zeros((points.len(), dim));
+            for &point_index in point_ids.iter() {
+                sub_ids.push(ids[point_index]);
 
-                let mut sub_ids = Vec::with_capacity(points.len());
-                let mut sub_data = Array2::<f32>::zeros((points.len(), dim));
-                for (i, &point_index) in points.iter().enumerate() {
-                    sub_ids.push(ids[point_index]);
-                    sub_data.row_mut(i).assign(&data.row(point_index));
-                }
-                self.create_cluster_internal(ctx, &item_cluster_id, &sub_ids, &sub_data);
+                sub_data.extend_from_slice(&data[point_index*dim..point_index*dim+dim]);
             }
+
+            let created_clusters = self.create_cluster_internal(ctx, &item_cluster_id, &sub_ids, &sub_data, dim);
+
+            if created_clusters > 1 {
+                self.write_data(ctx, cluster_key, centroid_center);
+            }
+      
         }
 
+        return clusters_count;
     }
 
     fn create_cluster(&self, ctx: &mut Self::WriteContext, coordinates: &[(Vec<u8>, Vec<f32>)]) {
@@ -101,15 +108,13 @@ pub trait WriteCluster<'a> {
         let mut point_ids = vec![];
 
         // Собираем данные в матрицу NxD для kentro
-        let mut data = Array2::<f32>::zeros((n, dim));
-        for (i, vec) in coordinates.iter().enumerate() {
+        let mut data = Vec::with_capacity(dim * n);
+        for vec in coordinates.iter() {
             point_ids.push(vec.0.as_slice());
-            for (j, &val) in vec.1.iter().enumerate() {
-                data[(i, j)] = val;
-            }
+            data.extend_from_slice(&vec.1);
         }
 
-        self.create_cluster_internal(ctx, &[], &point_ids, &data);
+        self.create_cluster_internal(ctx, &[], &point_ids, &data, dim);
     }
 
     fn create_cluster_from_bytes(&self, ctx: &mut Self::WriteContext, coordinates_buf: &[(Vec<u8>, Vec<u8>)]) {
@@ -120,15 +125,15 @@ pub trait WriteCluster<'a> {
         let mut point_ids = vec![];
 
         // Собираем данные в матрицу NxD для kentro
-        let mut data = Array2::<f32>::zeros((n, dim));
-        for (i, vec) in coordinates_buf.iter().enumerate() {
+        let mut data = Vec::with_capacity(dim * n);
+
+        for vec in coordinates_buf.iter() {
             point_ids.push(vec.0.as_slice());
-            for (j, val) in vec.1.chunks(4).enumerate() {
-                data[(i, j)] = f32::from_be_bytes(val.try_into().unwrap());
-            }
+            let float_slice: &[f32] = bytemuck::cast_slice(&vec.1);
+            data.extend_from_slice(float_slice);
         }
 
-        self.create_cluster_internal(ctx,  &[], &point_ids, &data);
+        self.create_cluster_internal(ctx,  &[], &point_ids, &data, dim);
     }
 }
 
@@ -163,11 +168,11 @@ mod tests {
         
     }
 
-    type MockData = Vec<(Vec<u8>,Vec<u8>)>;
+    type MockData = Vec<(Vec<u8>,Vec<f32>)>;
 
     impl WriteCluster<'_> for MockStorage {
         type WriteContext = MockData;
-        fn write_data(&self, ctx: &mut MockData, key: Vec<u8>, centroid_data: &[u8]) {
+        fn write_data(&self, ctx: &mut MockData, key: Vec<u8>, centroid_data: &[f32]) {
             ctx.push((key.to_vec(), centroid_data.to_vec()));
         }
     }

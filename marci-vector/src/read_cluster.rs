@@ -33,12 +33,12 @@ impl Eq for HeapElem {}
 
 pub trait ReadCluster<'a> {
     type ReadContext: 'a;
-    type Iter<'b>: Iterator<Item = (Vec<u8>, Vec<u8>)> where Self: 'b;
+    type Iter<'b>: Iterator<Item = (Vec<u8>, Vec<f32>)> where Self: 'b;
 
     fn read_data<'b>(
         &'b self,
         ctx: &'b Self::ReadContext,
-        prefix: &'b [u8],
+        prefix: Vec<u8>,
     ) -> Self::Iter<'b>;
 
     fn find_nearest_points(&self, ctx: &Self::ReadContext, point: &[f32], k: usize) -> Vec<(Vec<u8>,f32)> {
@@ -62,11 +62,11 @@ where
     R: ReadCluster<'a> + ?Sized,
 {
     let prefix = build_prefix(&path);
+    let item_path_len = path.len() + 1;
     let mut heap_clusters: BinaryHeap<HeapElem> = BinaryHeap::new();
 
-    for (id, point_data) in reader.read_data(ctx, &prefix) {
-
-        let is_cluster = id[2 + path.len() * 2] == 0x00;
+    for (id, point_data) in reader.read_data(ctx, prefix) {
+        let is_cluster = id[2 + item_path_len * 2] == 0x00;
 
         let floats: &[f32] = bytemuck::cast_slice(&point_data);
 
@@ -86,11 +86,13 @@ where
             continue;
         }
 
+        let item_id = id[2 + item_path_len*2 + 1 ..].to_vec();
+        println!("{} {}", u32::from_be_bytes(item_id.as_slice().try_into().unwrap()), dist2);
+
         if heap.len() == k && dist2 >= heap.peek().unwrap().dist2 {
             continue; // эта точка хуже, чем худшая в куче — пропускаем
         }
 
-        let item_id = id[2 + path.len() * 2 + 1 ..].to_vec();
         heap.push(HeapElem { dist2, id: item_id });
         if heap.len() > k {
             heap.pop();  // удаляем самую далёкую
@@ -101,14 +103,15 @@ where
         if heap.len() == k && item.dist2 >= heap.peek().unwrap().dist2 * 2f32 {
             break;
         }
-        let item_path: &[u16] = bytemuck::cast_slice(&item.id[2..2+path.len()*2+2]);
+        let item_path: &[u16] = bytemuck::cast_slice(&item.id[2..2+item_path_len*2]);
         find_nearest_points_internal(reader, ctx, point, k, item_path, heap);
     }
 }
 
+/// Строит префикс, чтобы найти все дочерние элементы у текущего path
 fn build_prefix(path: &[u16]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(path.len()*2 + 1);
-    out.extend_from_slice(&(path.len() as u16).to_be_bytes());
+    let mut out = Vec::with_capacity(path.len()*2 + 2);
+    out.extend_from_slice(&(path.len() as u16 + 1).to_be_bytes());
     for &p in path {
         out.extend_from_slice(&p.to_be_bytes());
     }

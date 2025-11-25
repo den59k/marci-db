@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, u64};
 
 use bitvec::vec::BitVec;
-use canopydb::{Database, Environment, RangeIter, Transaction, Tree, WriteTransaction};
+use canopydb::{Database, Environment, Transaction, Tree, WriteTransaction};
 
 use crate::{schema::{DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, select::{DecodeCtx, MarciSelect, ProcessDataContext, TransationContext, get_value_from_data, get_value_from_id, process_data}, update_data::{set_field_null, update_data}};
 
