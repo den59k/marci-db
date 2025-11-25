@@ -1,4 +1,4 @@
-use marci_vector::{ReadCluster, WriteCluster, bytes_to_point, point_to_bytes};
+use marci_vector::{ReadCluster, WriteCluster, point_to_bytes};
 use marcidb::{RangeIter, Tree};
 
 use crate::ServerContext;
@@ -13,8 +13,13 @@ impl<'b> Iterator for MarciIter<'b> {
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|entry| {
             let (k, v) = entry.unwrap();
-            let p =  bytes_to_point(&v);
-            (k.to_vec(), p.to_vec())
+
+            let arr: Vec<f32> = v
+                .chunks(4)
+                .map(|f| f32::from_le_bytes(f.try_into().unwrap()))
+                .collect();
+            
+            (k.to_vec(), arr)
         })
     }
 }

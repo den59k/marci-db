@@ -230,6 +230,28 @@ impl MarciDB {
       }).collect()
   }
 
+  pub fn get_by_ids<U, F>(
+      &self,
+      ids: &[Vec<u8>],
+      model: &Entity,
+      select: &MarciSelect,
+      f: F
+  ) -> Vec<U>
+  where
+    F: Fn(DecodeCtx<'_, U>) -> U,
+  {
+      let rx = self.db.begin_read().unwrap();
+      let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+
+      let mut tctx = TransationContext::new(&rx, f);
+      let mut ctx = ProcessDataContext::new(select);
+
+      ids.iter().map(|id| {
+        let value = tree.get(id).unwrap().unwrap();
+        process_data(&id, &value, model, &mut tctx, &mut ctx, None)
+      }).collect()
+  }
+
   pub fn get_all_filter<U, F>(
       &self,
       model: &Entity,

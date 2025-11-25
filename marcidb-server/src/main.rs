@@ -6,15 +6,16 @@ use std::time::Instant;
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
+use hyper::header::CONTENT_TYPE;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{Attribute, FieldType, MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select};
+use marcidb::{Attribute, Entity, FieldType, MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-use marci_vector::WriteCluster;
+use marci_vector::{ReadCluster, WriteCluster};
 mod marci_vector_utils;
 
 pub struct ServerContext {
@@ -83,27 +84,43 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
         }
 
         (&Method::POST, "findMany") => {
-            let now = Instant::now();
             let Ok(whole_body) = req.collect().await else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to get body"));
             };
             
             // Преобразуем в &str или &[u8] и парсим JSON
-            let Ok(select): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
+            let Ok(body_json): Result<Value, _> = serde_json::from_slice(&whole_body.to_bytes()) else {
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let select = match parse_select(&model.fields, &select, &ctx.db.schema, None) {
+            let select = match parse_select(&model.fields, &body_json, &ctx.db.schema, None) {
                 Ok(result) => result,
-                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to parse select: {:?}", err))) 
             };
 
-            let data = ctx.db.get_all(model, &select, |ctx | {
-                return decode_document(ctx).unwrap();
-            });
+            let now = Instant::now();
+            
+            let ids = match parse_where(&ctx, model, &body_json) {
+                Ok(result) => result,
+                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to parse where: {:?}", err))) 
+            };
+
+            if let Some(ids) = &ids {
+                println!("Get {} ids. Elapsed: {:?}", ids.len(), now.elapsed());
+            }
+            
+            let data = match ids {
+                Some(ids) => ctx.db.get_by_ids(&ids, model, &select, |ctx | {
+                    return decode_document(ctx).unwrap();
+                }),
+                None => ctx.db.get_all(model, &select, |ctx | {
+                    return decode_document(ctx).unwrap();
+                })
+            };
 
             let body = Bytes::from(array_to_json(&data));
-            let resp = Response::new(Full::new(body));
+            let mut resp = Response::new(Full::new(body));
+            resp.headers_mut().insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
             println!("Query time: {:?}", now.elapsed());
 
@@ -188,7 +205,10 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                     let Some(data) = get_value_from_data(field, ctx.id, ctx.data, el_size * arr_size) else {
                         return None;
                     };
-                    let floats = data.to_vec();
+                    let floats = vec![
+                        f32::from_be_bytes(data[0..4].try_into().unwrap()),
+                        f32::from_be_bytes(data[4..8].try_into().unwrap()),
+                    ];
 
                     return Some((ctx.id.to_vec(), floats));
                 });
@@ -199,10 +219,10 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
 
                 {
                     let index_name = [&field.full_name, ".vectorindex"].concat();
-                    let mut tree = tx.get_or_create_tree(&index_name.as_bytes()).unwrap();
+                    let mut tree = tx.get_or_create_tree(index_name.as_bytes()).unwrap();
                     tree.clear().unwrap();
     
-                    ctx.create_cluster_from_bytes(&mut tree, &coordinates);
+                    ctx.create_cluster(&mut tree, &coordinates);
                 }
 
                 tx.commit().unwrap();
@@ -223,6 +243,65 @@ fn error(code: StatusCode, msg: &str) -> Response<Full<Bytes>> {
     let mut res = Response::new(Full::new(Bytes::from(msg.to_string())));
     *res.status_mut() = code;
     res
+}
+
+#[derive(Debug)]
+enum ParseWhereError {
+    TypeMismatch { field: String, expected: String },
+}
+
+fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result<Option<Vec<Vec<u8>>>,ParseWhereError> {
+    let Some(where_obj) = body_json.get("$where") else {
+        return Ok(None)
+    };
+                
+    for field in model.fields.iter() {
+        let Some(where_field) = where_obj.get(&field.name) else { continue; };
+        if field.attributes.iter().any(|f| matches!(f, Attribute::VectorIndex)) {
+            let (primitive_type, &size) = match &field.ty {
+                FieldType::PrimitiveFixedList(primitive_type, size) => (primitive_type, size),
+                _ => panic!("Wrong field type {}. Expected fixed list", field.full_name)
+            };
+
+            let point = where_field
+                .as_object()
+                .and_then(|obj| obj.get("$close"))
+                .and_then(|close| close.as_array())
+                .filter(|arr | arr.len() == size)
+                .and_then(|arr| {
+                    let mut points = Vec::with_capacity(arr.len());
+                    for i in arr.iter() {
+                        let Some(f) = i.as_f64() else { return None };
+                        points.push(f as f32);
+                    }
+                    Some(points)
+                })
+                .ok_or_else(|| ParseWhereError::TypeMismatch {
+                    field: field.full_name.clone(),
+                    expected: format!("{{ $close: f32[{size}] }}"),
+                })?;
+            
+            let take = where_field
+                .get("$take")
+                .map(|f|f.as_u64())
+                .unwrap_or(Some(10))
+                .ok_or_else(|| ParseWhereError::TypeMismatch {
+                    field: field.full_name.clone(),
+                    expected: format!("{{ $take: number }}"),
+                })?;
+
+            let rx = ctx.db.db.begin_read().unwrap();
+            {   
+                let index_name = [&field.full_name, ".vectorindex"].concat();
+                let tree = rx.get_tree(index_name.as_bytes()).unwrap().unwrap();
+                let ids = ctx.find_nearest_points(&tree, &point, take as usize);
+
+                return Ok(Some(ids.into_iter().map(|i|i.0).collect()))
+            }
+        }
+    }
+
+    return Ok(None);
 }
 
 

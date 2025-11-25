@@ -65,6 +65,8 @@ where
     let item_path_len = path.len() + 1;
     let mut heap_clusters: BinaryHeap<HeapElem> = BinaryHeap::new();
 
+    println!("Finding in cluster {:?}", path);
+
     for (id, point_data) in reader.read_data(ctx, prefix) {
         let is_cluster = id[2 + item_path_len * 2] == 0x00;
 
@@ -79,7 +81,7 @@ where
             }).sum();
 
         if is_cluster {
-            if heap.len() == k && dist2 >= heap.peek().unwrap().dist2 * 2f32 {
+            if heap.len() == k && dist2 >= heap.peek().unwrap().dist2 * 3f32 {
                 continue; // эта точка хуже, чем худшая в куче — пропускаем
             }
             heap_clusters.push(HeapElem { dist2, id });
@@ -87,7 +89,7 @@ where
         }
 
         let item_id = id[2 + item_path_len*2 + 1 ..].to_vec();
-        println!("{} {}", u32::from_be_bytes(item_id.as_slice().try_into().unwrap()), dist2);
+        // println!("{} {}", u32::from_be_bytes(item_id.as_slice().try_into().unwrap()), dist2);
 
         if heap.len() == k && dist2 >= heap.peek().unwrap().dist2 {
             continue; // эта точка хуже, чем худшая в куче — пропускаем
@@ -100,11 +102,15 @@ where
     }
 
     while let Some(item) = heap_clusters.pop() {
-        if heap.len() == k && item.dist2 >= heap.peek().unwrap().dist2 * 2f32 {
+        if heap.len() == k && item.dist2 >= heap.peek().unwrap().dist2 * 3f32 {
             break;
         }
-        let item_path: &[u16] = bytemuck::cast_slice(&item.id[2..2+item_path_len*2]);
-        find_nearest_points_internal(reader, ctx, point, k, item_path, heap);
+        let path_f = u16::from_be_bytes(item.id[2+path.len()*2..2+item_path_len*2].try_into().unwrap());
+        let mut item_path = Vec::with_capacity(path.len() + 1);
+        item_path.extend_from_slice(path);
+        item_path.push(path_f);
+
+        find_nearest_points_internal(reader, ctx, point, k, &item_path, heap);
     }
 }
 

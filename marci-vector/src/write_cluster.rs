@@ -116,25 +116,6 @@ pub trait WriteCluster<'a> {
 
         self.create_cluster_internal(ctx, &[], &point_ids, &data, dim);
     }
-
-    fn create_cluster_from_bytes(&self, ctx: &mut Self::WriteContext, coordinates_buf: &[(Vec<u8>, Vec<u8>)]) {
-        
-        let n = coordinates_buf.len();
-        let dim = coordinates_buf[0].1.len();
-
-        let mut point_ids = vec![];
-
-        // Собираем данные в матрицу NxD для kentro
-        let mut data = Vec::with_capacity(dim * n);
-
-        for vec in coordinates_buf.iter() {
-            point_ids.push(vec.0.as_slice());
-            let float_slice: &[f32] = bytemuck::cast_slice(&vec.1);
-            data.extend_from_slice(float_slice);
-        }
-
-        self.create_cluster_internal(ctx,  &[], &point_ids, &data, dim);
-    }
 }
 
 
