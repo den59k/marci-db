@@ -11,36 +11,6 @@ pub enum MarciSelectError {
   MissingField(String)
 }
 
-impl MarciSelect<'_> {
-  pub fn all(fields: &'_[Field]) -> MarciSelect<'_> {
-    return MarciSelect { 
-      mask: bitvec![1; fields.len()], 
-      includes: vec![], 
-      aliases: None,
-      enum_selects: fields.iter().enumerate().filter_map(|(i, field)| {
-        let FieldType::Enum(en) = &field.ty else { return None; };
-        
-        let variants_map: HashMap<u16, MarciSelect<'_>> = en
-          .variants
-          .iter()
-          .enumerate()
-          .filter_map(|(i, v)| {
-            if v.fields.is_empty() {
-                None
-            } else {
-                Some((i as u16, MarciSelect::all(&v.fields)))
-            }
-          })
-          .collect();
-
-        if variants_map.is_empty() { return None; };
-
-        return Some((i, variants_map))
-      }).collect()
-    };
-  }
-}
-
 pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, aliases: Option<&'a Aliases>) -> Result<MarciSelect<'a>, MarciSelectError> {
 
   if json.is_boolean() {

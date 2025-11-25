@@ -10,11 +10,38 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, parse_schema, parse_select};
+use marci_vector::{ReadCluster, WriteCluster};
+use marcidb::{Attribute, FieldType, MarciDB, MarciIter, MarciSelect, Tree, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, iter_tree_by_prefix, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result<Response<Full<Bytes>>, Infallible> {
+struct ServerContext {
+    db: MarciDB
+}
+
+impl<'a> WriteCluster<'a> for ServerContext {
+    type WriteContext = Tree<'a>;
+
+    fn write_data(&self, ctx: &mut Tree<'a>, id: Vec<u8>, data: &[u8]) {
+        ctx.insert(&id, data).unwrap()
+    }
+}
+
+
+impl<'a> ReadCluster<'a> for ServerContext {
+    type ReadContext = Tree<'a>;
+    type Iter<'b> = MarciIter<'b>;
+
+    fn read_data<'b>(
+        &'b self,
+        ctx: &'b Tree<'a>,
+        prefix: &'b [u8],
+    ) -> MarciIter<'b> {
+        iter_tree_by_prefix(ctx, prefix)
+    }
+}
+
+async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) -> Result<Response<Full<Bytes>>, Infallible> {
 
     let path = req.uri().path();
 
@@ -23,7 +50,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
     let model_name = &path[1..slash_index].to_string();
 
     let action = &path[slash_index+1..];
-    let Some((model_index, model)) = db.get_model(model_name) else {
+    let Some((model_index, model)) = ctx.db.get_model(model_name) else {
         return Ok(error(StatusCode::NOT_FOUND, &format!("Model {} not found", &path[1..slash_index])));
     };
 
@@ -44,7 +71,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             // db.insert(json_val.clone()); // пример
 
             let mut structs = vec![];
-            let (data, _) = match encode_document(&db.schema, model, &json_val, &mut structs) {
+            let (data, _) = match encode_document(&ctx.db.schema, model, &json_val, &mut structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
@@ -53,7 +80,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
             
-            if let Err(err) = db.insert_data(model, &mut id, &data, &mut structs) {
+            if let Err(err) = ctx.db.insert_data(model, &mut id, &data, &mut structs) {
                 return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err)));
             }
 
@@ -66,7 +93,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
 
             let select = MarciSelect::all(&model.fields);
 
-            let data = db.get_all(model, &select, | ctx | {
+            let data = ctx.db.get_all(model, &select, | ctx | {
                 return decode_document(ctx).unwrap();
             });
 
@@ -86,12 +113,12 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let select = match parse_select(&model.fields, &select, &db.schema, None) {
+            let select = match parse_select(&model.fields, &select, &ctx.db.schema, None) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err))) 
             };
 
-            let data = db.get_all(model, &select, |ctx | {
+            let data = ctx.db.get_all(model, &select, |ctx | {
                 return decode_document(ctx).unwrap();
             });
 
@@ -115,7 +142,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
             };
 
             let mut structs = vec![];
-            let (new_data, changed_mask) = match encode_document(&db.schema, model, &json_val, &mut structs) {
+            let (new_data, changed_mask) = match encode_document(&ctx.db.schema, model, &json_val, &mut structs) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
@@ -125,7 +152,7 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            if let Err(err) =  db.update(model, &id, &new_data, changed_mask, &structs) {
+            if let Err(err) =  ctx.db.update(model, &id, &new_data, changed_mask, &structs) {
                return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err)));
             }
 
@@ -147,11 +174,60 @@ async fn handle(req: Request<hyper::body::Incoming>, db: Arc<MarciDB>) -> Result
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to delete document: {:?}", err)))
             };
 
-            if let Err(err) = db.delete(model_index, model, &id) {
+            if let Err(err) = ctx.db.delete(model_index, model, &id) {
                 return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to delete document: {:?}", err)));
             };
 
             let body = Bytes::from(decode_id(&id, model).unwrap().to_string());
+            let resp = Response::new(Full::new(body));
+            Ok(resp)
+        }
+
+        (&Method::POST, "index") => {
+            for (field_index, field) in model.fields.iter().enumerate() {
+                if !field.attributes.iter().any(|f| matches!(f, Attribute::VectorIndex)) {
+                    continue;
+                }
+                let (primitive_type, arr_size) = match &field.ty {
+                    FieldType::PrimitiveFixedList(primitive, size) => (primitive, size),
+                    _ => { 
+                        println!("You cannot use vector only with primitive fixed list fields");
+                        continue;
+                    }
+                };
+                let Some(el_size) = primitive_type.get_size() else {
+                    println!("You cannot use vector index with no number values");
+                    continue;
+                };
+
+                let mut select = MarciSelect::new(model);
+                select.mask.set(field_index, true);
+                
+                let coordinates = ctx.db.get_all_filter(model, &select, |ctx| {
+                    let Some(data) = get_value_from_data(field, ctx.id, ctx.data, el_size * arr_size) else {
+                        return None;
+                    };
+                    let floats = data.to_vec();
+
+                    return Some((ctx.id.to_vec(), floats));
+                });
+
+                println!("Ready to process {} items", coordinates.len());
+
+                let tx = ctx.db.db.begin_write().unwrap();
+
+                {
+                    let index_name = [&field.full_name, ".vectorindex"].concat();
+                    let mut tree = tx.get_or_create_tree(&index_name.as_bytes()).unwrap();
+                    tree.clear().unwrap();
+    
+                    ctx.create_cluster_from_bytes(&mut tree, &coordinates);
+                }
+
+                tx.commit().unwrap();
+            }
+
+            let body = Bytes::from("{ \"ok\": true }");
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
@@ -179,7 +255,7 @@ async fn main() {
         println!("{:#?}", model);
     }
 
-    let db: Arc<MarciDB> = Arc::new(MarciDB::new(schema));
+    let ctx: Arc<ServerContext> = Arc::new(ServerContext{ db: MarciDB::new(schema) });
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
@@ -194,7 +270,7 @@ async fn main() {
         // `hyper::rt` IO traits.
         let io = TokioIo::new(stream);
 
-        let db = db.clone();
+        let ctx = ctx.clone();
 
         // Spawn a tokio task to serve multiple connections concurrently
         tokio::task::spawn(async move {
@@ -202,7 +278,7 @@ async fn main() {
             if let Err(err) = http1::Builder::new()
                 // `service_fn` converts our function in a `Service`
                 .serve_connection(io, service_fn(move |req| {
-                    handle(req, db.clone())
+                    handle(req, ctx.clone())
                 }))
                 .await
             {

@@ -1,6 +1,7 @@
+use bitvec::prelude::*;
 use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
-use crate::{marci_db::get_offset_from_field, schema::{Aliases, Entity, Field}};
+use crate::{marci_db::get_offset_from_field, schema::{Aliases, Entity, Field, FieldType}};
 
 pub use crate::select::process_select::{process_data, TransationContext,ProcessDataContext};
 
@@ -39,6 +40,45 @@ pub struct MarciSelect<'a> {
   pub includes: Vec<MarciSelectInclude<'a>>,
   pub enum_selects: EnumSelect<'a>,
   pub aliases: Option<&'a Aliases>
+}
+
+impl MarciSelect<'_> {
+  pub fn all(fields: &'_[Field]) -> MarciSelect<'_> {
+    return MarciSelect { 
+      mask: bitvec![1; fields.len()], 
+      includes: vec![], 
+      aliases: None,
+      enum_selects: fields.iter().enumerate().filter_map(|(i, field)| {
+        let FieldType::Enum(en) = &field.ty else { return None; };
+        
+        let variants_map: HashMap<u16, MarciSelect<'_>> = en
+          .variants
+          .iter()
+          .enumerate()
+          .filter_map(|(i, v)| {
+            if v.fields.is_empty() {
+                None
+            } else {
+                Some((i as u16, MarciSelect::all(&v.fields)))
+            }
+          })
+          .collect();
+
+        if variants_map.is_empty() { return None; };
+
+        return Some((i, variants_map))
+      }).collect()
+    };
+  }
+
+  pub fn new(model: &Entity) -> Self {
+    return MarciSelect { 
+      mask: bitvec![0; model.fields.len()], 
+      includes: vec![], 
+      enum_selects: HashMap::new(), 
+      aliases: None 
+    }
+  }
 }
 
 pub struct DecodeCtx<'a, U> {

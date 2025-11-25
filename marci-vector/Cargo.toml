@@ -2,3 +2,9 @@
 name = "marci_vector"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+bytemuck = "1.24.0"
+kentro = "0.2.1"
+kmeans = "2.0.1"
+ndarray = "0.16.1"

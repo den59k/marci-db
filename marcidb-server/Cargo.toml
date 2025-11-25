@@ -10,4 +10,5 @@ tokio = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1.17", features = ["http1", "server", "tokio"] }
 serde_json = "1.0.145"
 marcidb = { path = "../marcidb" }
+marci_vector = { path = "../marci-vector" }
 chrono = "0.4.42"
