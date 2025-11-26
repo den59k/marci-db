@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Debug};
 
 use crate::schema::schema_enum::EnumDef;
 
-pub use crate::schema::{schema_attributes::DeleteConstraint,schema_attributes::Attribute};
+pub use crate::schema::{schema_attributes::DeleteConstraint,schema_attributes::Attribute,schema_attributes::VectorIndexType};
 pub use crate::schema::{schema_parse::parse_schema};
 
 mod schema_enum;

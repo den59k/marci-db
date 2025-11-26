@@ -4,7 +4,7 @@ pub enum Attribute {
     Index,
     DerivedUnresolved (String),
     Id,
-    VectorIndex,
+    VectorIndex(VectorIndexType),
     InjectUnresolved(Vec<(String,String)>),
     OnDelete(DeleteConstraint)
 }
@@ -17,6 +17,12 @@ pub enum DeleteConstraint {
     RemoveItem
 }
 
+#[derive(Debug,Clone,PartialEq)]
+pub enum VectorIndexType {
+    Euclidean,
+    Cosine
+}
+
 pub fn parse_attribute(s: &str) -> Attribute {
     if s.starts_with("index") {
         return Attribute::Index
@@ -27,7 +33,11 @@ pub fn parse_attribute(s: &str) -> Attribute {
     }
 
     if s.starts_with("vectorindex") {
-        return Attribute::VectorIndex
+        let opt = s.strip_prefix("vectorindex(").and_then(|x| x.strip_suffix(')')).map(|f|f.to_uppercase());
+        return match opt.as_deref() {
+            Some("COSINE") => Attribute::VectorIndex(VectorIndexType::Cosine),
+            _ => Attribute::VectorIndex(VectorIndexType::Euclidean)
+        }
     }
 
     if let Some(inside) = s.strip_prefix("derived(").and_then(|x| x.strip_suffix(')')) {

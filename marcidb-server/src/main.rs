@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::fs;
+use std::{fs, vec};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,11 +11,12 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{Attribute, Entity, FieldType, MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select};
+use marcidb::{Attribute, Entity, FieldType, MarciDB, MarciSelect, VectorIndexType, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
-use marci_vector::{ReadCluster, WriteCluster};
+use marci_vector::{CustomDistance, ReadCluster, WriteCluster};
+
 mod marci_vector_utils;
 
 pub struct ServerContext {
@@ -183,10 +184,13 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
         // Only marci vector utils
         (&Method::POST, "index") => {
             for (field_index, field) in model.fields.iter().enumerate() {
-                if !field.attributes.iter().any(|f| matches!(f, Attribute::VectorIndex)) {
+                let Some(vector_index_type) = field.attributes.iter().find_map(|f| {
+                    if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
+                }) else {
                     continue;
-                }
-                let (primitive_type, arr_size) = match &field.ty {
+                };
+
+                let (primitive_type, &arr_size) = match &field.ty {
                     FieldType::PrimitiveFixedList(primitive, size) => (primitive, size),
                     _ => { 
                         println!("You cannot use vector only with primitive fixed list fields");
@@ -205,24 +209,40 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                     let Some(data) = get_value_from_data(field, ctx.id, ctx.data, el_size * arr_size) else {
                         return None;
                     };
-                    let floats = vec![
-                        f32::from_be_bytes(data[0..4].try_into().unwrap()),
-                        f32::from_be_bytes(data[4..8].try_into().unwrap()),
-                    ];
+                    let mut floats: Vec<f32> = data
+                        .chunks(4)
+                        .map(|f| f32::from_be_bytes(f.try_into().unwrap()))
+                        .collect();
 
-                    return Some((ctx.id.to_vec(), floats));
+                    if floats.len() != arr_size {
+                        println!("Warn: point size is wrong. Expected: {}, Received: {}", arr_size, floats.len());
+                    }
+
+                    if matches!(vector_index_type, VectorIndexType::Cosine) {
+                        let norm: f32 = floats.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        for f in floats.iter_mut() {
+                            *f /= norm;
+                        }
+                    }
+
+                    Some((ctx.id.to_vec(), floats))
                 });
 
-                println!("Ready to process {} items", coordinates.len());
-
+                
                 let tx = ctx.db.db.begin_write().unwrap();
-
+                
                 {
                     let index_name = [&field.full_name, ".vectorindex"].concat();
+                    println!("Ready to write {} items to tree {}", coordinates.len(), index_name);
+                    
                     let mut tree = tx.get_or_create_tree(index_name.as_bytes()).unwrap();
                     tree.clear().unwrap();
-    
-                    ctx.create_cluster(&mut tree, &coordinates);
+                    
+                    let distance = match vector_index_type {
+                        VectorIndexType::Cosine => CustomDistance::Cosine,
+                        VectorIndexType::Euclidean => CustomDistance::Euclidean
+                    };
+                    ctx.create_cluster(&mut tree, &coordinates, distance);
                 }
 
                 tx.commit().unwrap();
@@ -257,13 +277,18 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                 
     for field in model.fields.iter() {
         let Some(where_field) = where_obj.get(&field.name) else { continue; };
-        if field.attributes.iter().any(|f| matches!(f, Attribute::VectorIndex)) {
-            let (primitive_type, &size) = match &field.ty {
+
+        let vector_index_type = field.attributes.iter().find_map(|f| {
+            if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
+        });
+
+        if let Some(vector_index_type) = vector_index_type {
+            let (_primitive_type, &size) = match &field.ty {
                 FieldType::PrimitiveFixedList(primitive_type, size) => (primitive_type, size),
                 _ => panic!("Wrong field type {}. Expected fixed list", field.full_name)
             };
 
-            let point = where_field
+            let mut point = where_field
                 .as_object()
                 .and_then(|obj| obj.get("$close"))
                 .and_then(|close| close.as_array())
@@ -280,6 +305,13 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                     field: field.full_name.clone(),
                     expected: format!("{{ $close: f32[{size}] }}"),
                 })?;
+
+            if matches!(vector_index_type, VectorIndexType::Cosine) {
+                let norm: f32 = point.iter().map(|x| x * x).sum::<f32>().sqrt();
+                for f in point.iter_mut() {
+                    *f /= norm;
+                }
+            }
             
             let take = where_field
                 .get("$take")
@@ -290,11 +322,28 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                     expected: format!("{{ $take: number }}"),
                 })?;
 
+            let threshold = where_field
+                .get("$threshold")
+                .map(|f|f.as_f64())
+                .unwrap_or(Some(0f64))
+                .map(|f| f as f32)
+                .ok_or_else(|| ParseWhereError::TypeMismatch {
+                    field: field.full_name.clone(),
+                    expected: format!("{{ $threshold: number }}"),
+                })?;
+
             let rx = ctx.db.db.begin_read().unwrap();
             {   
                 let index_name = [&field.full_name, ".vectorindex"].concat();
                 let tree = rx.get_tree(index_name.as_bytes()).unwrap().unwrap();
-                let ids = ctx.find_nearest_points(&tree, &point, take as usize);
+
+                let distance = match vector_index_type {
+                    VectorIndexType::Cosine => CustomDistance::Cosine,
+                    VectorIndexType::Euclidean => CustomDistance::Euclidean
+                };
+                
+                let ids = ctx.find_nearest_points(&tree, &point, take as usize, distance, threshold);
+                println!("{:?} {:?}", vector_index_type, ids);
 
                 return Ok(Some(ids.into_iter().map(|i|i.0).collect()))
             }

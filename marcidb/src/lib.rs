@@ -11,6 +11,6 @@ pub use crate::select::{MarciSelect,get_value_from_data};
 pub use crate::marci_decoder::{decode_document, decode_id, array_to_json};
 pub use crate::marci_encoder::{encode_document, encode_id};
 pub use crate::marci_select::{parse_select};
-pub use crate::schema::{parse_schema,Entity,Field,Attribute,FieldType,FieldRef,PrimitiveFieldType};
+pub use crate::schema::{parse_schema,Entity,Field,Attribute,FieldType,FieldRef,PrimitiveFieldType,VectorIndexType};
 
 pub use canopydb::{Tree,WriteTransaction,ReadTransaction,RangeIter};

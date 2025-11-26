@@ -1,8 +1,12 @@
+#![feature(portable_simd)]
+
 mod write_cluster;
 mod read_cluster;
+mod distances;
 
 pub use write_cluster::WriteCluster;
 pub use read_cluster::ReadCluster;
+pub use distances::CustomDistance;
 
 
 #[inline(always)]
@@ -107,7 +111,7 @@ use super::*;
 
     {
       let mut storage = db.storage.lock().unwrap();
-      db.create_cluster(&mut storage, &coordinates);
+      db.create_cluster(&mut storage, &coordinates, CustomDistance::Euclidean);
       
       let clusters_count: HashSet<u16> = storage
         .iter()
@@ -120,9 +124,7 @@ use super::*;
     {
       let storage = db.storage.lock().unwrap();
       let point: Vec<f32> = vec![0.0, 0.5];
-      let points = db.find_nearest_points(&storage, &point, 3);
-
-      println!("{:?}", points);
+      let points = db.find_nearest_points(&storage, &point, 3, CustomDistance::Euclidean, 0f32);
 
       let mut point_ids: Vec<u32> = points.iter().map(|i| u32::from_be_bytes(i.0.as_slice().try_into().unwrap())).collect();
       point_ids.sort();

@@ -47,5 +47,6 @@ model Landmark {
   name          String
   description   String
   location      Float[2]      @vectorindex
+  embeddings    Float[2560]   @vectorindex(Cosine)
   tags          LandmarkTag[]
 }

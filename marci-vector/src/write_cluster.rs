@@ -1,7 +1,9 @@
-use std::collections::{HashMap};
+use std::collections::HashMap;
 
 // use kentro::KMeans;
-use kmeans::{EuclideanDistance, KMeans, KMeansConfig};
+use kmeans::{KMeans, KMeansConfig};
+
+use crate::distances::{CustomDistance};
 
 const ZERO_PATH: &[u16] = &[0];
 
@@ -10,8 +12,8 @@ pub trait WriteCluster<'a> {
 
     fn write_data(&self, ctx: &mut Self::WriteContext, cluster_id: Vec<u8>, centroid: &[f32]);
 
-    /// Разделяет точки на кластеры. Если создается только один кластер - возвращает false
-    fn create_cluster_internal(&self, ctx: &mut Self::WriteContext, path: &[u16], ids: &[&[u8]], data: &[f32], dim: usize) -> usize {
+    /// Разделяет точки на кластеры. Возвращает количество созданных кластеров
+    fn create_cluster_internal(&self, ctx: &mut Self::WriteContext, path: &[u16], ids: &[&[u8]], data: &[f32], dim: usize, distance: CustomDistance<f32>) -> usize {
         const DEFAULT_K: usize = 8;
         
         let n = data.len() / dim;
@@ -20,8 +22,8 @@ pub trait WriteCluster<'a> {
         }
 
         // K не может быть больше числа точек
-        let k = DEFAULT_K.min(n / 3);
-        if k <= 1 {
+        let k = DEFAULT_K.min(n / 4);
+        if n < DEFAULT_K * 2 {
             let path = if path.is_empty() {
                 let zero_cluster_id = build_cluster_key(ZERO_PATH);
                 // let point_data: &[u8] = bytemuck::cast_slice(&data[0..dim]);
@@ -40,11 +42,13 @@ pub trait WriteCluster<'a> {
         }
 
         // Настраиваем и запускаем KMeans
-        let kmeans: KMeans<f32, 8, EuclideanDistance> = KMeans::new(data, n, dim, EuclideanDistance);
-
-        // train возвращает разбиение на кластеры:
-        // Vec<Vec<usize>>, где каждый внутренний вектор — индексы точек
-        let result = kmeans.kmeans_lloyd(k, 100, KMeans::init_kmeanplusplus, &KMeansConfig::default());
+        let result = if dim == 2 {
+            let kmeans: KMeans<f32, 2, CustomDistance<f32>> = KMeans::new(data, n, dim, distance.clone());
+            kmeans.kmeans_lloyd(k, 100, KMeans::init_kmeanplusplus, &KMeansConfig::default())
+        } else {
+            let kmeans: KMeans<f32, 8, CustomDistance<f32>> = KMeans::new(data, n, dim, distance.clone());
+            kmeans.kmeans_lloyd(k, 100, KMeans::init_kmeanplusplus, &KMeansConfig::default())
+        };
 
         let mut points_map = HashMap::new();
         for (point_id, &cluster_id) in result.assignments.iter().enumerate() {
@@ -88,7 +92,7 @@ pub trait WriteCluster<'a> {
                 sub_data.extend_from_slice(&data[point_index*dim..point_index*dim+dim]);
             }
 
-            let created_clusters = self.create_cluster_internal(ctx, &item_cluster_id, &sub_ids, &sub_data, dim);
+            let created_clusters = self.create_cluster_internal(ctx, &item_cluster_id, &sub_ids, &sub_data, dim, distance.clone());
 
             if created_clusters > 1 {
                 self.write_data(ctx, cluster_key, centroid_center);
@@ -99,22 +103,21 @@ pub trait WriteCluster<'a> {
         return clusters_count;
     }
 
-    fn create_cluster(&self, ctx: &mut Self::WriteContext, coordinates: &[(Vec<u8>, Vec<f32>)]) {
+    fn create_cluster(&self, ctx: &mut Self::WriteContext, coordinates: &[(Vec<u8>, Vec<f32>)], distance: CustomDistance<f32>) {
         
         let n = coordinates.len();
 
-        let dim = 2;
+        let dim = coordinates[0].1.len();
 
         let mut point_ids = vec![];
 
-        // Собираем данные в матрицу NxD для kentro
         let mut data = Vec::with_capacity(dim * n);
         for vec in coordinates.iter() {
             point_ids.push(vec.0.as_slice());
             data.extend_from_slice(&vec.1);
         }
 
-        self.create_cluster_internal(ctx, &[], &point_ids, &data, dim);
+        self.create_cluster_internal(ctx, &[], &point_ids, &data, dim, distance);
     }
 }
 
@@ -182,7 +185,7 @@ mod tests {
         let points = generate_test_points();
         
         let mut written: MockData = vec![]; 
-        storage.create_cluster(&mut written, &points);
+        storage.create_cluster(&mut written, &points, CustomDistance::Euclidean);
 
         // Должно быть больше 2 записей (2 центроида + листья)
         assert!(!written.is_empty());
