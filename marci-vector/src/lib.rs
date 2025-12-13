@@ -4,6 +4,7 @@ mod write_cluster;
 mod read_cluster;
 mod distances;
 
+use kmeans::Primitive;
 pub use write_cluster::WriteCluster;
 pub use read_cluster::ReadCluster;
 pub use distances::CustomDistance;
@@ -20,6 +21,12 @@ pub fn point_to_bytes(point: &[f32]) -> &[u8] {
     bytemuck::cast_slice(point)
 }
 
+impl<T: Primitive> CustomDistance<T> {
+  pub fn from_data() {
+
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::{collections::{BTreeMap, HashSet}, sync::Mutex};
@@ -30,7 +37,7 @@ use super::*;
     storage: Mutex<BTreeMap<Vec<u8>, Vec<f32>>>
   }
 
-  impl<'a> WriteCluster<'a> for TestDB {
+  impl<'a> WriteCluster<'a, 4> for TestDB {
     type WriteContext = BTreeMap<Vec<u8>, Vec<f32>>;
 
     fn write_data(&self, ctx: &mut Self::WriteContext, id: Vec<u8>, data: &[f32]) {
@@ -84,6 +91,7 @@ use super::*;
     }
   }
     
+  // Поиск ближайших географических точек
   #[test]
   fn test_write_and_read_cluster() {
 
@@ -134,6 +142,85 @@ use super::*;
 
   }
 
-  
+   // Поиск ближайших географических точек и ближайших по смыслу
+  #[test]
+  fn test_write_and_read_cluster_with_embedding() {
+    let db = TestDB { storage: Mutex::new(BTreeMap::new()) };
+
+    let points: &[Vec<f32>] = &[
+      vec! [ 0.0, 0.0 ],     // 0
+      vec! [ 0.0, 2.0 ],     // 1
+      vec! [ 0.0, 1.0 ],     // 2
+      vec! [ 1.0, 0.0 ],     // 3
+      vec! [ -5.0, 20.0 ],   // 4
+      vec! [ -4.0, 20.0 ],   // 5
+      vec! [ -3.0, 20.0 ],   // 6
+      vec! [ 20.0, 20.0 ],   // 7
+      vec! [ 20.0, 22.0 ],   // 8
+      vec! [ 20.0, 23.0 ],   // 9
+      vec! [ -5.0, 21.0 ],   // 10
+    ];
+
+    let embeddings: &[Vec<f32>] = &[
+        // ===== Кластер A =====
+        vec![  0.50,  0.50,  0.50,  0.50,  0.00,  0.00,  0.00,  0.00 ], // 0 - центр кластера A
+        vec![  0.55,  0.45,  0.50,  0.40,  0.00,  0.00,  0.00,  0.00 ], // 1 - похож на 0
+        vec![  0.45,  0.55,  0.40,  0.50,  0.00,  0.00,  0.00,  0.00 ], // 2 - похож на 0
+        vec![  0.40,  0.50,  0.55,  0.45,  0.00,  0.00,  0.00,  0.00 ], // 3 - похож на 0
+
+        // ===== Кластер B =====
+        vec![ -0.50,  0.00, -0.50,  0.00,  0.50,  0.50,  0.00,  0.00 ], // 4 - центр кластера B
+        vec![ -0.45, -0.05, -0.55,  0.05,  0.55,  0.40,  0.00,  0.00 ], // 5 - похож на 4
+        vec![ -0.55,  0.05, -0.45, -0.05,  0.40,  0.55,  0.00,  0.00 ], // 6 - похож на 4
+
+        // ===== Разрозненные =====
+        vec![  0.00,  0.00,  0.00,  0.00,  1.00,  0.00,  0.00,  0.00 ], // 7 - почти ортогонален всем
+        vec![  0.00,  0.00,  0.00,  0.00,  0.00,  1.00,  0.00,  0.00 ], // 8
+        vec![  0.00,  0.00,  0.00,  0.00,  0.00,  0.00,  1.00,  0.00 ], // 9
+        vec![  0.00,  0.00,  0.00,  0.00,  0.00,  0.00,  0.00,  1.00 ], // 10
+    ];
+
+    let data: Vec<(Vec<u8>, Vec<f32>)> = points
+      .iter()
+      .zip(embeddings)
+      .enumerate()
+      .map(|(i, (p, e))| ((i as u32).to_be_bytes().to_vec(), {
+        let mut v = Vec::with_capacity(p.len() + e.len());
+        v.extend_from_slice(p);
+        v.extend_from_slice(e);
+        v
+      } ))
+      .collect();
+
+    let distance: CustomDistance<f32> = CustomDistance::Complex(vec![
+      (Box::new(CustomDistance::Euclidean), 0, 2, 0.2),
+      (Box::new(CustomDistance::Cosine), 2, 10, 0.3),
+    ]);
+    
+    {
+      let mut storage = db.storage.lock().unwrap();
+      db.create_cluster(&mut storage, &data, distance.clone());
+      
+      let clusters_count: HashSet<u16> = storage
+        .iter()
+        .map(|i| u16::from_be_bytes(i.0[2..4].try_into().unwrap()))
+        .collect();
+
+      assert_eq!(clusters_count.len(), 3); // Three clusters created
+    }
+
+    {
+      let storage = db.storage.lock().unwrap();
+      let point = &data[0].1;
+      let points = db.find_nearest_points(&storage, point, 3, distance.clone(), 0f32);
+
+      let mut point_ids: Vec<u32> = points.iter().map(|i| u32::from_be_bytes(i.0.as_slice().try_into().unwrap())).collect();
+      point_ids.sort();
+
+      assert_eq!(point_ids, vec![ 0, 2, 3 ]);
+    }
+
+
+  }
 
 }

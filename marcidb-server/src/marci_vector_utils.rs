@@ -30,7 +30,7 @@ pub fn iter_tree_by_prefix<'a>(tree: &'a Tree, prefix: &[u8]) -> MarciIter<'a> {
 }
 
 
-impl<'a> WriteCluster<'a> for ServerContext {
+impl<'a> WriteCluster<'a, 8> for ServerContext {
     type WriteContext = Tree<'a>;
 
     fn write_data(&self, ctx: &mut Tree<'a>, id: Vec<u8>, point: &[f32]) {

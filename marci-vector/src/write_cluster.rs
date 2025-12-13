@@ -7,22 +7,20 @@ use crate::distances::{CustomDistance};
 
 const ZERO_PATH: &[u16] = &[0];
 
-pub trait WriteCluster<'a> {
+pub trait WriteCluster<'a, const DEFAULT_K: usize> {
     type WriteContext: 'a;
 
     fn write_data(&self, ctx: &mut Self::WriteContext, cluster_id: Vec<u8>, centroid: &[f32]);
 
     /// Разделяет точки на кластеры. Возвращает количество созданных кластеров
     fn create_cluster_internal(&self, ctx: &mut Self::WriteContext, path: &[u16], ids: &[&[u8]], data: &[f32], dim: usize, distance: CustomDistance<f32>) -> usize {
-        const DEFAULT_K: usize = 8;
-        
         let n = data.len() / dim;
         if n == 0 {
             return 0;
         }
 
         // K не может быть больше числа точек
-        let k = DEFAULT_K.min(n / 4);
+        let k = DEFAULT_K.min(n / 3);
         if n < DEFAULT_K * 2 {
             let path = if path.is_empty() {
                 let zero_cluster_id = build_cluster_key(ZERO_PATH);
@@ -154,7 +152,7 @@ mod tests {
 
     type MockData = Vec<(Vec<u8>,Vec<f32>)>;
 
-    impl WriteCluster<'_> for MockStorage {
+    impl WriteCluster<'_, 4> for MockStorage {
         type WriteContext = MockData;
         fn write_data(&self, ctx: &mut MockData, key: Vec<u8>, centroid_data: &[f32]) {
             ctx.push((key.to_vec(), centroid_data.to_vec()));
