@@ -24,8 +24,8 @@ const insert = async (model: Model, obj: any) => {
 
 const insertData = async () => {
 
-  await insert("User", { name: "Alice" })
-  await insert("User", { name: "Bob" })
+  await insert("User", { name: "Alice", email: "alice@mail.ru" })
+  await insert("User", { name: "Bob", email: "bob@mail.ru" })
 
   await insert("File", { name: "cat.jpg" })
   await insert("File", { name: "cats.jpg" })

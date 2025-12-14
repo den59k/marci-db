@@ -165,7 +165,7 @@ fn write_fields<'a>(
                     let id = encode_id(ref_model, obj, false)?;
                     ids.push(id);
                 }
-                structs.push(InsertStruct::Connect { field, ref_model: *model_index, ids });
+                structs.push(InsertStruct::Connect { field, model: ref_model, ids });
             }
             FieldType::Struct(st) => {
                 let (data, changed_values) = encode_document(schema, st, value, structs)?;
@@ -402,6 +402,23 @@ fn encode_list_static(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive
         encode_value(buf, field, primitive_type,  arr_item)?;
     }
     return Ok(());
+}
+
+pub fn encode_index_prefix(field: &Field, value: &Value) -> Result<Vec<u8>, EncodeError> {
+    let mut out_vec = Vec::new();
+
+    match field.ty {
+        FieldType::Primitive(ty) => {
+            encode_value(&mut out_vec, field, &ty, value)?;
+        }
+        _ => panic!("Non primitive type indexes are not supported")
+    }
+
+    if field.get_size().is_none() {
+        out_vec.push(0);
+    }
+
+    return Ok(out_vec);
 }
 
 #[cfg(test)]

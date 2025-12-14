@@ -11,7 +11,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{Attribute, Entity, FieldType, MarciDB, MarciSelect, VectorIndexType, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select};
+use marcidb::{Attribute, Entity, FieldType, MarciDB, MarciSelect, VectorIndexType, array_to_json, decode_document, decode_id, encode_document, encode_id, encode_index_prefix, get_value_from_data, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -206,7 +206,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                 select.mask.set(field_index, true);
                 
                 let coordinates = ctx.db.get_all_filter(model, &select, |ctx| {
-                    let Some(data) = get_value_from_data(field, ctx.id, ctx.data, el_size * arr_size) else {
+                    let Some(data) = get_value_from_data(field, ctx.id, ctx.data, Some(el_size * arr_size)) else {
                         return None;
                     };
                     let mut floats: Vec<f32> = data
@@ -267,9 +267,10 @@ fn error(code: StatusCode, msg: &str) -> Response<Full<Bytes>> {
 
 #[derive(Debug)]
 enum ParseWhereError {
-    TypeMismatch { field: String, expected: String },
+    TypeMismatch { _field: String, _expected: String },
 }
 
+// Метод возвращает ID элементов, если можно сделать выборку по индексу
 fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result<Option<Vec<Vec<u8>>>,ParseWhereError> {
     let Some(where_obj) = body_json.get("$where") else {
         return Ok(None)
@@ -277,6 +278,19 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                 
     for field in model.fields.iter() {
         let Some(where_field) = where_obj.get(&field.name) else { continue; };
+
+        if let Some(index) = field.get_field_index() {
+            let rx = ctx.db.db.begin_read().unwrap();
+            let tree = rx.get_tree(index.tree_name()).unwrap().unwrap();
+            
+            let val = encode_index_prefix(field, where_field).unwrap();
+            let mut ids = tree.prefix_keys(&val).unwrap();
+            if let Some(id) = ids.next() {
+                return Ok(Some(vec![id.unwrap()[val.len()..].to_vec()]));
+            } else {
+                return Ok(Some(vec![]));
+            }
+        }
 
         let vector_index_type = field.attributes.iter().find_map(|f| {
             if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
@@ -302,8 +316,8 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                     Some(points)
                 })
                 .ok_or_else(|| ParseWhereError::TypeMismatch {
-                    field: field.full_name.clone(),
-                    expected: format!("{{ $close: f32[{size}] }}"),
+                    _field: field.full_name.clone(),
+                    _expected: format!("{{ $close: f32[{size}] }}"),
                 })?;
 
             if matches!(vector_index_type, VectorIndexType::Cosine) {
@@ -318,8 +332,8 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                 .map(|f|f.as_u64())
                 .unwrap_or(Some(10))
                 .ok_or_else(|| ParseWhereError::TypeMismatch {
-                    field: field.full_name.clone(),
-                    expected: format!("{{ $take: number }}"),
+                    _field: field.full_name.clone(),
+                    _expected: format!("{{ $take: number }}"),
                 })?;
 
             let threshold = where_field
@@ -328,8 +342,8 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                 .unwrap_or(Some(0f64))
                 .map(|f| f as f32)
                 .ok_or_else(|| ParseWhereError::TypeMismatch {
-                    field: field.full_name.clone(),
-                    expected: format!("{{ $threshold: number }}"),
+                    _field: field.full_name.clone(),
+                    _expected: format!("{{ $threshold: number }}"),
                 })?;
 
             let rx = ctx.db.db.begin_read().unwrap();

@@ -101,7 +101,7 @@ where
 {
   match include.binding {
     MarciSelectBinding::One() => {
-      let Some(item_id) = get_value_from_data(include.field, id, data, 8) else {
+      let Some(item_id) = get_value_from_data(include.field, id, data, Some(8)) else {
         return IncludeResult::None(include.field);
       };
 

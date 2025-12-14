@@ -4,6 +4,7 @@ pub enum Attribute {
     Index,
     DerivedUnresolved (String),
     Id,
+    Unique,
     VectorIndex(VectorIndexType),
     InjectUnresolved(Vec<(String,String)>),
     OnDelete(DeleteConstraint)
@@ -28,6 +29,10 @@ pub fn parse_attribute(s: &str) -> Attribute {
         return Attribute::Index
     }
 
+    if s.starts_with("unique") {
+        return Attribute::Unique
+    }
+    
     if s.starts_with("id") {
         return Attribute::Id
     }

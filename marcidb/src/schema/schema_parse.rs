@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::schema::{Aliases, Entity, Field, FieldRef, FieldType, InsertedIndex, PrimitiveFieldType, Schema, schema_attributes::{parse_attribute, split_once_end}, schema_enum::{EnumDef, parse_enum_block}};
+use crate::schema::{Aliases, Entity, Field, FieldRef, FieldType, InsertedIndex, InsertedIndexSt, PrimitiveFieldType, Schema, schema_attributes::{parse_attribute, split_once_end}, schema_enum::{EnumDef, parse_enum_block}};
 
 pub use crate::schema::{schema_attributes::DeleteConstraint,schema_attributes::Attribute};
 
@@ -49,8 +49,7 @@ pub fn update_key_fields(fields: &mut Vec<Field>) -> () {
             ty: FieldType::Primitive(PrimitiveFieldType::UInt64), 
             offset_pos: 0, 
             is_nullable: false, 
-            inserted_indexes: vec![], 
-            select_index: None, 
+            inserted_indexes: InsertedIndexSt::new(), 
             id_idx: Some(0),
             attributes: vec![Attribute::Id], 
             counter_idx: Some(0),
@@ -146,8 +145,7 @@ fn parse_field_raw(line: &str) -> Field {
         offset_pos: 0,
         attributes,
         is_nullable,
-        inserted_indexes: vec![],
-        select_index: None,
+        inserted_indexes: InsertedIndexSt::new(),
         counter_idx: None,
         id_idx: is_id.then_some(0),
         injected_fields: None
@@ -259,8 +257,7 @@ fn resolve_fields(
                         is_nullable: true, 
                         id_idx: Some(0), 
                         counter_idx: None, 
-                        inserted_indexes: vec![], 
-                        select_index: None, 
+                        inserted_indexes: InsertedIndexSt::new(), 
                         attributes: vec![Attribute::Id],
                         injected_fields: None
                     });
@@ -272,8 +269,7 @@ fn resolve_fields(
                     
                     // Связь ManyToOne / ManyToMany хранится в индексе
                     let index_name = format!("{}.{}", model_name, field.name);
-                    field.inserted_indexes.push(InsertedIndex::Direct { tree_name: index_name.clone() });
-                    field.select_index = Some(index_name)
+                    field.inserted_indexes.direct = Some(InsertedIndex { tree_name: index_name });
                 } else {
                     panic!("Unknown type {}", name)
                 }
@@ -283,10 +279,11 @@ fn resolve_fields(
     }
 }
 
-// Разрешаем аттрибуты
+// Resolve unresolved attributes
 fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize>) {
     let mut injects: HashMap<FieldRef, (FieldRef, Aliases)> = HashMap::new();
     let mut bindings: HashSet<(FieldRef,FieldRef)> = HashSet::new();
+    let mut field_indexes: HashSet<FieldRef> = HashSet::new();
 
     schema.walk(|field, field_ref| {
         for attr in field.attributes.iter() {
@@ -317,6 +314,9 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
                         field_injects.1.insert(field_name.to_string(), alias.to_string());
                     }
                 }
+                Attribute::Index => {
+                    field_indexes.insert(field_ref.clone());
+                }
                 _ => {}
             }
         }
@@ -336,14 +336,23 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
 
     // Добавляем inserted_indexes
     for (a, b) in bindings {
-        let indexes_b = rev_indexes(schema.get_field(&a));
-        let indexes_a = rev_indexes(schema.get_field(&b));
 
-        schema.get_field_mut(&a).inserted_indexes.extend(indexes_a);
-        schema.get_field_mut(&b).inserted_indexes.extend(indexes_b);
+        if let Some(index) = schema.get_field(&a).get_direct_index() {
+            schema.get_field_mut(&b).inserted_indexes.rev = Some(index.clone());
+        }
+        if let Some(index) = schema.get_field(&b).get_direct_index() {
+            schema.get_field_mut(&a).inserted_indexes.rev = Some(index.clone());
+        }
+    }
+
+    // Добавляем индексы для полей с @index
+    for a in field_indexes {
+        let field = schema.get_field_mut(&a);
+        field.inserted_indexes.field = Some(InsertedIndex { tree_name: field.full_name.clone() });
     }
 }
 
+// Собираем foreign_bindings для schema
 fn resolve_foreign_constraints(schema: &mut Schema) {
 
     let mut foreign_bindings: Vec<Vec<(FieldRef,DeleteConstraint)>> = schema.models.iter().map(|_| Vec::new()).collect();
@@ -358,7 +367,7 @@ fn resolve_foreign_constraints(schema: &mut Schema) {
 
                 // Если у текущего поля есть reverse index -> у таблицы есть поле с direct индексом, и она сама удалит элемент при зачистке индексов
                 if matches!(constraint, DeleteConstraint::RemoveItem) {
-                    if field.inserted_indexes.iter().any(|i| matches!(i, InsertedIndex::Rev { tree_name: _ })) {
+                    if field.get_rev_index().is_some() {
                         return;
                     }
                 }
@@ -429,23 +438,9 @@ fn build_model_map(schema: &Schema) -> HashMap<String, usize> {
         .collect()
 }
 
-#[inline(always)]
-fn rev_indexes(field: &Field) -> Vec<InsertedIndex> {
-    field.inserted_indexes
-        .iter()
-        .filter_map(|i| match i {
-            InsertedIndex::Direct { tree_name } =>
-                Some(InsertedIndex::Rev { tree_name: tree_name.clone() }),
-            _ => None,
-        })
-        .collect()
-}
-
-
-
 #[cfg(test)]
 mod tests {
-    use crate::schema::{FieldType, InsertedIndex, parse_schema};
+    use crate::schema::{FieldType, InsertedIndex, InsertedIndexSt, parse_schema};
 
     #[test]
     fn test_parse_schema() {
@@ -473,11 +468,14 @@ mod tests {
         
         let projects_field = &schema.models[0].fields[2];
 
-        assert_eq!(projects_field.inserted_indexes, vec![InsertedIndex::Direct { tree_name: "User.projects".to_string() } ]);
+        let mut st_indexes = InsertedIndexSt::new();
+        st_indexes.direct = Some(InsertedIndex { tree_name: "User.projects".to_string() });
+        
+        assert_eq!(projects_field.inserted_indexes, st_indexes);
 
         let users_field = &schema.models[1].fields[2];
 
-        assert_eq!(users_field.inserted_indexes.len(), 0);
+        assert!(users_field.inserted_indexes.is_empty());
 
         let FieldType::StructList(st) = &users_field.ty else {
             panic!("Field type is not StructList");
@@ -486,6 +484,9 @@ mod tests {
         // В StructList добавляется parentID первым полем
         assert_eq!(st.fields.len(), 3);
 
-        assert_eq!(st.fields[1].inserted_indexes, vec![InsertedIndex::Rev { tree_name: "User.projects".to_string() } ]);
+        let mut st_indexes = InsertedIndexSt::new();
+        st_indexes.rev = Some(InsertedIndex { tree_name: "User.projects".to_string() });
+
+        assert_eq!(st.fields[1].inserted_indexes, st_indexes);
     }
 }

@@ -57,13 +57,14 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
       FieldType::ModelRefList(model_index) => {
         let model = &schema.models[*model_index];
         let select = parse_select(&model.fields, &val, schema, None)?;
-        let tree_name = field.select_index.as_ref().expect("Index not found").as_bytes();
+        let index = field.inserted_indexes.direct.as_ref().unwrap();
+
         includes.push(MarciSelectInclude {
           field,
           model,
           select,
           select_only_id: false,
-          binding: MarciSelectBinding::Many(tree_name),
+          binding: MarciSelectBinding::Many(index.tree_name()),
           injected: parse_injected(schema, field, val)?
         });
       },

@@ -31,18 +31,55 @@ impl Entity {
     }
 }
 
+// #[derive(Debug,Clone,PartialEq)]
+// pub enum InsertedIndex {
+//     /// Вставляем индекс на основе <A.id><B.id>
+//     Direct { tree_name: String },
+//     /// Вставляем индекс на основе <B.id><A.id>
+//     Rev { tree_name: String },
+//     // Вставляем lexical ordered index <field><A.id>
+//     Field { tree_name: String }
+// }
+// impl InsertedIndex {
+//     pub fn tree_name(&self) -> &[u8] {
+//         match self {
+//             InsertedIndex::Direct { tree_name } | 
+//             InsertedIndex::Rev { tree_name } |
+//             InsertedIndex::Field { tree_name } => 
+//             tree_name.as_bytes(),
+//         }
+//     }
+// }
+
+
 #[derive(Debug,Clone,PartialEq)]
-pub enum InsertedIndex {
-    /// Вставляем индекс на основе A.id и B.id
-    Direct { tree_name: String },
-    /// Вставляем индекс на основе B.id и A.id
-    Rev { tree_name: String }
+pub struct InsertedIndex {
+    pub tree_name: String
 }
+
 impl InsertedIndex {
     pub fn tree_name(&self) -> &[u8] {
-        match self {
-            InsertedIndex::Direct { tree_name } | InsertedIndex::Rev { tree_name } => tree_name.as_bytes(),
+        return self.tree_name.as_bytes();
+    }
+}
+
+#[derive(Debug,Clone,PartialEq)]
+pub struct InsertedIndexSt {
+    pub direct: Option<InsertedIndex>,
+    pub rev: Option<InsertedIndex>,
+    pub field: Option<InsertedIndex>
+}
+
+impl InsertedIndexSt {
+    pub fn new() -> InsertedIndexSt {
+        return InsertedIndexSt {
+            direct: None,
+            rev: None,
+            field: None
         }
+    }
+    pub fn is_empty(&self) -> bool {
+        return self.direct.is_none() && self.rev.is_none() && self.field.is_none()
     }
 }
 
@@ -59,8 +96,7 @@ pub struct Field {
     /// Position in ID key (just index, not bytes)
     pub id_idx: Option<usize>,
     pub counter_idx: Option<usize>,
-    pub inserted_indexes: Vec<InsertedIndex>,
-    pub select_index: Option<String>,
+    pub inserted_indexes: InsertedIndexSt,
     pub attributes: Vec<Attribute>,
     /// Ключи, которые можно добавить через inject (используется при запросе на derived элемент в структуре)
     pub injected_fields: Option<(FieldRef,Aliases)>
@@ -72,21 +108,24 @@ impl Field {
     }
 
     pub fn get_direct_index(&self) -> Option<&InsertedIndex> {
-        return self.inserted_indexes.iter()
-            .find(|i| matches!(i, InsertedIndex::Direct { tree_name: _ }));
-    }
-    pub fn get_direct_indexes(&self) -> Vec<&InsertedIndex> {
-        return self.inserted_indexes.iter()
-            .filter(|i| matches!(i, InsertedIndex::Direct { tree_name: _ })).collect()
+        return self.inserted_indexes.direct.as_ref()
     }
 
     pub fn get_rev_index(&self) -> Option<&InsertedIndex> {
-        return self.inserted_indexes.iter()
-            .find(|i| matches!(i, InsertedIndex::Rev { tree_name: _ }));
+        return self.inserted_indexes.rev.as_ref()
     }
-    pub fn get_rev_indexes(&self) -> Vec<&InsertedIndex> {
-        return self.inserted_indexes.iter()
-            .filter(|i| matches!(i, InsertedIndex::Rev { tree_name: _ })).collect()
+    pub fn get_field_index(&self) -> Option<&InsertedIndex> {
+        return self.inserted_indexes.field.as_ref()
+    }
+
+    pub fn get_size(&self) -> Option<usize> {
+        match self.ty {
+            FieldType::Primitive(primitive_type) => primitive_type.get_size(),
+            FieldType::PrimitiveFixedList(primitive_type, size) => {
+                primitive_type.get_size().map(|i| i * size)
+            },
+            _ => None
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use bitvec::prelude::*;
 use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
-use crate::{marci_db::get_offset_from_field, schema::{Aliases, Entity, Field, FieldType}};
+use crate::{marci_db::{get_end, get_offset_from_field}, schema::{Aliases, Entity, Field, FieldType}};
 
 pub use crate::select::process_select::{process_data, TransationContext,ProcessDataContext};
 
@@ -97,10 +97,9 @@ pub enum IncludeResult<'a, U> {
   Many(&'a Field,Vec<Arc<U>>)
 }
 
-
 // TODO: Make this method without size
 #[inline(always)]
-pub fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], size: usize) -> Option<&'a[u8]> {
+pub fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], known_size: Option<usize>) -> Option<&'a[u8]> {
   if let Some(id_idx) = field.id_idx {
     return Some(get_value_from_id(id, id_idx, field))
   } else {
@@ -108,7 +107,12 @@ pub fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], siz
     if offset == 0 {
       return None;
     }
-    Some(&data[offset..offset + size])
+    
+    let end = known_size.map(|size| offset + size).unwrap_or_else(|| {
+      get_end(data, offset, u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize)
+    });
+    
+    Some(&data[offset..end])
   }
 }
 
