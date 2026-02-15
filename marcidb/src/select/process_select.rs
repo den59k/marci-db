@@ -154,7 +154,6 @@ where
     },
     MarciSelectBinding::Many(tree_name) => {
       let keys = find_by_direct(tctx.rx, tree_name, id);
-      
       if keys.is_empty() {
         return IncludeResult::Many(include.field, vec![]);
       }
@@ -259,6 +258,7 @@ where
     F: Fn(DecodeCtx<U>) -> U
 {
   let tree = tctx.get_tree(&st.name);
+  println!("get_injected_data: {} → id = {:02x?}", st.name, id);
 
   let Some(data) = tree.get(id).unwrap() else {
     panic!("Not found key {:?} in tree {}", id, st.name)

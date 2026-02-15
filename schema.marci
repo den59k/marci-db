@@ -1,4 +1,3 @@
-
 model User {
   name        String
   surname     String
@@ -10,6 +9,16 @@ model User {
 
 struct UserInfo {
   bio         String
+}
+
+model TestUser {
+  name        String
+  projects    TestProject[]     @derived(TestProject.users)
+
+
+model TestProject {
+  name        String
+  users       TestUser[]
 }
 
 model Post {

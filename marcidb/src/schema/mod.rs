@@ -267,19 +267,19 @@ impl Schema {
     pub fn walk<F: FnMut(&Field, FieldRef)>(&self, mut f: F) {
         for (model_index, model) in self.models.iter().enumerate() {
             for (field_index, field) in model.fields.iter().enumerate() {
-                
+
                 f(field, FieldRef::new(model_index, field_index));
 
                 match &field.ty {
                     FieldType::Struct(st) | FieldType::StructList(st) => {
-                        for (sub_index, _subfield) in st.fields.iter().enumerate() {
-                            f(field, FieldRef { model_index, field_index, struct_field_index: Some(sub_index), enum_variant_index: None });
+                        for (sub_index, subfield) in st.fields.iter().enumerate() {
+                            f(subfield, FieldRef { model_index, field_index, struct_field_index: Some(sub_index), enum_variant_index: None });
                         }
                     },
                     FieldType::Enum(en) => {
                         for (variant_idx, variant) in en.variants.iter().enumerate() {
-                            for (field_index, field) in variant.fields.iter().enumerate() {
-                                f(field, FieldRef { model_index, field_index, struct_field_index: None, enum_variant_index: Some((variant_idx, field_index)) })
+                            for (variant_field_index, variant_field) in variant.fields.iter().enumerate() {
+                                f(variant_field, FieldRef { model_index, field_index, struct_field_index: None, enum_variant_index: Some((variant_idx, variant_field_index)) })
                             }
                         }
                     }

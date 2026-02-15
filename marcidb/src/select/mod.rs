@@ -109,9 +109,8 @@ pub fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], kno
     }
     
     let end = known_size.map(|size| offset + size).unwrap_or_else(|| {
-      get_end(data, offset, u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize)
+      get_end(data, field.offset_pos, u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize)
     });
-    
     Some(&data[offset..end])
   }
 }
