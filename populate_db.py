@@ -218,6 +218,7 @@ def populate_users(client: MarciDBClient, count: int = 10):
             "name": first_name,
             "surname": last_name,
             "email": email,
+            "age": random.randint(18, 65),
             "info": {
                 "bio": random.choice(BIOS)
             }

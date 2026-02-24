@@ -44,13 +44,13 @@ pub struct MarciSelect<'a> {
 
 impl MarciSelect<'_> {
   pub fn all(fields: &'_[Field]) -> MarciSelect<'_> {
-    return MarciSelect { 
-      mask: bitvec![1; fields.len()], 
-      includes: vec![], 
+    return MarciSelect {
+      mask: bitvec![1; fields.len()],
+      includes: vec![],
       aliases: None,
       enum_selects: fields.iter().enumerate().filter_map(|(i, field)| {
         let FieldType::Enum(en) = &field.ty else { return None; };
-        
+
         let variants_map: HashMap<u16, MarciSelect<'_>> = en
           .variants
           .iter()
@@ -72,11 +72,11 @@ impl MarciSelect<'_> {
   }
 
   pub fn new(model: &Entity) -> Self {
-    return MarciSelect { 
-      mask: bitvec![0; model.fields.len()], 
-      includes: vec![], 
-      enum_selects: HashMap::new(), 
-      aliases: None 
+    return MarciSelect {
+      mask: bitvec![0; model.fields.len()],
+      includes: vec![],
+      enum_selects: HashMap::new(),
+      aliases: None
     }
   }
 }
@@ -107,7 +107,7 @@ pub fn get_value_from_data<'a>(field: &'a Field, id: &'a[u8], data: &'a[u8], kno
     if offset == 0 {
       return None;
     }
-    
+
     let end = known_size.map(|size| offset + size).unwrap_or_else(|| {
       get_end(data, field.offset_pos, u16::from_be_bytes(data[1..3].try_into().unwrap()) as usize)
     });

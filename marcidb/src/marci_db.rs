@@ -461,65 +461,36 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
       InsertStruct::Empty { st } => {
           println!("  Empty struct: {}", st.name);
 
+          // Удаляем все индексы для полей структуры
+          for field in st.fields.iter() {
+              if field.inserted_indexes.is_empty() {
+                  continue;
+              }
+              println!("    Removing indexes for field: {}", field.name);
+              remove_indexes(&tx, &self.schema, st, field, id);
+          }
+
+          // Удаляем сами записи структуры
           let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
           let end = increment_bytes_be(id);
-
-          // Собираем все ID существующих записей структуры
-          let existing_ids: Vec<Vec<u8>> = struct_tree
-              .range(id..&end)
-              .unwrap()
-              .map(|item| item.unwrap().0.to_vec())
-              .collect();
-
-          println!("    Found {} existing struct records", existing_ids.len());
-
-          // Удаляем индексы для каждой записи структуры
-          for struct_id in existing_ids.iter() {
-              println!("    Removing indexes for struct_id: {:?}", struct_id);
-
-              // Для каждого поля структуры, у которого есть индексы
-              for field in st.fields.iter() {
-                  if field.inserted_indexes.is_empty() {
-                      continue;
-                  }
-
-                  println!("      Processing field: {}", field.name);
-                  remove_indexes(&tx, st, field, struct_id);
-              }
-          }
           struct_tree.delete_range(id..&end).unwrap();
           println!("  Struct records deleted");
       }
       InsertStruct::Many { st, data: new_data, .. } => {
           println!("  Many struct: {}, items: {}", st.name, new_data.len());
 
-          let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          let end = increment_bytes_be(id);
-
-          // Собираем все ID существующих записей структуры
-          let existing_ids: Vec<Vec<u8>> = struct_tree
-              .range(id..&end)
-              .unwrap()
-              .map(|item| item.unwrap().0.to_vec())
-              .collect();
-
-          println!("    Found {} existing struct records to remove", existing_ids.len());
-
-          // Удаляем индексы для всех существующих записей
-          for struct_id in existing_ids.iter() {
-              println!("    Removing indexes for existing struct_id: {:?}", &struct_id[..16.min(struct_id.len())]);
-
-              for field in st.fields.iter() {
-                  if field.inserted_indexes.is_empty() {
-                      continue;
-                  }
-
-                  println!("      Processing field: {}", field.name);
-                  remove_indexes(&tx, st, field, struct_id);
+          // Удаляем все индексы для полей структуры
+          for field in st.fields.iter() {
+              if field.inserted_indexes.is_empty() {
+                  continue;
               }
+              println!("    Removing indexes for field: {}", field.name);
+              remove_indexes(&tx, &self.schema, st, field, id);
           }
 
           // Удаляем старые записи структуры
+          let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+          let end = increment_bytes_be(id);
           struct_tree.delete_range(id..&end).unwrap();
           println!("    Old struct records deleted");
 
@@ -559,7 +530,7 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
       }
       InsertStruct::Connect { field, ids, model, .. } => {
         println!("  Connect: field={}, model={}, ids count={}", field.name, model.name, ids.len());
-        remove_indexes(&tx, model, &field, id);
+        remove_indexes(&tx, &self.schema, model, &field, id);
         insert_indexes(&tx, field, id, ids);
         println!("    Indexes updated");
       },
@@ -775,7 +746,7 @@ pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<()
                     None => match field.get_direct_index() {
                         Some(direct) => {
                             println!("     Поиск по direct индексу: {}", direct.tree_name);
-                            find_by_rev(&tx, direct.tree_name.as_bytes(), id)
+                            find_by_rev(&tx, direct.tree_name.as_bytes(), id, &self.schema)
                         },
                         None => {
                             println!("     ⚠️  Индексы не найдены");
@@ -850,7 +821,7 @@ pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<()
         };
 
         println!("   - Поле '{}': удаление direct индекса '{}'", field.name, direct_index.tree_name);
-        remove_indexes(&tx, model, field, id);
+        remove_indexes(&tx, &self.schema, model, field, id);
         println!("     ✓ Индекс очищен");
     }
 
@@ -1033,7 +1004,7 @@ pub fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec
 
 #[inline(always)]
 /// **Перебирает** все ключи, и находит нужные
-pub fn find_by_rev(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Vec<u8>> {
+pub fn find_by_rev(rx: &Transaction, tree_name: &[u8], item_id: &[u8], schema: &Schema) -> Vec<Vec<u8>> {
   println!("[DEBUG] find_by_rev called");
   println!("[DEBUG] tree_name: {:?} ({})", tree_name, str::from_utf8(tree_name).unwrap_or("<invalid UTF-8>"));
   println!("[DEBUG] item_id: {:?} (len: {})", item_id, item_id.len());
@@ -1041,12 +1012,26 @@ pub fn find_by_rev(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Ve
   let index_tree = rx.get_tree(tree_name).unwrap()
     .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
 
+  // Парсим имя дерева чтобы получить имя модели
+  // Формат: "Model.field" где Model - модель с direct индексом
+  let tree_name_str = str::from_utf8(tree_name).unwrap();
+  let model_name = tree_name_str.split('.').next().unwrap();
+
+  println!("[DEBUG] Parsed model name from tree: {}", model_name);
+
+  // Находим модель по имени
+  let target_model = schema.models.iter()
+    .find(|m| m.name == model_name)
+    .unwrap_or_else(|| panic!("Model {} not found in schema", model_name));
+
+  let key_min_size = target_model.key_min_size();
+  println!("[DEBUG] Target model key_min_size: {}", key_min_size);
+
   println!("[DEBUG] Tree opened successfully");
 
   let mut arr = vec![];
   let mut total_keys = 0;
   let mut matched_keys = 0;
-  let id_len = item_id.len();
 
   for key in index_tree.keys().unwrap() {
     let key = key.unwrap();
@@ -1054,22 +1039,25 @@ pub fn find_by_rev(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec<Ve
 
     println!("[DEBUG] Key #{}: {:?} (len: {})", total_keys, key, key.len());
 
-    // Проверяем, что ключ достаточно длинный для сравнения
-    if key.len() >= id_len {
-      let prefix_len = key.len() - id_len;
-      println!("[DEBUG]   - Prefix (first {} bytes): {:?}", prefix_len, &key[..prefix_len]);
-      println!("[DEBUG]   - Suffix (last {} bytes): {:?}", id_len, &key[prefix_len..]);
+    // Проверяем, что ключ достаточно длинный
+    if key.len() < key_min_size + item_id.len() {
+      println!("[DEBUG]   - WARNING: Key too short, skipping");
+      continue;
+    }
 
-      // Проверяем, что суффикс совпадает с нашим item_id
-      if &key[prefix_len..] == item_id {
-        matched_keys += 1;
-        println!("[DEBUG]   - MATCH FOUND! Adding prefix to result");
-        arr.push(key[..prefix_len].to_vec());
-      } else {
-        println!("[DEBUG]   - No match");
-      }
+    let prefix = &key[..key_min_size];
+    let suffix = &key[key_min_size..];
+
+    println!("[DEBUG]   - Prefix ({} bytes): {:?}", key_min_size, prefix);
+    println!("[DEBUG]   - Suffix (from byte {} onwards): {:?}", key_min_size, suffix);
+
+    // Проверяем, что суффикс НАЧИНАЕТСЯ с item_id
+    if suffix.starts_with(item_id) {
+      matched_keys += 1;
+      println!("[DEBUG]   - MATCH FOUND! Adding prefix to result");
+      arr.push(prefix.to_vec());
     } else {
-      println!("[DEBUG]   - WARNING: Key too short (< {} bytes), skipping", id_len);
+      println!("[DEBUG]   - No match");
     }
   }
 
@@ -1348,7 +1336,7 @@ pub fn remove_indexes_by_keys(tx: &WriteTransaction, id: &[u8], rev_index: &Inse
 }
 
 #[inline(always)]
-pub fn remove_indexes(tx: &WriteTransaction, model: &Entity, field: &Field, id: &[u8]) {
+pub fn remove_indexes(tx: &WriteTransaction, schema: &Schema, model: &Entity, field: &Field, id: &[u8]) {
   if field.inserted_indexes.is_empty() {
     return;
   }
@@ -1395,7 +1383,7 @@ pub fn remove_indexes(tx: &WriteTransaction, model: &Entity, field: &Field, id: 
   if let Some(rev_index) = field.get_rev_index() {
     // Находим все ключи, которые ссылаются на наш id
     // find_by_rev возвращает префиксы (referenced_id части)
-    let keys = find_by_rev(tx, rev_index.tree_name(), id);
+    let keys = find_by_rev(tx, rev_index.tree_name(), id, schema);
 
     if !keys.is_empty() {
       // Удаляем найденные записи из rev индекса
