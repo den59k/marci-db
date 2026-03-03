@@ -11,7 +11,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{Attribute, Entity, FieldType, MarciDB, MarciSelect, VectorIndexType, array_to_json, decode_document, decode_id, encode_document, encode_id, encode_index_prefix, get_value_from_data, parse_schema, parse_select, PrimitiveFieldType};
+use marcidb::{Attribute, Field, Entity, FieldType, MarciDB, MarciSelect, VectorIndexType, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select, PrimitiveFieldType, find_by_direct, find_by_rev};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use marci_vector::{CustomDistance, ReadCluster, WriteCluster};
@@ -19,6 +19,8 @@ use marci_vector::{CustomDistance, ReadCluster, WriteCluster};
 mod marci_vector_utils;
 
 use std::collections::HashSet;
+use std::collections::HashMap;
+use std::ops::Bound;
 
 pub struct ServerContext {
     db: MarciDB
@@ -102,7 +104,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
 
             let now = Instant::now();
 
-            let ids = match parse_where(&ctx, model, &body_json) {
+            let ids = match parse_where(&ctx, model, &body_json, None) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to parse where: {:?}", err)))
             };
@@ -267,57 +269,577 @@ fn error(code: StatusCode, msg: &str) -> Response<Full<Bytes>> {
 }
 
 #[derive(Debug)]
-enum ParseWhereError {
-    TypeMismatch { _field: String, _expected: String },
+enum ConditionValue {
+    Null,
+    Bool(bool),
+    Int64(i64),
+    UInt64(u64),
+    Float(f32),
+    Double(f64),
+    String(String),
+    DateTime(i64),
 }
 
-// Метод возвращает ID элементов, если можно сделать выборку по индексу
-fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result<Option<Vec<Vec<u8>>>,ParseWhereError> {
-    let Some(where_obj) = body_json.get("$where") else {
-        return Ok(None)
-    };
+#[derive(Debug)]
+enum Operator {
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+}
 
-    if let Some(and_array) = where_obj.get("$and").and_then(|v| v.as_array()) {
-        return eval_and(ctx, model, and_array);
+#[derive(Debug)]
+enum ParseWhereError {
+    TypeMismatch { _field: String, _expected: String },
+    InvalidData,
+}
+
+fn type_mismatch(field: &Field, expected: impl Into<String>) -> ParseWhereError {
+    ParseWhereError::TypeMismatch {
+        _field: field.name.clone(),
+        _expected: expected.into(),
     }
-    if let Some(or_array) = where_obj.get("$or").and_then(|v| v.as_array()) {
-        return eval_or(ctx, model, or_array);
+}
+
+fn decode_field_value(field: &Field, bytes: &[u8]) -> Result<ConditionValue, ParseWhereError> {
+    match &field.ty {
+        FieldType::Primitive(prim) => decode_primitive(&field.name, prim, bytes),
+        FieldType::ModelRef(_) => {
+            if bytes.len() != 8 {
+                return Err(ParseWhereError::TypeMismatch {
+                    _field: field.full_name.clone(),
+                    _expected: "8 bytes".into(),
+                });
+            }
+            let arr: [u8; 8] = bytes.try_into().unwrap();
+            Ok(ConditionValue::UInt64(u64::from_be_bytes(arr)))
+        }
+        _ => Err(ParseWhereError::TypeMismatch {
+            _field: field.full_name.clone(),
+            _expected: "primitive or reference".into(),
+        }),
     }
+}
 
-    for field in model.fields.iter() {
-        let Some(where_field) = where_obj.get(&field.name) else { continue; };
+fn decode_primitive(_field_name: &str, prim: &PrimitiveFieldType, bytes: &[u8]) -> Result<ConditionValue, ParseWhereError> {
+    match prim {
+        PrimitiveFieldType::Bool => Ok(ConditionValue::Bool(bytes.first().map_or(false, |&b| b != 0))),
+        PrimitiveFieldType::Int64 => {
+            let arr: [u8; 8] = bytes.try_into().map_err(|_| ParseWhereError::InvalidData)?;
+            Ok(ConditionValue::Int64(i64::from_be_bytes(arr)))
+        }
+        PrimitiveFieldType::UInt64 => {
+            let arr: [u8; 8] = bytes.try_into().map_err(|_| ParseWhereError::InvalidData)?;
+            Ok(ConditionValue::UInt64(u64::from_be_bytes(arr)))
+        }
+        PrimitiveFieldType::Float => {
+            let arr: [u8; 4] = bytes.try_into().map_err(|_| ParseWhereError::InvalidData)?;
+            Ok(ConditionValue::Float(f32::from_be_bytes(arr)))
+        }
+        PrimitiveFieldType::Double => {
+            let arr: [u8; 8] = bytes.try_into().map_err(|_| ParseWhereError::InvalidData)?;
+            Ok(ConditionValue::Double(f64::from_be_bytes(arr)))
+        }
+        PrimitiveFieldType::String => {
+            let s = String::from_utf8(bytes.to_vec()).map_err(|_| ParseWhereError::InvalidData)?;
+            Ok(ConditionValue::String(s))
+        }
+        PrimitiveFieldType::DateTime => {
+            let arr: [u8; 8] = bytes.try_into().map_err(|_| ParseWhereError::InvalidData)?;
+            Ok(ConditionValue::DateTime(i64::from_be_bytes(arr)))
+        }
+    }
+}
 
-        if let Some(index) = field.get_field_index() {
-            let rx = ctx.db.db.begin_read().unwrap();
-            let tree = rx.get_tree(index.tree_name()).unwrap().unwrap();
+fn check_condition(value: &ConditionValue, op: &Operator, target: &ConditionValue) -> bool {
+    match (value, target) {
+        (ConditionValue::Null, ConditionValue::Null) => matches!(op, Operator::Eq),
+        (ConditionValue::Null, _) => matches!(op, Operator::Ne),
+        (_, ConditionValue::Null) => matches!(op, Operator::Ne),
+        (ConditionValue::Bool(a), ConditionValue::Bool(b)) => cmp_op(a, b, op),
+        (ConditionValue::Int64(a), ConditionValue::Int64(b)) => cmp_op(a, b, op),
+        (ConditionValue::UInt64(a), ConditionValue::UInt64(b)) => cmp_op(a, b, op),
+        (ConditionValue::Float(a), ConditionValue::Float(b)) => cmp_op(a, b, op),
+        (ConditionValue::Double(a), ConditionValue::Double(b)) => cmp_op(a, b, op),
+        (ConditionValue::String(a), ConditionValue::String(b)) => cmp_op(a, b, op),
+        (ConditionValue::DateTime(a), ConditionValue::DateTime(b)) => cmp_op(a, b, op),
+        _ => false,
+    }
+}
 
-            let val = encode_index_prefix(field, where_field).unwrap();
-            let mut ids = tree.prefix_keys(&val).unwrap();
-            if let Some(id) = ids.next() {
-                return Ok(Some(vec![id.unwrap()[val.len()..].to_vec()]));
+fn cmp_op<T: PartialOrd + PartialEq>(a: T, b: T, op: &Operator) -> bool {
+    match op {
+        Operator::Eq => a == b,
+        Operator::Ne => a != b,
+        Operator::Gt => a > b,
+        Operator::Lt => a < b,
+        Operator::Ge => a >= b,
+        Operator::Le => a <= b,
+    }
+}
+
+fn parse_condition_value(field: &Field, val: &Value) -> Result<ConditionValue, ParseWhereError> {
+    match &field.ty {
+        FieldType::Primitive(prim) => match prim {
+            PrimitiveFieldType::String => Ok(ConditionValue::String(
+                val.as_str().ok_or_else(|| type_mismatch(field, "string"))?.to_string(),
+            )),
+            PrimitiveFieldType::Int64 => Ok(ConditionValue::Int64(
+                val.as_i64().ok_or_else(|| type_mismatch(field, "i64"))?,
+            )),
+            PrimitiveFieldType::UInt64 => Ok(ConditionValue::UInt64(
+                val.as_u64().ok_or_else(|| type_mismatch(field, "u64"))?,
+            )),
+            PrimitiveFieldType::Float => Ok(ConditionValue::Float(
+                val.as_f64().ok_or_else(|| type_mismatch(field, "float"))? as f32,
+            )),
+            PrimitiveFieldType::Double => Ok(ConditionValue::Double(
+                val.as_f64().ok_or_else(|| type_mismatch(field, "double"))?,
+            )),
+            PrimitiveFieldType::Bool => Ok(ConditionValue::Bool(
+                val.as_bool().ok_or_else(|| type_mismatch(field, "bool"))?,
+            )),
+            PrimitiveFieldType::DateTime => {
+                let epoch = if let Some(n) = val.as_i64() {
+                    n
+                } else if let Some(s) = val.as_str() {
+                    s.parse::<chrono::DateTime<chrono::Utc>>()
+                        .map_err(|_| type_mismatch(field, "ISO-8601 string"))?
+                        .timestamp_millis()
+                } else {
+                    return Err(type_mismatch(field, "i64 or ISO-8601 string"));
+                };
+                Ok(ConditionValue::DateTime(epoch))
+            }
+        },
+        FieldType::ModelRef(_) => {
+            let id = if let Some(num) = val.as_u64() {
+                num
+            } else if let Some(obj) = val.as_object() {
+                obj.get("id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| type_mismatch(field, "{ id: u64 }"))?
             } else {
-                return Ok(Some(vec![]));
+                return Err(type_mismatch(field, "u64 or object with id"));
+            };
+            Ok(ConditionValue::UInt64(id))
+        }
+        _ => Err(type_mismatch(field, "primitive or reference")),
+    }
+}
+
+fn encode_condition_value(field: &Field, val: &ConditionValue) -> Result<Vec<u8>, ParseWhereError> {
+    let mut out = Vec::new();
+    match (&field.ty, val) {
+        (FieldType::Primitive(PrimitiveFieldType::String), ConditionValue::String(s)) => {
+            out.extend_from_slice(s.as_bytes())
+        }
+        (FieldType::Primitive(PrimitiveFieldType::Int64), ConditionValue::Int64(n)) => {
+            out.extend_from_slice(&n.to_be_bytes())
+        }
+        (FieldType::Primitive(PrimitiveFieldType::UInt64), ConditionValue::UInt64(n)) => {
+            out.extend_from_slice(&n.to_be_bytes())
+        }
+        (FieldType::Primitive(PrimitiveFieldType::Float), ConditionValue::Float(n)) => {
+            out.extend_from_slice(&n.to_be_bytes())
+        }
+        (FieldType::Primitive(PrimitiveFieldType::Double), ConditionValue::Double(n)) => {
+            out.extend_from_slice(&n.to_be_bytes())
+        }
+        (FieldType::Primitive(PrimitiveFieldType::Bool), ConditionValue::Bool(b)) => {
+            out.push(if *b { 1 } else { 0 })
+        }
+        (FieldType::Primitive(PrimitiveFieldType::DateTime), ConditionValue::DateTime(ts)) => {
+            out.extend_from_slice(&ts.to_be_bytes())
+        }
+        (FieldType::ModelRef(_), ConditionValue::UInt64(id)) => {
+            out.extend_from_slice(&id.to_be_bytes())
+        }
+        _ => {
+            return Err(ParseWhereError::TypeMismatch {
+                _field: field.name.clone(),
+                _expected: "matching type".into(),
+            })
+        }
+    }
+    if field.get_size().is_none() && !matches!(field.ty, FieldType::ModelRef(_) | FieldType::ModelRefList(_)) {
+        out.push(0);
+    }
+    Ok(out)
+}
+
+// Добавить после определения ConditionValue, Operator и вспомогательных функций
+
+/// Разбирает условие для одного поля: объект с операторами или простое значение ($eq)
+fn parse_conditions(field: &Field, where_field: &Value) -> Result<Vec<(Operator, ConditionValue)>, ParseWhereError> {
+    let mut ops = Vec::new();
+    if let Some(obj) = where_field.as_object() {
+        if let Some(val) = obj.get("$eq") {
+            ops.push((Operator::Eq, parse_condition_value(field, val)?));
+        }
+        if let Some(val) = obj.get("$ne") {
+            ops.push((Operator::Ne, parse_condition_value(field, val)?));
+        }
+        if let Some(val) = obj.get("$gt") {
+            ops.push((Operator::Gt, parse_condition_value(field, val)?));
+        }
+        if let Some(val) = obj.get("$lt") {
+            ops.push((Operator::Lt, parse_condition_value(field, val)?));
+        }
+        if let Some(val) = obj.get("$ge") {
+            ops.push((Operator::Ge, parse_condition_value(field, val)?));
+        }
+        if let Some(val) = obj.get("$le") {
+            ops.push((Operator::Le, parse_condition_value(field, val)?));
+        }
+        // Если объект содержит другие ключи (например, $close для векторов) – они обрабатываются отдельно
+    } else {
+        // Простое значение -> неявный $eq
+        ops.push((Operator::Eq, parse_condition_value(field, where_field)?));
+    }
+    Ok(ops)
+}
+
+/// Возвращает ID записей, удовлетворяющих заданным операторам для поля.
+/// Использует field index, прямой доступ по ID (если поле — единственный ключ) или полное сканирование.
+fn get_ids_for_condition(
+    ctx: &ServerContext,
+    model: &Entity,
+    field: &Field,
+    ops: Vec<(Operator, ConditionValue)>,
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Vec<Vec<u8>>, ParseWhereError> {
+    println!("[get_ids_for_condition] >>> Entering for model '{}', field '{}'", model.name, field.name);
+    println!("[get_ids_for_condition] ops: {:?}", ops);
+
+    if let Some(index) = field.get_field_index() {
+        // Попытаемся использовать индекс для диапазона значений
+        let mut lower_bound: Option<Vec<u8>> = None;
+        let mut upper_bound: Option<Vec<u8>> = None;
+        let mut has_range_op = false;
+
+        for (op, val) in &ops {
+            match op {
+                Operator::Eq | Operator::Gt | Operator::Ge | Operator::Lt | Operator::Le => {
+                    has_range_op = true;
+                    let encoded = encode_condition_value(field, val)?;
+                    match op {
+                        Operator::Eq => {
+                            lower_bound = Some(encoded.clone());
+                            upper_bound = Some(encoded);
+                        }
+                        Operator::Gt | Operator::Ge => {
+                            if let Some(lb) = &lower_bound {
+                                if encoded > *lb {
+                                    lower_bound = Some(encoded);
+                                }
+                            } else {
+                                lower_bound = Some(encoded);
+                            }
+                        }
+                        Operator::Lt | Operator::Le => {
+                            if let Some(ub) = &upper_bound {
+                                if encoded < *ub {
+                                    upper_bound = Some(encoded);
+                                }
+                            } else {
+                                upper_bound = Some(encoded);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Operator::Ne => {} // не помогает строить диапазон
             }
         }
 
-        let vector_index_type = field.attributes.iter().find_map(|f| {
-            if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
-        });
+        // Если нет ни одного оператора сравнения (только Ne) – индекс не поможет, идём на полное сканирование
+        if !has_range_op {
+            return get_ids_by_scanning(ctx, model, field, &ops, existing_ids);
+        }
 
-        if let Some(vector_index_type) = vector_index_type {
+        // Проверяем, что границы не противоречат
+        if let (Some(lb), Some(ub)) = (&lower_bound, &upper_bound) {
+            if lb > ub {
+                return Ok(vec![]); // пустой результат
+            }
+        }
+
+        // Строим диапазон ключей для итерации
+        let rx = ctx.db.db.begin_read().unwrap();
+        let tree = rx.get_tree(index.tree_name()).unwrap().unwrap();
+
+        let range = match (lower_bound, upper_bound) {
+            (Some(lb), Some(ub)) => {
+                let start = [lb.as_slice(), &[0u8; 8]].concat();
+                let end = [ub.as_slice(), &[255u8; 8]].concat();
+                (Bound::Included(start), Bound::Included(end))
+            }
+            (Some(lb), None) => {
+                let start = [lb.as_slice(), &[0u8; 8]].concat();
+                (Bound::Included(start), Bound::Unbounded)
+            }
+            (None, Some(ub)) => {
+                let end = [ub.as_slice(), &[255u8; 8]].concat();
+                (Bound::Unbounded, Bound::Included(end))
+            }
+            (None, None) => unreachable!(), // has_range_op гарантирует хотя бы одну границу
+        };
+
+        let mut ids = Vec::new();
+        for item in tree.range(range).unwrap() {
+            let (key, _) = item.unwrap();
+            // Извлекаем байты значения (без последних 8 байт ID)
+            let value_bytes = &key[..key.len() - 8];
+            // Убираем завершающий нуль, если поле переменной длины
+            let value_bytes_trimmed = if field.get_size().is_none() {
+                &value_bytes[..value_bytes.len() - 1]
+            } else {
+                value_bytes
+            };
+            // Декодируем значение поля
+            let cond_val = decode_field_value(field, value_bytes_trimmed)?;
+            // Проверяем все операторы
+            let passes = ops.iter().all(|(op, target)| check_condition(&cond_val, op, target));
+            if passes {
+                let id = key[key.len() - 8..].to_vec();
+                ids.push(id);
+            }
+        }
+
+        // Применяем фильтр existing_ids, если есть
+        if let Some(existing) = existing_ids {
+            ids.retain(|id| existing.contains(id));
+        }
+
+        return Ok(ids);
+    }
+
+    if let FieldType::ModelRef(_) = field.ty {
+        if ops.len() == 1 && matches!(ops[0].0, Operator::Eq) {
+            if let Some(rev_index) = field.get_rev_index() {
+                let target = &ops[0].1;
+                let encoded = encode_condition_value(field, target)?;
+                println!("[get_ids_for_condition] Using rev index for ModelRef, field: {}, target value encoded: {:?}", field.name, encoded);
+                let rx = ctx.db.db.begin_read().unwrap();
+                let tree = rx.get_tree(rev_index.tree_name()).unwrap().unwrap();
+                let keys_iter = tree.prefix_keys(&encoded).unwrap();
+                let mut ids = Vec::new();
+                let mut count = 0;
+                for k in keys_iter {
+                    let key = k.unwrap();
+                    // rev индекс: [значение][id владельца] → извлекаем id владельца
+                    let owner_id = key[encoded.len()..encoded.len()+8].to_vec();
+                    println!("[get_ids_for_condition]   found rev key: {:?} -> owner_id: {:?}", key, owner_id);
+                    ids.push(owner_id);
+                    count += 1;
+                }
+                println!("[get_ids_for_condition] Rev index returned {} ids", count);
+                if let Some(existing) = existing_ids {
+                    let filtered: Vec<_> = ids.into_iter().filter(|id| existing.contains(id)).collect();
+                    return Ok(filtered);
+                }
+                return Ok(ids);
+            } else {
+                println!("[get_ids_for_condition] No rev index for field {}", field.name);
+            }
+        }
+    }
+
+    // Если поле — единственное ключевое и оператор равенства — проверяем существование записи по прямому ID
+    let key_fields_count = model.fields.iter().filter(|f| f.id_idx.is_some()).count();
+    if key_fields_count == 1 && field.id_idx.is_some() && ops.len() == 1 && matches!(ops[0].0, Operator::Eq) {
+        let target = &ops[0].1;
+        println!("[get_ids_for_condition] Using primary key (field is sole key field)");
+        let encoded = encode_condition_value(field, target)?;
+        println!("[get_ids_for_condition]   encoded target: {:?}", encoded);
+        let rx = ctx.db.db.begin_read().unwrap();
+        let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+        if tree.get(&encoded).unwrap().is_some() {
+            println!("[get_ids_for_condition]   record found, returning id");
+            if let Some(existing) = existing_ids {
+                let filtered: Vec<_> = vec![encoded].into_iter().filter(|id| existing.contains(id)).collect();
+                return Ok(filtered);
+            }
+            return Ok(vec![encoded]);
+        } else {
+            println!("[get_ids_for_condition]   record not found, returning empty vec");
+            return Ok(vec![]);
+        }
+    } else if key_fields_count != 1 {
+        println!("[get_ids_for_condition]   key field count = {}, not using primary key path", key_fields_count);
+    } else if field.id_idx.is_none() {
+        println!("[get_ids_for_condition]   field is not a key field, not using primary key path");
+    }
+
+    // Во всех остальных случаях — полное сканирование
+    println!("[get_ids_for_condition] Falling back to full scan via get_ids_by_scanning");
+    let result = get_ids_by_scanning(ctx, model, field, &ops, existing_ids);
+    println!("[get_ids_for_condition] <<< Returning from scan, result length: {:?}", result.as_ref().map(|v| v.len()).unwrap_or(0));
+    result
+}
+
+fn process_all_condition(ctx: &ServerContext, field: &Field, all_array: &[Value]) -> Result<Vec<Vec<u8>>, ParseWhereError> {
+    fn extract_id(val: &Value) -> Result<Vec<u8>, ParseWhereError> {
+        match val {
+            Value::Number(n) => {
+                let id = n.as_u64().ok_or_else(|| ParseWhereError::TypeMismatch {
+                    _field: "".into(),
+                    _expected: "u64".into(),
+                })?;
+                Ok(id.to_be_bytes().to_vec())
+            }
+            Value::Object(obj) => {
+                let id_val = obj.get("id").ok_or_else(|| ParseWhereError::TypeMismatch {
+                    _field: "".into(),
+                    _expected: "{ id: u64 }".into(),
+                })?;
+                let id = id_val.as_u64().ok_or_else(|| ParseWhereError::TypeMismatch {
+                    _field: "".into(),
+                    _expected: "u64".into(),
+                })?;
+                Ok(id.to_be_bytes().to_vec())
+            }
+            _ => Err(ParseWhereError::TypeMismatch {
+                _field: "".into(),
+                _expected: "u64 or object with id".into(),
+            }),
+        }
+    }
+
+    if let Some(rev_index) = field.get_rev_index() {
+        let mut result_sets: Option<HashSet<Vec<u8>>> = None;
+        for val in all_array {
+            let child_id = extract_id(val)?;
+            let rx = ctx.db.db.begin_read().unwrap();
+            let parent_ids = find_by_direct(&rx, rev_index.tree_name(), &child_id);
+            let current_set: HashSet<Vec<u8>> = parent_ids.into_iter().collect();
+            result_sets = match result_sets {
+                Some(prev) => Some(prev.intersection(&current_set).cloned().collect()),
+                None => Some(current_set),
+            };
+        }
+        Ok(result_sets.map(|set| set.into_iter().collect()).unwrap_or_default())
+    } else {
+        let direct_index = field.get_direct_index().ok_or_else(|| ParseWhereError::TypeMismatch {
+            _field: field.full_name.clone(),
+            _expected: "either reverse or direct index required for $all query".into(),
+        })?;
+
+        let rx = ctx.db.db.begin_read().unwrap();
+        let direct_tree = rx.get_tree(direct_index.tree_name()).unwrap().unwrap();
+
+        let first_child = extract_id(&all_array[0])?;
+        let parents = find_by_rev(&rx, direct_index.tree_name(), &first_child, &ctx.db.schema);
+        let mut result: HashSet<Vec<u8>> = parents.into_iter().collect();
+
+        for val in &all_array[1..] {
+            let child_id = extract_id(val)?;
+            let mut new_result = HashSet::new();
+            for parent in &result {
+                let mut key = parent.clone();
+                key.extend_from_slice(&child_id);
+                if direct_tree.get(&key).unwrap().is_some() {
+                    new_result.insert(parent.clone());
+                }
+            }
+            result = new_result;
+            if result.is_empty() { break; }
+        }
+
+        Ok(result.into_iter().collect())
+    }
+}
+
+fn get_parent_ids_for_struct_list_condition(
+    ctx: &ServerContext,
+    st: &Entity,
+    cond: &Value,
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Vec<Vec<u8>>, ParseWhereError> {
+
+    let condition_value = if cond.is_number() {
+        let id_field = st.fields.iter()
+            .find(|f| f.id_idx.is_some() && !f.name.starts_with('@'))
+            .ok_or_else(|| ParseWhereError::TypeMismatch {
+                _field: st.name.clone(),
+                _expected: "структура должна иметь поле-идентификатор элемента (не родительское)".into(),
+            })?;
+
+        // Построить объект { field_name: cond }
+        let mut map = serde_json::Map::new();
+        map.insert(id_field.name.clone(), cond.clone());
+        Value::Object(map)
+    } else {
+        cond.clone()
+    };
+
+    let sub_where = Value::Object(serde_json::Map::from_iter(vec![
+        ("$where".to_string(), condition_value)
+    ]));
+
+    let ids_opt = parse_where(ctx, st, &sub_where, existing_ids)?;
+    let keys = match ids_opt {
+        Some(keys) => {
+            keys
+        }
+        None => {
+            return Ok(vec![]);
+        }
+    };
+
+    let parent_ids: HashSet<Vec<u8>> = keys
+        .into_iter()
+        .map(|key| key[..8].to_vec())
+        .collect();
+
+    Ok(parent_ids.into_iter().collect())
+}
+
+fn parse_where(
+    ctx: &ServerContext,
+    model: &Entity,
+    body_json: &Value,
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
+    let Some(where_obj) = body_json.get("$where") else {
+        return Ok(None);
+    };
+
+    // Обработка явных $and / $or
+    if let Some(and_array) = where_obj.get("$and").and_then(|v| v.as_array()) {
+        return eval_and(ctx, model, and_array, existing_ids);
+    }
+    if let Some(or_array) = where_obj.get("$or").and_then(|v| v.as_array()) {
+        return eval_or(ctx, model, or_array, existing_ids);
+    }
+
+    let mut all_id_sets: Vec<Vec<Vec<u8>>> = Vec::new();
+
+    for field in model.fields.iter() {
+        let Some(where_field) = where_obj.get(&field.name) else {
+            continue;
+        };
+
+        // Векторный индекс (особая обработка)
+        if let Some(vector_index_type) = field.attributes.iter().find_map(|f| {
+            if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
+        }) {
             let (_primitive_type, &size) = match &field.ty {
                 FieldType::PrimitiveFixedList(primitive_type, size) => (primitive_type, size),
-                _ => panic!("Wrong field type {}. Expected fixed list", field.full_name)
+                _ => panic!("Wrong field type {}. Expected fixed list", field.full_name),
             };
 
-            let mut point = where_field
+            let point = where_field
                 .as_object()
                 .and_then(|obj| obj.get("$close"))
                 .and_then(|close| close.as_array())
-                .filter(|arr | arr.len() == size)
+                .filter(|arr| arr.len() == size)
                 .and_then(|arr| {
                     let mut points = Vec::with_capacity(arr.len());
-                    for i in arr.iter() {
+                    for i in arr {
                         let Some(f) = i.as_f64() else { return None };
                         points.push(f as f32);
                     }
@@ -328,278 +850,347 @@ fn parse_where(ctx: &ServerContext, model: &Entity, body_json: &Value) -> Result
                     _expected: format!("{{ $close: f32[{size}] }}"),
                 })?;
 
-            if matches!(vector_index_type, VectorIndexType::Cosine) {
-                let norm: f32 = point.iter().map(|x| x * x).sum::<f32>().sqrt();
-                for f in point.iter_mut() {
-                    *f /= norm;
-                }
-            }
-
             let take = where_field
                 .get("$take")
-                .map(|f|f.as_u64())
-                .unwrap_or(Some(10))
-                .ok_or_else(|| ParseWhereError::TypeMismatch {
-                    _field: field.full_name.clone(),
-                    _expected: format!("{{ $take: number }}"),
-                })?;
-
+                .and_then(|f| f.as_u64())
+                .unwrap_or(10);
             let threshold = where_field
                 .get("$threshold")
-                .map(|f|f.as_f64())
-                .unwrap_or(Some(0f64))
-                .map(|f| f as f32)
-                .ok_or_else(|| ParseWhereError::TypeMismatch {
-                    _field: field.full_name.clone(),
-                    _expected: format!("{{ $threshold: number }}"),
-                })?;
+                .and_then(|f| f.as_f64())
+                .unwrap_or(0.0) as f32;
 
-            let rx = ctx.db.db.begin_read().unwrap();
-            {
+            let ids = {
+                let rx = ctx.db.db.begin_read().unwrap();
                 let index_name = [&field.full_name, ".vectorindex"].concat();
                 let tree = rx.get_tree(index_name.as_bytes()).unwrap().unwrap();
-
                 let distance = match vector_index_type {
                     VectorIndexType::Cosine => CustomDistance::Cosine,
-                    VectorIndexType::Euclidean => CustomDistance::Euclidean
+                    VectorIndexType::Euclidean => CustomDistance::Euclidean,
                 };
+                ctx.find_nearest_points(&tree, &point, take as usize, distance, threshold)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            };
+            all_id_sets.push(ids);
+            continue;
+        }
 
-                let ids = ctx.find_nearest_points(&tree, &point, take as usize, distance, threshold);
-                println!("{:?} {:?}", vector_index_type, ids);
-
-                return Ok(Some(ids.into_iter().map(|i|i.0).collect()))
+        if let FieldType::ModelRefList(_) = &field.ty {
+            if let Some(all_array) = where_field.get("$all").and_then(|v| v.as_array()) {
+                let ids = process_all_condition(ctx, field, all_array)?;
+                all_id_sets.push(ids);
+                continue;
+            } else if where_field.is_array() {
+                let all_array = where_field.as_array().unwrap();
+                let ids = process_all_condition(ctx, field, all_array)?;
+                all_id_sets.push(ids);
+                continue;
+            } else if where_field.is_number() || where_field.is_object() {
+                let arr = vec![where_field.clone()];
+                let ids = process_all_condition(ctx, field, &arr)?;
+                all_id_sets.push(ids);
+                continue;
+            } else {
+                return Err(ParseWhereError::TypeMismatch {
+                    _field: field.full_name.clone(),
+                    _expected: "array or object with $all".into(),
+                });
             }
         }
 
-        if let Some(id_idx) = field.id_idx {
-            // Первичный ключ не может быть null
-            if where_field.is_null() {
+        if let FieldType::ModelRef(_) = &field.ty {
+            let ops = parse_conditions(field, where_field)?;
+            if ops.is_empty() {
                 continue;
             }
-
-            // Если это первый компонент ключа, используем префиксный поиск
-            if id_idx == 0 {
-                let encoded = match &field.ty {
-                    FieldType::Primitive(primitive) => {
-                        let mut buf = Vec::new();
-                        // Кодируем значение так же, как в encode_id
-                        match primitive {
-                            PrimitiveFieldType::String => {
-                                let s = where_field.as_str().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                    _field: field.full_name.clone(),
-                                    _expected: "string".to_string(),
-                                })?;
-                                buf.extend_from_slice(s.as_bytes());
-                            }
-                            PrimitiveFieldType::Int64 => {
-                                let n = where_field.as_i64().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                    _field: field.full_name.clone(),
-                                    _expected: "i64".to_string(),
-                                })?;
-                                buf.extend_from_slice(&n.to_be_bytes());
-                            }
-                            PrimitiveFieldType::UInt64 => {
-                                let n = where_field.as_u64().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                    _field: field.full_name.clone(),
-                                    _expected: "u64".to_string(),
-                                })?;
-                                buf.extend_from_slice(&n.to_be_bytes());
-                            }
-                            PrimitiveFieldType::Float => {
-                                let n = where_field.as_f64().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                    _field: field.full_name.clone(),
-                                    _expected: "float".to_string(),
-                                })? as f32;
-                                buf.extend_from_slice(&n.to_be_bytes());
-                            }
-                            PrimitiveFieldType::Double => {
-                                let n = where_field.as_f64().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                    _field: field.full_name.clone(),
-                                    _expected: "double".to_string(),
-                                })?;
-                                buf.extend_from_slice(&n.to_be_bytes());
-                            }
-                            PrimitiveFieldType::Bool => {
-                                let b = where_field.as_bool().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                    _field: field.full_name.clone(),
-                                    _expected: "bool".to_string(),
-                                })?;
-                                buf.push(if b { 1 } else { 0 });
-                            }
-                            PrimitiveFieldType::DateTime => {
-                                // datetime в ключе хранится как i64 миллисекунд
-                                let epoch = match where_field {
-                                    Value::Number(_) => where_field.as_i64().ok_or_else(|| ParseWhereError::TypeMismatch {
-                                        _field: field.full_name.clone(),
-                                        _expected: "i64 (timestamp)".to_string(),
-                                    })?,
-                                    Value::String(s) => {
-                                        let dt: chrono::DateTime<chrono::Utc> = s.parse().map_err(|_| {
-                                            ParseWhereError::TypeMismatch {
-                                                _field: field.full_name.clone(),
-                                                _expected: "ISO-8601 datetime string".to_string(),
-                                            }
-                                        })?;
-                                        dt.timestamp_millis()
-                                    }
-                                    _ => return Err(ParseWhereError::TypeMismatch {
-                                        _field: field.full_name.clone(),
-                                        _expected: "i64 or ISO-8601 string".to_string(),
-                                    }),
-                                };
-                                buf.extend_from_slice(&epoch.to_be_bytes());
-                            }
-                        }
-                        buf
-                    }
-                    FieldType::ModelRef(_) => {
-                        // ModelRef в ключе хранится как u64 (id целевой модели)
-                        let id_val = if let Some(num) = where_field.as_u64() {
-                            num
-                        } else if let Some(obj) = where_field.as_object() {
-                            obj.get("id").and_then(|v| v.as_u64()).ok_or_else(|| ParseWhereError::TypeMismatch {
-                                _field: field.full_name.clone(),
-                                _expected: "{ id: u64 }".to_string(),
-                            })?
-                        } else {
-                            return Err(ParseWhereError::TypeMismatch {
-                                _field: field.full_name.clone(),
-                                _expected: "u64 or object with id".to_string(),
-                            });
-                        };
-                        id_val.to_be_bytes().to_vec()
-                    }
-                    _ => {
-                        // Другие типы (например, списки) не могут быть частью ключа
-                        return Err(ParseWhereError::TypeMismatch {
-                            _field: field.full_name.clone(),
-                            _expected: "primitive or reference".to_string(),
-                        });
-                    }
-                };
-
-                let rx = ctx.db.db.begin_read().unwrap();
-                let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-                let ids: Vec<Vec<u8>> = tree
-                    .prefix_keys(&encoded)
-                    .unwrap()
-                    .map(|k| k.unwrap().to_vec())
-                    .collect();
-                return Ok(Some(ids));
-            }
+            let ids = get_ids_for_condition(ctx, model, field, ops, existing_ids)?;
+            all_id_sets.push(ids);
+            continue;
         }
 
-        let rx = ctx.db.db.begin_read().unwrap();
-        let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-
-        let mut ids = Vec::new();
-
-        let is_null_condition = where_field.is_null();
-
-        let encoded_value = if !is_null_condition {
-            match &field.ty {
-                FieldType::Primitive(primitive) => {
-                    Some(encode_index_prefix(field, where_field).map_err(|_| ParseWhereError::TypeMismatch {
-                        _field: field.full_name.clone(),
-                        _expected: format!("value compatible with {}", primitive),
-                    })?)
+        match &field.ty {
+            FieldType::Struct(st) => {
+                let cond_obj = where_field.as_object().ok_or_else(|| ParseWhereError::TypeMismatch {
+                    _field: field.full_name.clone(),
+                    _expected: "object with field conditions".into(),
+                })?;
+                // Рекурсивно ищем ID структур, удовлетворяющих условию
+                let sub_where = Value::Object(serde_json::Map::from_iter(vec![
+                    ("$where".to_string(), Value::Object(cond_obj.clone()))
+                ]));
+                if let Some(ids) = parse_where(ctx, st, &sub_where, existing_ids)? {
+                    all_id_sets.push(ids);
                 }
-                FieldType::ModelRef(_model_idx) => {
-                    // Ожидаем число или объект с полем id
-                    let id_val = if let Some(num) = where_field.as_u64() {
-                        num
-                    } else if let Some(obj) = where_field.as_object() {
-                        obj.get("id").and_then(|v| v.as_u64()).ok_or_else(|| ParseWhereError::TypeMismatch {
-                            _field: field.full_name.clone(),
-                            _expected: "{ id: u64 }".to_string(),
-                        })?
-                    } else {
-                        return Err(ParseWhereError::TypeMismatch {
-                            _field: field.full_name.clone(),
-                            _expected: "u64 or object with id".to_string(),
-                        });
-                    };
-                    Some(id_val.to_be_bytes().to_vec())
+                // Если ids = None (условие пустое) — пропускаем, ничего не добавляем
+            }
+            FieldType::StructList(st) => {
+                let cond_obj = where_field.as_object().ok_or_else(|| ParseWhereError::TypeMismatch {
+                    _field: field.full_name.clone(),
+                    _expected: "object with operators or field conditions".into(),
+                })?;
+
+                if let Some(all_array) = cond_obj.get("$all").and_then(|v| v.as_array()) {
+                    println!("[parse_where] Processing $all for StructList field '{}', array length: {}", field.full_name, all_array.len());
+
+                    if all_array.is_empty() {
+                        println!("[parse_where]   $all array is empty, pushing empty result");
+                        all_id_sets.push(vec![]);
+                        continue;
+                    }
+
+                    // Шаг 2: получить родителей для первого элемента
+                    println!("[parse_where]   Getting parents for first element of $all");
+                    let first_parents = get_parent_ids_for_struct_list_condition(ctx, st, &all_array[0], existing_ids)?;
+                    let mut candidate_parents: HashSet<Vec<u8>> = first_parents.into_iter().collect();
+                    println!("[parse_where]   First element returned {} parents", candidate_parents.len());
+
+                    // Если после первого элемента нет родителей – результат пуст
+                    if candidate_parents.is_empty() {
+                        println!("[parse_where]   No parents after first element, pushing empty result");
+                        all_id_sets.push(vec![]);
+                        continue;
+                    }
+
+                    // Определить поле идентификатора структуры (поле с id_idx, не родительское)
+                    let id_field = st.fields.iter()
+                        .find(|f| f.id_idx.is_some() && !f.name.starts_with('@'))
+                        .ok_or_else(|| ParseWhereError::TypeMismatch {
+                            _field: st.name.clone(),
+                            _expected: "структура должна иметь поле-идентификатор элемента (не родительское)".into(),
+                        })?;
+                    println!("[parse_where]   Using id_field '{}' for encoding child keys", id_field.full_name);
+
+                    // Открыть дерево структуры-списка
+                    let rx = ctx.db.db.begin_read().unwrap();
+                    let tree = rx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+
+                    // Шаг 3: обработать остальные элементы
+                    for (idx, elem) in all_array[1..].iter().enumerate() {
+                        println!("[parse_where]   Processing element #{} of remaining", idx+1);
+
+                        // Получить байтовое представление идентификатора элемента
+                        let cond_val = parse_condition_value(id_field, elem)?;
+                        println!("[parse_where]");
+                        let encoded_child = encode_condition_value(id_field, &cond_val)?;
+                        println!("[parse_where]     Element value encoded as {:?}", encoded_child);
+
+                        // Проверить каждого родителя
+                        let mut surviving_parents = HashSet::new();
+                        for parent_id in &candidate_parents {
+                            let mut key = parent_id.clone();
+                            key.extend_from_slice(&encoded_child);
+                            if tree.get(&key).unwrap().is_some() {
+                                surviving_parents.insert(parent_id.clone());
+                            }
+                        }
+
+                        let before = candidate_parents.len();
+                        candidate_parents = surviving_parents;
+                        println!("[parse_where]     After element #{}: parents left {} (was {})", idx+1, candidate_parents.len(), before);
+
+                        if candidate_parents.is_empty() {
+                            println!("[parse_where]     No parents left, breaking early");
+                            break;
+                        }
+                    }
+
+                    println!("[parse_where]   Final number of parents for $all: {}", candidate_parents.len());
+                    all_id_sets.push(candidate_parents.into_iter().collect());
+                    continue;
                 }
-                _ => {
-                    return Err(ParseWhereError::TypeMismatch {
-                        _field: field.full_name.clone(),
-                        _expected: "primitive or reference".to_string(),
-                    });
+            }
+            _ => {}
+        }
+
+        let ops = parse_conditions(field, where_field)?;
+        if ops.is_empty() {
+            continue;
+        }
+
+        let ids = get_ids_for_condition(ctx, model, field, ops, existing_ids)?;
+        all_id_sets.push(ids);
+    }
+
+    if all_id_sets.is_empty() {
+        return Ok(None);
+    }
+
+    // Пересекаем все множества
+    let mut result: Option<HashSet<Vec<u8>>> = None;
+    for ids in all_id_sets {
+        let current_set: HashSet<_> = ids.into_iter().collect();
+        result = match result {
+            Some(prev_set) => {
+                let intersected: HashSet<_> = prev_set.intersection(&current_set).cloned().collect();
+                if intersected.is_empty() {
+                    return Ok(Some(vec![])); // пересечение пусто
+                }
+                Some(intersected)
+            }
+            None => Some(current_set),
+        };
+    }
+
+    Ok(result.map(|set| set.into_iter().collect()))
+}
+
+fn get_ids_by_scanning(
+    ctx: &ServerContext,
+    model: &Entity,
+    field: &Field,
+    ops: &[(Operator, ConditionValue)],
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Vec<Vec<u8>>, ParseWhereError> {
+    println!("[get_ids_by_scanning] >>> Starting full scan for field '{}' on model '{}'", field.name, model.name);
+    println!("[get_ids_by_scanning] Conditions ({} ops): {:?}", ops.len(), ops);
+
+    let rx = ctx.db.db.begin_read().unwrap();
+    let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+
+    // Определяем, какие ID проверять
+    let ids_to_check: Vec<Vec<u8>> = if let Some(existing) = existing_ids {
+        println!("[get_ids_by_scanning] Using existing_ids set of size {}", existing.len());
+        existing.iter().cloned().collect()
+    } else {
+        println!("[get_ids_by_scanning] No existing_ids – scanning all keys from tree");
+        tree.keys().unwrap().map(|k| k.unwrap().to_vec()).collect()
+    };
+    println!("[get_ids_by_scanning] Total IDs to check: {}", ids_to_check.len());
+
+    let mut ids = Vec::new();
+    for id in ids_to_check {
+        // Получаем данные записи по ID
+        let data = match tree.get(&id).unwrap() {
+            Some(d) => d,
+            None => {
+                println!("[get_ids_by_scanning]   ID {:02x?} – data not found (skipping)", id);
+                continue;
+            }
+        };
+
+        // Извлекаем значение поля
+        let value_opt = get_value_from_data(field, &id, &data, field.get_size());
+        let cond_value = if let Some(bytes) = value_opt {
+            match decode_field_value(field, bytes) {
+                Ok(val) => {
+                    println!("[get_ids_by_scanning]   ID {:02x?} – extracted value bytes: {:?}, decoded: {:?}", id, bytes, val);
+                    val
+                }
+                Err(e) => {
+                    println!("[get_ids_by_scanning]   ID {:02x?} – ERROR decoding value: {:?}", id, e);
+                    return Err(e);
                 }
             }
         } else {
-            None
+            println!("[get_ids_by_scanning]   ID {:02x?} – value is NULL", id);
+            ConditionValue::Null
         };
 
-        for entry in tree.iter().unwrap() {
-            let (id, data) = entry.unwrap();
-            let value_opt = get_value_from_data(field, &id, &data, field.get_size());
-            println!("DEBUG: id = {:?}, value_opt = {:?}", id, value_opt);
-            let matches = if is_null_condition {
-                value_opt.is_none()
-            } else if let Some(ref expected) = encoded_value {
-                if let Some(actual) = value_opt {
-                    // Для динамических полей (String) encode_index_prefix добавляет нулевой терминатор
-                    if expected.ends_with(&[0]) {
-                        actual == &expected[..expected.len()-1]
-                    } else {
-                        actual == expected.as_slice()
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+        // Проверяем условия
+        let passes = ops.iter().all(|(op, target)| {
+            let result = check_condition(&cond_value, op, target);
+            println!("[get_ids_by_scanning]     condition {:?} {:?} -> {}", op, target, result);
+            result
+        });
 
-            if matches {
-                ids.push(id.to_vec());
-            }
+        if passes {
+            println!("[get_ids_by_scanning]   --> ID {:02x?} PASSED, adding to result", id);
+            ids.push(id);
+        } else {
+            println!("[get_ids_by_scanning]   --> ID {:02x?} FAILED", id);
         }
-
-        return Ok(Some(ids));
     }
 
-    return Ok(None);
+    println!("[get_ids_by_scanning] <<< Finished. Found {} matching IDs", ids.len());
+    Ok(ids)
 }
 
-fn eval_and(ctx: &ServerContext, model: &Entity, conditions: &[Value]) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
-    let mut result_set: Option<HashSet<Vec<u8>>> = None;
+fn eval_and(
+    ctx: &ServerContext,
+    model: &Entity,
+    conditions: &[Value],
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
+    println!("[eval_and] >>> Entering with model '{}'", model.name);
+    if let Some(existing) = existing_ids {
+        println!("[eval_and] Initial existing_ids size: {}", existing.len());
+    } else {
+        println!("[eval_and] No initial existing_ids, will start from first condition");
+    }
+    println!("[eval_and] Number of AND conditions: {}", conditions.len());
+    println!("[eval_and] All AND conditions: {:?}", conditions); // <-- added line
 
-    for cond in conditions {
-        let ids_opt = parse_where(ctx, model, &Value::Object(serde_json::Map::from_iter(vec![
-            ("$where".to_string(), cond.clone())
-        ])))?;
+    let mut current_ids: Option<HashSet<Vec<u8>>> = existing_ids.map(|s| s.clone());
+
+    for (i, cond) in conditions.iter().enumerate() {
+        println!("[eval_and] --- Processing condition #{} ---", i + 1);
+        println!("[eval_and] Condition #{} value: {:?}", i + 1, cond);
+
+        let ids_opt = parse_where(
+            ctx,
+            model,
+            &Value::Object(serde_json::Map::from_iter(vec![
+                ("$where".to_string(), cond.clone())
+            ])),
+            current_ids.as_ref(),
+        )?;
 
         match ids_opt {
             Some(ids) => {
-                let current_set: HashSet<_> = ids.into_iter().collect();
-                if let Some(prev_set) = result_set {
-                    // пересечение
-                    result_set = Some(prev_set.intersection(&current_set).cloned().collect());
-                } else {
-                    result_set = Some(current_set);
+                println!("[eval_and]   Condition #{} returned {} IDs", i + 1, ids.len());
+                let new_set: HashSet<_> = ids.into_iter().collect();
+                current_ids = Some(match current_ids {
+                    Some(prev) => {
+                        let intersection_size_before = prev.len();
+                        let result: HashSet<_> = prev.intersection(&new_set).cloned().collect();
+                        println!("[eval_and]   Intersected previous set (size {}) with new set (size {}) -> result size {}",
+                            intersection_size_before, new_set.len(), result.len());
+                        result
+                    }
+                    None => {
+                        println!("[eval_and]   First condition – set becomes size {}", new_set.len());
+                        new_set
+                    }
+                });
+
+                // если пересечение пусто – можно сразу вернуть пустой результат
+                if current_ids.as_ref().map_or(false, |s| s.is_empty()) {
+                    println!("[eval_and]   Intersection is empty, returning empty result early");
+                    return Ok(Some(vec![]));
                 }
             }
             None => {
-                // условие не ограничивает, пропускаем
+                println!("[eval_and]   Condition #{} returned None (no restriction) – set unchanged", i + 1);
+                // условие не накладывает ограничений – оставляем текущий набор без изменений
                 continue;
             }
         }
     }
 
-    Ok(result_set.map(|set| set.into_iter().collect()))
+    let final_count = current_ids.as_ref().map(|s| s.len()).unwrap_or(0);
+    println!("[eval_and] <<< Finished, final set size: {}", final_count);
+    Ok(current_ids.map(|set| set.into_iter().collect()))
 }
 
-fn eval_or(ctx: &ServerContext, model: &Entity, conditions: &[Value]) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
+fn eval_or(
+    ctx: &ServerContext,
+    model: &Entity,
+    conditions: &[Value],
+    _existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
     let mut result_set = HashSet::new();
     let mut any_some = false;
 
     for cond in conditions {
-        let ids_opt = parse_where(ctx, model, &Value::Object(serde_json::Map::from_iter(vec![
-            ("$where".to_string(), cond.clone())
-        ])))?;
+        let ids_opt = parse_where(
+            ctx,
+            model,
+            &Value::Object(serde_json::Map::from_iter(vec![
+                ("$where".to_string(), cond.clone())
+            ])),
+            None, // для OR нельзя использовать предварительный фильтр
+        )?;
 
         if let Some(ids) = ids_opt {
             any_some = true;

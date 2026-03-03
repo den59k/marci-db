@@ -16,7 +16,10 @@ pub struct MarciDB {
 #[derive(Debug)]
 pub enum InsertError {
   ForeignKeyViolation(String, u64),
-  ItemNotFound
+  ItemNotFound,
+  UniqueViolation(String, Vec<u8>),
+  DuplicateKey(Vec<u8>),
+  CannotChangePrimaryKey(String)
 }
 
 #[derive(Debug)]
@@ -153,6 +156,30 @@ impl MarciDB {
     let tx = self.db.begin_write().unwrap();
     check_foreign_keys(&tx, &foreign_keys)?;
 
+    {
+        let tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+        if tree.get(id).unwrap().is_some() {
+            return Err(InsertError::DuplicateKey(id.to_vec()));
+        }
+    }
+
+    for field in model.fields.iter() {
+        if !field.is_unique { continue; }
+        let Some(field_index) = field.get_field_index() else { continue; };
+
+        let Some(value) = get_value_from_data(field, id, data, field.get_size()) else {
+            // NULL пропускаем (уникальность не нарушается)
+            continue;
+        };
+
+        let prefix = make_index_prefix(field, value);
+        let index_tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
+        let mut iter = index_tree.prefix_keys(&prefix).unwrap();
+        if iter.next().is_some() {
+            return Err(InsertError::UniqueViolation(field.full_name.clone(), value.to_vec()));
+        }
+    }
+
     self.insert_counter_value(model, id);
 
     // После получения ID - получаем индексы
@@ -174,7 +201,7 @@ impl MarciDB {
 
             let mut new_item_id = item_id.clone();
             new_item_id[0..8].copy_from_slice(id);
-            
+
             self.insert_counter_value(*st, &mut new_item_id);
 
             tree.insert(&new_item_id, item_data).unwrap();
@@ -198,11 +225,11 @@ impl MarciDB {
     // Обновляем индексы
     for index in indexes {
       println!("Insert index to {:#?} {:?}", str::from_utf8(index.tree_name).unwrap(), index.key);
-      
+
       let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
       index_tree.insert(&index.key, &[1]).unwrap();
     }
-    
+
     tx.commit().unwrap();
 
     return Ok(())
@@ -429,7 +456,6 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
   check_foreign_keys(&tx, &foreign_keys)?;
   println!("Foreign keys OK");
 
-  // Обновляем значение. Выдаем ошибку, если значения не существует
   {
     println!("Opening main tree: {}", model.name);
     let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
@@ -441,7 +467,37 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
     };
     println!("Existing data length: {}", data.len());
 
-    println!("Updating data...");
+    for (field_index, field) in model.fields.iter().enumerate() {
+        if !field.is_unique { continue; }
+        let Some(field_index_tree) = field.get_field_index() else { continue; };
+
+        if !changed_mask[field_index] {
+            continue; // поле не изменилось
+        }
+
+        let Some(new_value) = get_value_from_data(field, id, new_data, field.get_size()) else {
+            // новое значение NULL – уникальность не нарушается
+            continue;
+        };
+
+        let prefix = make_index_prefix(field, new_value);
+        let index_tree = tx.get_tree(field_index_tree.tree_name()).unwrap().unwrap();
+        let mut iter = index_tree.prefix_keys(&prefix).unwrap();
+        let mut conflict = false;
+        for key in iter {
+            let key = key.unwrap();
+            if key.len() < 8 { continue; }
+            let other_id = &key[key.len()-8..];
+            if other_id != id {
+                conflict = true;
+                break;
+            }
+        }
+        if conflict {
+            return Err(InsertError::UniqueViolation(field.full_name.clone(), new_value.to_vec()));
+        }
+    }
+
     let updated_data = update_data(&model, &data, new_data, &changed_mask);
     println!("Updated data length: {}", updated_data.len());
 
@@ -999,7 +1055,7 @@ pub fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec
   let index_tree = rx.get_tree(tree_name).unwrap()
     .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
   let iter = index_tree.prefix_keys(&item_id).unwrap();
-  iter.map(|k| k.unwrap()[8..].to_vec()).collect()
+  iter.map(|k| k.unwrap()[item_id.len()..].to_vec()).collect()
 }
 
 #[inline(always)]
@@ -1177,6 +1233,15 @@ fn find_keys_by_field(rx: &Transaction, entity: &Entity, field: &Field, value: &
 //   key[8..].copy_from_slice(&b.to_be_bytes());
 //   key
 // }
+
+#[inline(always)]
+fn make_index_prefix(field: &Field, value_bytes: &[u8]) -> Vec<u8> {
+    let mut out = value_bytes.to_vec();
+    if field.get_size().is_none() {
+        out.push(0);
+    }
+    out
+}
 
 #[inline(always)]
 fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) {

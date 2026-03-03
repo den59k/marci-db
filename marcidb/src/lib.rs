@@ -6,7 +6,7 @@ mod marci_select;
 mod update_data;
 mod select;
 
-pub use crate::marci_db::{MarciDB};
+pub use crate::marci_db::{MarciDB, find_by_direct, find_by_rev};
 pub use crate::select::{MarciSelect,get_value_from_data};
 pub use crate::marci_decoder::{decode_document, decode_id, array_to_json};
 pub use crate::marci_encoder::{encode_document, encode_id, encode_index_prefix};

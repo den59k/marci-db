@@ -11,7 +11,8 @@ pub enum EncodeError {
     TypeMismatch { field: String, expected: String },
     TryWriteToVirtualField,
     UnavailableKeyField,
-    EmptyObject
+    EmptyObject,
+    DerivedFieldNotWritable(String)
 }
 
 /// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные и changed_mask
@@ -74,6 +75,10 @@ fn write_fields<'a>(
             // TODO: set default value here. Now it setting null (offset = 0)
             continue;
         };
+
+        if field.is_derived() {
+            return Err(EncodeError::DerivedFieldNotWritable(field.full_name.clone()));
+        }
 
         changed_mask.set(field_index, true);
 

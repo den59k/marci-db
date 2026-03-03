@@ -98,7 +98,7 @@ pub struct Field {
     pub counter_idx: Option<usize>,
     pub inserted_indexes: InsertedIndexSt,
     pub attributes: Vec<Attribute>,
-    /// Ключи, которые можно добавить через inject (используется при запросе на derived элемент в структуре)
+    pub is_unique: bool,
     pub injected_fields: Option<(FieldRef,Aliases)>
 }
 

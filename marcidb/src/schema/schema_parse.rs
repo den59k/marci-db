@@ -53,6 +53,7 @@ pub fn update_key_fields(fields: &mut Vec<Field>) -> () {
             id_idx: Some(0),
             attributes: vec![Attribute::Id], 
             counter_idx: Some(0),
+            is_unique: false,
             injected_fields: None
         });
     }
@@ -137,6 +138,7 @@ fn parse_field_raw(line: &str) -> Field {
         .collect();
     
     let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
+    let is_unique = attributes.iter().any(|attr| matches!(attr, Attribute::Unique));
 
     Field {
         name,
@@ -148,6 +150,7 @@ fn parse_field_raw(line: &str) -> Field {
         inserted_indexes: InsertedIndexSt::new(),
         counter_idx: None,
         id_idx: is_id.then_some(0),
+        is_unique,
         injected_fields: None
     }
 }
@@ -259,6 +262,7 @@ fn resolve_fields(
                         counter_idx: None, 
                         inserted_indexes: InsertedIndexSt::new(), 
                         attributes: vec![Attribute::Id],
+                        is_unique: false,
                         injected_fields: None
                     });
 
@@ -314,7 +318,7 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
                         field_injects.1.insert(field_name.to_string(), alias.to_string());
                     }
                 }
-                Attribute::Index => {
+                Attribute::Index | Attribute::Unique => {
                     field_indexes.insert(field_ref.clone());
                 }
                 _ => {}
