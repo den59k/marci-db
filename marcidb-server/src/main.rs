@@ -278,6 +278,7 @@ enum ConditionValue {
     Double(f64),
     String(String),
     DateTime(i64),
+    UInt16(u16),
 }
 
 #[derive(Debug)]
@@ -315,6 +316,13 @@ fn decode_field_value(field: &Field, bytes: &[u8]) -> Result<ConditionValue, Par
             }
             let arr: [u8; 8] = bytes.try_into().unwrap();
             Ok(ConditionValue::UInt64(u64::from_be_bytes(arr)))
+        }
+        FieldType::Enum(_) => {
+            if bytes.len() < 2 {
+                return Err(ParseWhereError::InvalidData);
+            }
+            let idx = u16::from_be_bytes(bytes[..2].try_into().unwrap());
+            Ok(ConditionValue::UInt16(idx))
         }
         _ => Err(ParseWhereError::TypeMismatch {
             _field: field.full_name.clone(),
@@ -365,6 +373,7 @@ fn check_condition(value: &ConditionValue, op: &Operator, target: &ConditionValu
         (ConditionValue::Double(a), ConditionValue::Double(b)) => cmp_op(a, b, op),
         (ConditionValue::String(a), ConditionValue::String(b)) => cmp_op(a, b, op),
         (ConditionValue::DateTime(a), ConditionValue::DateTime(b)) => cmp_op(a, b, op),
+        (ConditionValue::UInt16(a), ConditionValue::UInt16(b)) => cmp_op(a, b, op),
         _ => false,
     }
 }
@@ -426,6 +435,16 @@ fn parse_condition_value(field: &Field, val: &Value) -> Result<ConditionValue, P
             };
             Ok(ConditionValue::UInt64(id))
         }
+
+        FieldType::Enum(en) => {
+            if let Some(s) = val.as_str() {
+                let idx = *en.variants_map.get(s).ok_or_else(|| type_mismatch(field, format!("one of: {}", en.variants_str())))?;
+                Ok(ConditionValue::UInt16(idx))
+            } else {
+                Err(type_mismatch(field, "string (enum variant)"))
+            }
+        }
+
         _ => Err(type_mismatch(field, "primitive or reference")),
     }
 }
@@ -456,6 +475,10 @@ fn encode_condition_value(field: &Field, val: &ConditionValue) -> Result<Vec<u8>
         }
         (FieldType::ModelRef(_), ConditionValue::UInt64(id)) => {
             out.extend_from_slice(&id.to_be_bytes())
+        }
+        (FieldType::Enum(_), ConditionValue::UInt16(idx)) => {
+            let mut out = Vec::with_capacity(2);
+            out.extend_from_slice(&idx.to_be_bytes());
         }
         _ => {
             return Err(ParseWhereError::TypeMismatch {
@@ -502,8 +525,6 @@ fn parse_conditions(field: &Field, where_field: &Value) -> Result<Vec<(Operator,
     Ok(ops)
 }
 
-/// Возвращает ID записей, удовлетворяющих заданным операторам для поля.
-/// Использует field index, прямой доступ по ID (если поле — единственный ключ) или полное сканирование.
 fn get_ids_for_condition(
     ctx: &ServerContext,
     model: &Entity,
@@ -511,8 +532,6 @@ fn get_ids_for_condition(
     ops: Vec<(Operator, ConditionValue)>,
     existing_ids: Option<&HashSet<Vec<u8>>>,
 ) -> Result<Vec<Vec<u8>>, ParseWhereError> {
-    println!("[get_ids_for_condition] >>> Entering for model '{}', field '{}'", model.name, field.name);
-    println!("[get_ids_for_condition] ops: {:?}", ops);
 
     if let Some(index) = field.get_field_index() {
         // Попытаемся использовать индекс для диапазона значений
@@ -571,28 +590,31 @@ fn get_ids_for_condition(
         let rx = ctx.db.db.begin_read().unwrap();
         let tree = rx.get_tree(index.tree_name()).unwrap().unwrap();
 
+        let key_len = model.key_min_size();
+        let min_id = vec![0u8; key_len];
+        let max_id = vec![255u8; key_len];
+
+        let start = match &lower_bound {
+            Some(lb) => [lb.as_slice(), &min_id].concat(),
+            None => vec![],
+        };
+        let end = match &upper_bound {
+            Some(ub) => [ub.as_slice(), &max_id].concat(),
+            None => vec![],
+        };
+
         let range = match (lower_bound, upper_bound) {
-            (Some(lb), Some(ub)) => {
-                let start = [lb.as_slice(), &[0u8; 8]].concat();
-                let end = [ub.as_slice(), &[255u8; 8]].concat();
-                (Bound::Included(start), Bound::Included(end))
-            }
-            (Some(lb), None) => {
-                let start = [lb.as_slice(), &[0u8; 8]].concat();
-                (Bound::Included(start), Bound::Unbounded)
-            }
-            (None, Some(ub)) => {
-                let end = [ub.as_slice(), &[255u8; 8]].concat();
-                (Bound::Unbounded, Bound::Included(end))
-            }
-            (None, None) => unreachable!(), // has_range_op гарантирует хотя бы одну границу
+            (Some(_), Some(_)) => (Bound::Included(start), Bound::Included(end)),
+            (Some(_), None) => (Bound::Included(start), Bound::Unbounded),
+            (None, Some(_)) => (Bound::Unbounded, Bound::Included(end)),
+            (None, None) => unreachable!(),
         };
 
         let mut ids = Vec::new();
         for item in tree.range(range).unwrap() {
             let (key, _) = item.unwrap();
             // Извлекаем байты значения (без последних 8 байт ID)
-            let value_bytes = &key[..key.len() - 8];
+            let value_bytes = &key[..key.len() - key_len];
             // Убираем завершающий нуль, если поле переменной длины
             let value_bytes_trimmed = if field.get_size().is_none() {
                 &value_bytes[..value_bytes.len() - 1]
@@ -604,7 +626,7 @@ fn get_ids_for_condition(
             // Проверяем все операторы
             let passes = ops.iter().all(|(op, target)| check_condition(&cond_val, op, target));
             if passes {
-                let id = key[key.len() - 8..].to_vec();
+                let id = key[key.len() - key_len..].to_vec();
                 ids.push(id);
             }
         }
@@ -617,68 +639,189 @@ fn get_ids_for_condition(
         return Ok(ids);
     }
 
-    if let FieldType::ModelRef(_) = field.ty {
-        if ops.len() == 1 && matches!(ops[0].0, Operator::Eq) {
-            if let Some(rev_index) = field.get_rev_index() {
-                let target = &ops[0].1;
-                let encoded = encode_condition_value(field, target)?;
-                println!("[get_ids_for_condition] Using rev index for ModelRef, field: {}, target value encoded: {:?}", field.name, encoded);
-                let rx = ctx.db.db.begin_read().unwrap();
-                let tree = rx.get_tree(rev_index.tree_name()).unwrap().unwrap();
-                let keys_iter = tree.prefix_keys(&encoded).unwrap();
-                let mut ids = Vec::new();
-                let mut count = 0;
-                for k in keys_iter {
-                    let key = k.unwrap();
-                    // rev индекс: [значение][id владельца] → извлекаем id владельца
-                    let owner_id = key[encoded.len()..encoded.len()+8].to_vec();
-                    println!("[get_ids_for_condition]   found rev key: {:?} -> owner_id: {:?}", key, owner_id);
-                    ids.push(owner_id);
-                    count += 1;
+    if let Some(rev_index) = field.get_rev_index() {
+        let mut lower_bound: Option<Vec<u8>> = None;
+        let mut upper_bound: Option<Vec<u8>> = None;
+        let mut has_range_op = false;
+
+        for (op, val) in &ops {
+            match op {
+                Operator::Eq | Operator::Gt | Operator::Ge | Operator::Lt | Operator::Le => {
+                    has_range_op = true;
+                    let encoded = encode_condition_value(field, val)?;
+                    match op {
+                        Operator::Eq => {
+                            lower_bound = Some(encoded.clone());
+                            upper_bound = Some(encoded);
+                        }
+                        Operator::Gt | Operator::Ge => {
+                            if let Some(lb) = &lower_bound {
+                                if encoded > *lb {
+                                    lower_bound = Some(encoded);
+                                }
+                            } else {
+                                lower_bound = Some(encoded);
+                            }
+                        }
+                        Operator::Lt | Operator::Le => {
+                            if let Some(ub) = &upper_bound {
+                                if encoded < *ub {
+                                    upper_bound = Some(encoded);
+                                }
+                            } else {
+                                upper_bound = Some(encoded);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                println!("[get_ids_for_condition] Rev index returned {} ids", count);
-                if let Some(existing) = existing_ids {
-                    let filtered: Vec<_> = ids.into_iter().filter(|id| existing.contains(id)).collect();
-                    return Ok(filtered);
-                }
-                return Ok(ids);
-            } else {
-                println!("[get_ids_for_condition] No rev index for field {}", field.name);
+                Operator::Ne => {}
             }
         }
+
+        if !has_range_op {
+            // только Ne — не можем эффективно использовать индекс
+            return get_ids_by_scanning(ctx, model, field, &ops, existing_ids);
+        }
+
+        if let (Some(lb), Some(ub)) = (&lower_bound, &upper_bound) {
+            if lb > ub {
+                return Ok(vec![]);
+            }
+        }
+        
+        let rx = ctx.db.db.begin_read().unwrap();
+        let tree = rx.get_tree(rev_index.tree_name()).unwrap().unwrap();
+
+        // Ключи rev-индекса: [encoded_value][id] (последние 8 байт — id владельца)
+        let key_len = model.key_min_size();
+        let min_id = [0u8; 8];
+        let max_id = [255u8; 8];
+
+        let start_key = match &lower_bound {
+            Some(lb) => [lb.as_slice(), &min_id].concat(),
+            None => vec![],
+        };
+        let end_key = match &upper_bound {
+            Some(ub) => [ub.as_slice(), &max_id].concat(),
+            None => vec![],
+        };
+
+        let range = match (lower_bound, upper_bound) {
+            (Some(_), Some(_)) => (Bound::Included(start_key), Bound::Included(end_key)),
+            (Some(_), None) => (Bound::Included(start_key), Bound::Unbounded),
+            (None, Some(_)) => (Bound::Unbounded, Bound::Included(end_key)),
+            (None, None) => unreachable!(),
+        };
+
+        let mut ids = Vec::new();
+        for item in tree.range(range).unwrap() {
+            let (key, _) = item.unwrap();
+            // Извлекаем значение поля (первые key.len()-8 байт)
+            let value_bytes = &key[..key.len() - key_len];
+            // Для переменной длины убираем завершающий ноль, если он есть
+            let value_bytes_trimmed = if field.get_size().is_none() {
+                if value_bytes.last() == Some(&0) {
+                    &value_bytes[..value_bytes.len() - 1]
+                } else {
+                    value_bytes
+                }
+            } else {
+                value_bytes
+            };
+            let cond_val = decode_field_value(field, value_bytes_trimmed)?;
+            if ops.iter().all(|(op, target)| check_condition(&cond_val, op, target)) {
+                let owner_key = key[key.len() - key_len..].to_vec(); // полный ключ структуры
+                ids.push(owner_key);
+            }
+        }
+
+        if let Some(existing) = existing_ids {
+            ids.retain(|id| existing.contains(id));
+        }
+        return Ok(ids);
     }
 
-    // Если поле — единственное ключевое и оператор равенства — проверяем существование записи по прямому ID
-    let key_fields_count = model.fields.iter().filter(|f| f.id_idx.is_some()).count();
-    if key_fields_count == 1 && field.id_idx.is_some() && ops.len() == 1 && matches!(ops[0].0, Operator::Eq) {
-        let target = &ops[0].1;
-        println!("[get_ids_for_condition] Using primary key (field is sole key field)");
-        let encoded = encode_condition_value(field, target)?;
-        println!("[get_ids_for_condition]   encoded target: {:?}", encoded);
+    // --- Обработка поля, являющегося первичным ключом (id_idx) ---
+    if field.id_idx.is_some() {
+        // Аналогично строим диапазон по значению id
+        let mut lower_bound: Option<Vec<u8>> = None;
+        let mut upper_bound: Option<Vec<u8>> = None;
+        let mut has_range_op = false;
+
+        for (op, val) in &ops {
+            match op {
+                Operator::Eq | Operator::Gt | Operator::Ge | Operator::Lt | Operator::Le => {
+                    has_range_op = true;
+                    let encoded = encode_condition_value(field, val)?;
+                    match op {
+                        Operator::Eq => {
+                            lower_bound = Some(encoded.clone());
+                            upper_bound = Some(encoded);
+                        }
+                        Operator::Gt | Operator::Ge => {
+                            if let Some(lb) = &lower_bound {
+                                if encoded > *lb {
+                                    lower_bound = Some(encoded);
+                                }
+                            } else {
+                                lower_bound = Some(encoded);
+                            }
+                        }
+                        Operator::Lt | Operator::Le => {
+                            if let Some(ub) = &upper_bound {
+                                if encoded < *ub {
+                                    upper_bound = Some(encoded);
+                                }
+                            } else {
+                                upper_bound = Some(encoded);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Operator::Ne => {}
+            }
+        }
+
+        if !has_range_op {
+            return get_ids_by_scanning(ctx, model, field, &ops, existing_ids);
+        }
+
+        if let (Some(lb), Some(ub)) = (&lower_bound, &upper_bound) {
+            if lb > ub {
+                return Ok(vec![]);
+            }
+        }
+
         let rx = ctx.db.db.begin_read().unwrap();
         let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-        if tree.get(&encoded).unwrap().is_some() {
-            println!("[get_ids_for_condition]   record found, returning id");
-            if let Some(existing) = existing_ids {
-                let filtered: Vec<_> = vec![encoded].into_iter().filter(|id| existing.contains(id)).collect();
-                return Ok(filtered);
+
+        let range = match (lower_bound, upper_bound) {
+            (Some(lb), Some(ub)) => (Bound::Included(lb), Bound::Included(ub)),
+            (Some(lb), None) => (Bound::Included(lb), Bound::Unbounded),
+            (None, Some(ub)) => (Bound::Unbounded, Bound::Included(ub)),
+            (None, None) => unreachable!(),
+        };
+
+        let mut ids = Vec::new();
+        for item in tree.range(range).unwrap() {
+            let (key, _) = item.unwrap();
+            // Ключ — это само значение id, декодируем его
+            let cond_val = decode_field_value(field, &key)?;
+            if ops.iter().all(|(op, target)| check_condition(&cond_val, op, target)) {
+                ids.push(key.to_vec());
             }
-            return Ok(vec![encoded]);
-        } else {
-            println!("[get_ids_for_condition]   record not found, returning empty vec");
-            return Ok(vec![]);
         }
-    } else if key_fields_count != 1 {
-        println!("[get_ids_for_condition]   key field count = {}, not using primary key path", key_fields_count);
-    } else if field.id_idx.is_none() {
-        println!("[get_ids_for_condition]   field is not a key field, not using primary key path");
+
+        if let Some(existing) = existing_ids {
+            ids.retain(|id| existing.contains(id));
+        }
+        return Ok(ids);
     }
 
-    // Во всех остальных случаях — полное сканирование
-    println!("[get_ids_for_condition] Falling back to full scan via get_ids_by_scanning");
-    let result = get_ids_by_scanning(ctx, model, field, &ops, existing_ids);
-    println!("[get_ids_for_condition] <<< Returning from scan, result length: {:?}", result.as_ref().map(|v| v.len()).unwrap_or(0));
-    result
+    // --- Если ни один индекс не подошёл — полное сканирование ---
+    get_ids_by_scanning(ctx, model, field, &ops, existing_ids)
 }
 
 fn process_all_condition(ctx: &ServerContext, field: &Field, all_array: &[Value]) -> Result<Vec<Vec<u8>>, ParseWhereError> {
@@ -808,7 +951,7 @@ fn parse_where(
         return Ok(None);
     };
 
-    // Обработка явных $and / $or
+    // Обработка $and / $or (они уже реализованы)
     if let Some(and_array) = where_obj.get("$and").and_then(|v| v.as_array()) {
         return eval_and(ctx, model, and_array, existing_ids);
     }
@@ -816,189 +959,40 @@ fn parse_where(
         return eval_or(ctx, model, or_array, existing_ids);
     }
 
-    let mut all_id_sets: Vec<Vec<Vec<u8>>> = Vec::new();
+    // Собираем все поля с условиями
+    let fields_with_cond: Vec<&Field> = model.fields.iter()
+        .filter(|f| where_obj.get(&f.name).is_some())
+        .collect();
 
-    for field in model.fields.iter() {
-        let Some(where_field) = where_obj.get(&field.name) else {
-            continue;
-        };
+    // Проверяем, есть ли среди них индексированные
+    let has_indexed = fields_with_cond.iter().any(|f| {
+        f.get_field_index().is_some() || f.get_rev_index().is_some() || f.id_idx.is_some()
+    });
 
-        // Векторный индекс (особая обработка)
-        if let Some(vector_index_type) = field.attributes.iter().find_map(|f| {
-            if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
-        }) {
-            let (_primitive_type, &size) = match &field.ty {
-                FieldType::PrimitiveFixedList(primitive_type, size) => (primitive_type, size),
-                _ => panic!("Wrong field type {}. Expected fixed list", field.full_name),
-            };
+    if !has_indexed {
+        // Ни одного индекса – выполняем единое сканирование
+        return parse_where_scan_all(ctx, model, fields_with_cond, where_obj, existing_ids);
+    } else {
+        // Есть индексы – используем последовательную фильтрацию (текущая логика)
+        return parse_where_sequential(ctx, model, fields_with_cond, where_obj, existing_ids);
+    }
+}
 
-            let point = where_field
-                .as_object()
-                .and_then(|obj| obj.get("$close"))
-                .and_then(|close| close.as_array())
-                .filter(|arr| arr.len() == size)
-                .and_then(|arr| {
-                    let mut points = Vec::with_capacity(arr.len());
-                    for i in arr {
-                        let Some(f) = i.as_f64() else { return None };
-                        points.push(f as f32);
-                    }
-                    Some(points)
-                })
-                .ok_or_else(|| ParseWhereError::TypeMismatch {
-                    _field: field.full_name.clone(),
-                    _expected: format!("{{ $close: f32[{size}] }}"),
-                })?;
-
-            let take = where_field
-                .get("$take")
-                .and_then(|f| f.as_u64())
-                .unwrap_or(10);
-            let threshold = where_field
-                .get("$threshold")
-                .and_then(|f| f.as_f64())
-                .unwrap_or(0.0) as f32;
-
-            let ids = {
-                let rx = ctx.db.db.begin_read().unwrap();
-                let index_name = [&field.full_name, ".vectorindex"].concat();
-                let tree = rx.get_tree(index_name.as_bytes()).unwrap().unwrap();
-                let distance = match vector_index_type {
-                    VectorIndexType::Cosine => CustomDistance::Cosine,
-                    VectorIndexType::Euclidean => CustomDistance::Euclidean,
-                };
-                ctx.find_nearest_points(&tree, &point, take as usize, distance, threshold)
-                    .into_iter()
-                    .map(|(id, _)| id)
-                    .collect()
-            };
-            all_id_sets.push(ids);
-            continue;
-        }
-
-        if let FieldType::ModelRefList(_) = &field.ty {
-            if let Some(all_array) = where_field.get("$all").and_then(|v| v.as_array()) {
-                let ids = process_all_condition(ctx, field, all_array)?;
-                all_id_sets.push(ids);
-                continue;
-            } else if where_field.is_array() {
-                let all_array = where_field.as_array().unwrap();
-                let ids = process_all_condition(ctx, field, all_array)?;
-                all_id_sets.push(ids);
-                continue;
-            } else if where_field.is_number() || where_field.is_object() {
-                let arr = vec![where_field.clone()];
-                let ids = process_all_condition(ctx, field, &arr)?;
-                all_id_sets.push(ids);
-                continue;
-            } else {
-                return Err(ParseWhereError::TypeMismatch {
-                    _field: field.full_name.clone(),
-                    _expected: "array or object with $all".into(),
-                });
-            }
-        }
-
-        if let FieldType::ModelRef(_) = &field.ty {
-            let ops = parse_conditions(field, where_field)?;
-            if ops.is_empty() {
-                continue;
-            }
-            let ids = get_ids_for_condition(ctx, model, field, ops, existing_ids)?;
-            all_id_sets.push(ids);
-            continue;
-        }
+/// Единое сканирование для набора полей без индексов
+fn parse_where_scan_all(
+    ctx: &ServerContext,
+    model: &Entity,
+    fields_with_cond: Vec<&Field>,
+    where_obj: &Value,
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
+    let mut field_conditions = Vec::new();
+    for field in fields_with_cond {
+        let where_field = where_obj.get(field.name.as_str()).unwrap();
 
         match &field.ty {
-            FieldType::Struct(st) => {
-                let cond_obj = where_field.as_object().ok_or_else(|| ParseWhereError::TypeMismatch {
-                    _field: field.full_name.clone(),
-                    _expected: "object with field conditions".into(),
-                })?;
-                // Рекурсивно ищем ID структур, удовлетворяющих условию
-                let sub_where = Value::Object(serde_json::Map::from_iter(vec![
-                    ("$where".to_string(), Value::Object(cond_obj.clone()))
-                ]));
-                if let Some(ids) = parse_where(ctx, st, &sub_where, existing_ids)? {
-                    all_id_sets.push(ids);
-                }
-                // Если ids = None (условие пустое) — пропускаем, ничего не добавляем
-            }
-            FieldType::StructList(st) => {
-                let cond_obj = where_field.as_object().ok_or_else(|| ParseWhereError::TypeMismatch {
-                    _field: field.full_name.clone(),
-                    _expected: "object with operators or field conditions".into(),
-                })?;
-
-                if let Some(all_array) = cond_obj.get("$all").and_then(|v| v.as_array()) {
-                    println!("[parse_where] Processing $all for StructList field '{}', array length: {}", field.full_name, all_array.len());
-
-                    if all_array.is_empty() {
-                        println!("[parse_where]   $all array is empty, pushing empty result");
-                        all_id_sets.push(vec![]);
-                        continue;
-                    }
-
-                    // Шаг 2: получить родителей для первого элемента
-                    println!("[parse_where]   Getting parents for first element of $all");
-                    let first_parents = get_parent_ids_for_struct_list_condition(ctx, st, &all_array[0], existing_ids)?;
-                    let mut candidate_parents: HashSet<Vec<u8>> = first_parents.into_iter().collect();
-                    println!("[parse_where]   First element returned {} parents", candidate_parents.len());
-
-                    // Если после первого элемента нет родителей – результат пуст
-                    if candidate_parents.is_empty() {
-                        println!("[parse_where]   No parents after first element, pushing empty result");
-                        all_id_sets.push(vec![]);
-                        continue;
-                    }
-
-                    // Определить поле идентификатора структуры (поле с id_idx, не родительское)
-                    let id_field = st.fields.iter()
-                        .find(|f| f.id_idx.is_some() && !f.name.starts_with('@'))
-                        .ok_or_else(|| ParseWhereError::TypeMismatch {
-                            _field: st.name.clone(),
-                            _expected: "структура должна иметь поле-идентификатор элемента (не родительское)".into(),
-                        })?;
-                    println!("[parse_where]   Using id_field '{}' for encoding child keys", id_field.full_name);
-
-                    // Открыть дерево структуры-списка
-                    let rx = ctx.db.db.begin_read().unwrap();
-                    let tree = rx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-
-                    // Шаг 3: обработать остальные элементы
-                    for (idx, elem) in all_array[1..].iter().enumerate() {
-                        println!("[parse_where]   Processing element #{} of remaining", idx+1);
-
-                        // Получить байтовое представление идентификатора элемента
-                        let cond_val = parse_condition_value(id_field, elem)?;
-                        println!("[parse_where]");
-                        let encoded_child = encode_condition_value(id_field, &cond_val)?;
-                        println!("[parse_where]     Element value encoded as {:?}", encoded_child);
-
-                        // Проверить каждого родителя
-                        let mut surviving_parents = HashSet::new();
-                        for parent_id in &candidate_parents {
-                            let mut key = parent_id.clone();
-                            key.extend_from_slice(&encoded_child);
-                            if tree.get(&key).unwrap().is_some() {
-                                surviving_parents.insert(parent_id.clone());
-                            }
-                        }
-
-                        let before = candidate_parents.len();
-                        candidate_parents = surviving_parents;
-                        println!("[parse_where]     After element #{}: parents left {} (was {})", idx+1, candidate_parents.len(), before);
-
-                        if candidate_parents.is_empty() {
-                            println!("[parse_where]     No parents left, breaking early");
-                            break;
-                        }
-                    }
-
-                    println!("[parse_where]   Final number of parents for $all: {}", candidate_parents.len());
-                    all_id_sets.push(candidate_parents.into_iter().collect());
-                    continue;
-                }
+            FieldType::Struct(_) | FieldType::StructList(_) | FieldType::ModelRefList(_) => {
+                return parse_where_sequential(ctx, model, vec![field], where_obj, existing_ids);
             }
             _ => {}
         }
@@ -1007,32 +1001,337 @@ fn parse_where(
         if ops.is_empty() {
             continue;
         }
-
-        let ids = get_ids_for_condition(ctx, model, field, ops, existing_ids)?;
-        all_id_sets.push(ids);
+        field_conditions.push((field, ops));
     }
 
-    if all_id_sets.is_empty() {
+    if field_conditions.is_empty() {
         return Ok(None);
     }
 
-    // Пересекаем все множества
-    let mut result: Option<HashSet<Vec<u8>>> = None;
-    for ids in all_id_sets {
-        let current_set: HashSet<_> = ids.into_iter().collect();
-        result = match result {
-            Some(prev_set) => {
-                let intersected: HashSet<_> = prev_set.intersection(&current_set).cloned().collect();
-                if intersected.is_empty() {
-                    return Ok(Some(vec![])); // пересечение пусто
-                }
-                Some(intersected)
-            }
-            None => Some(current_set),
+    let ids = scan_all_with_conditions(ctx, model, field_conditions, existing_ids)?;
+    Ok(Some(ids))
+}
+
+/// Функция единого сканирования (только для простых типов)
+fn scan_all_with_conditions(
+    ctx: &ServerContext,
+    model: &Entity,
+    field_conditions: Vec<(&Field, Vec<(Operator, ConditionValue)>)>,
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Vec<Vec<u8>>, ParseWhereError> {
+    let rx = ctx.db.db.begin_read().unwrap();
+    let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+
+    let ids_to_check: Vec<Vec<u8>> = if let Some(existing) = existing_ids {
+        existing.iter().cloned().collect()
+    } else {
+        tree.keys().unwrap().map(|k| k.unwrap().to_vec()).collect()
+    };
+
+    let mut result_ids = Vec::new();
+    'next_id: for id in ids_to_check {
+        let data = match tree.get(&id).unwrap() {
+            Some(d) => d,
+            None => continue,
         };
+
+        for (field, ops) in &field_conditions {
+            let value_opt = get_value_from_data(field, &id, &data, field.get_size());
+            let cond_value = if let Some(bytes) = value_opt {
+                decode_field_value(field, bytes)?
+            } else {
+                ConditionValue::Null
+            };
+
+            if !ops.iter().all(|(op, target)| check_condition(&cond_value, op, target)) {
+                continue 'next_id;
+            }
+        }
+        result_ids.push(id);
+    }
+    Ok(result_ids)
+}
+
+fn parse_where_sequential(
+    ctx: &ServerContext,
+    model: &Entity,
+    fields_with_cond: Vec<&Field>,
+    where_obj: &Value,
+    existing_ids: Option<&HashSet<Vec<u8>>>,
+) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
+    // Сортируем поля по приоритету индексов
+    let mut fields_with_cond = fields_with_cond;
+    fields_with_cond.sort_by_key(|f| {
+        if f.get_field_index().is_some() { 0 }
+        else if f.get_rev_index().is_some() { 1 }
+        else if f.id_idx.is_some() { 2 }
+        else { 3 }
+    });
+
+    let mut current_ids: Option<HashSet<Vec<u8>>> = existing_ids.map(|s| s.clone());
+
+    for field in fields_with_cond {
+        let where_field = where_obj.get(&field.name).unwrap();
+
+        let ids_for_field: Vec<Vec<u8>> = if let Some((st_ref, aliases)) = &field.injected_fields {
+            if !where_field.is_object() {
+                return Err(ParseWhereError::TypeMismatch {
+                    _field: field.full_name.clone(),
+                    _expected: "object with field conditions".into(),
+                });
+            }
+
+            let field_def = ctx.db.schema.get_field(st_ref);
+
+            let st_entity = match &field_def.ty {
+                FieldType::Struct(st) | FieldType::StructList(st) => st,
+                _ => {
+                    return Err(ParseWhereError::TypeMismatch {
+                        _field: field.full_name.clone(),
+                        _expected: "struct or struct list".into(),
+                    });
+                }
+            };
+
+            let current_model_index = match &field.ty {
+                FieldType::ModelRefList(idx) => *idx,
+                FieldType::StructList(_) => {
+                    return Err(ParseWhereError::TypeMismatch {
+                        _field: field.full_name.clone(),
+                        _expected: "ModelRefList with inject".into(),
+                    });
+                }
+                _ => unreachable!(),
+            };
+
+            let parent_field = st_entity.fields.iter()
+                .find(|f| matches!(&f.ty, FieldType::ModelRef(idx) if *idx == current_model_index))
+                .ok_or_else(|| {
+                    ParseWhereError::TypeMismatch {
+                        _field: field.full_name.clone(),
+                        _expected: format!("struct {} must have a reference to model {}", st_entity.name, model.name),
+                    }
+                })?;
+
+            let parent_id_idx = parent_field.id_idx.expect("reference field must be @id");
+
+            let alias_to_field: HashMap<&String, String> = aliases
+                .iter()
+                .map(|(full_name, alias)| {
+                    let field_name = full_name.split('.').last().unwrap().to_string();
+                    (alias, field_name)
+                })
+                .collect();
+
+            let mut transformed_map = serde_json::Map::new();
+            if let Some(obj) = where_field.as_object() {
+                for (key, value) in obj {
+                    if key.starts_with('$') {
+                        transformed_map.insert(key.clone(), value.clone());
+                    } else if let Some(real_field) = alias_to_field.get(key) {
+                        transformed_map.insert(real_field.clone(), value.clone());
+                    } else {
+                        return Err(ParseWhereError::TypeMismatch {
+                            _field: field.full_name.clone(),
+                            _expected: format!("unknown field alias '{}'", key),
+                        });
+                    }
+                }
+            }
+
+            let sub_where = Value::Object(serde_json::Map::from_iter(vec![
+                ("$where".to_string(), Value::Object(transformed_map))
+            ]));
+
+            let keys_opt = parse_where(ctx, st_entity, &sub_where, None)?;
+            let keys = keys_opt.unwrap_or_default();
+
+            let parent_ids: Vec<Vec<u8>> = keys
+                .into_iter()
+                .map(|key| {
+                    let start = parent_id_idx * 8;
+                    key[start + 8..start + 16].to_vec()
+                })
+                .collect();
+
+            parent_ids
+        
+        } else {
+            match &field.ty {
+                _ if field.attributes.iter().any(|a| matches!(a, Attribute::VectorIndex(_))) => {
+                    let vector_index_type = field.attributes.iter().find_map(|f| {
+                        if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
+                    }).unwrap();
+                    let (_primitive_type, &size) = match &field.ty {
+                        FieldType::PrimitiveFixedList(primitive_type, size) => (primitive_type, size),
+                        _ => panic!("Wrong field type {}. Expected fixed list", field.full_name),
+                    };
+                    let point = where_field
+                        .as_object()
+                        .and_then(|obj| obj.get("$close"))
+                        .and_then(|close| close.as_array())
+                        .filter(|arr| arr.len() == size)
+                        .and_then(|arr| {
+                            let mut points = Vec::with_capacity(arr.len());
+                            for i in arr {
+                                let Some(f) = i.as_f64() else { return None };
+                                points.push(f as f32);
+                            }
+                            Some(points)
+                        })
+                        .ok_or_else(|| ParseWhereError::TypeMismatch {
+                            _field: field.full_name.clone(),
+                            _expected: format!("{{ $close: f32[{size}] }}"),
+                        })?;
+                    let take = where_field
+                        .get("$take")
+                        .and_then(|f| f.as_u64())
+                        .unwrap_or(10);
+                    let threshold = where_field
+                        .get("$threshold")
+                        .and_then(|f| f.as_f64())
+                        .unwrap_or(0.0) as f32;
+
+                    let ids = {
+                        let rx = ctx.db.db.begin_read().unwrap();
+                        let index_name = [&field.full_name, ".vectorindex"].concat();
+                        let tree = rx.get_tree(index_name.as_bytes()).unwrap().unwrap();
+                        let distance = match vector_index_type {
+                            VectorIndexType::Cosine => CustomDistance::Cosine,
+                            VectorIndexType::Euclidean => CustomDistance::Euclidean,
+                        };
+                        ctx.find_nearest_points(&tree, &point, take as usize, distance, threshold)
+                            .into_iter()
+                            .map(|(id, _)| id)
+                            .collect()
+                    };
+                    ids
+                }
+
+                FieldType::ModelRefList(_) => {
+                    if let Some(all_array) = where_field.get("$all").and_then(|v| v.as_array()) {
+                        process_all_condition(ctx, field, all_array)?
+                    } else if where_field.is_array() {
+                        let all_array = where_field.as_array().unwrap();
+                        process_all_condition(ctx, field, all_array)?
+                    } else if where_field.is_number() || where_field.is_object() {
+                        let arr = vec![where_field.clone()];
+                        process_all_condition(ctx, field, &arr)?
+                    } else {
+                        return Err(ParseWhereError::TypeMismatch {
+                            _field: field.full_name.clone(),
+                            _expected: "array or object with $all".into(),
+                        });
+                    }
+                }
+
+                FieldType::ModelRef(_) => {
+                    let ops = parse_conditions(field, where_field)?;
+                    if ops.is_empty() {
+                        continue;
+                    }
+                    get_ids_for_condition(ctx, model, field, ops, current_ids.as_ref())?
+                }
+
+                FieldType::Struct(st) => {
+                    let cond_obj = where_field.as_object().ok_or_else(|| ParseWhereError::TypeMismatch {
+                        _field: field.full_name.clone(),
+                        _expected: "object with field conditions".into(),
+                    })?;
+                    let sub_where = Value::Object(serde_json::Map::from_iter(vec![
+                        ("$where".to_string(), Value::Object(cond_obj.clone()))
+                    ]));
+                    match parse_where(ctx, st, &sub_where, current_ids.as_ref())? {
+                        Some(ids) => ids,
+                        None => continue,
+                    }
+                }
+
+                FieldType::StructList(st) => {
+                    let cond_obj = where_field.as_object().ok_or_else(|| ParseWhereError::TypeMismatch {
+                        _field: field.full_name.clone(),
+                        _expected: "object with operators or field conditions".into(),
+                    })?;
+
+                    if let Some(all_array) = cond_obj.get("$all").and_then(|v| v.as_array()) {
+                        if all_array.is_empty() {
+                            vec![] // пустой $all не даёт результатов
+                        } else {
+                            // получаем родителей для первого элемента
+                            let first_parents = get_parent_ids_for_struct_list_condition(ctx, st, &all_array[0], current_ids.as_ref())?;
+                            let mut candidate_parents: HashSet<Vec<u8>> = first_parents.into_iter().collect();
+
+                            if candidate_parents.is_empty() {
+                                vec![]
+                            } else {
+                                let id_field = st.fields.iter()
+                                    .find(|f| f.id_idx.is_some() && !f.name.starts_with('@'))
+                                    .ok_or_else(|| ParseWhereError::TypeMismatch {
+                                        _field: st.name.clone(),
+                                        _expected: "структура должна иметь поле-идентификатор элемента (не родительское)".into(),
+                                    })?;
+
+                                let rx = ctx.db.db.begin_read().unwrap();
+                                let tree = rx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+
+                                for elem in &all_array[1..] {
+                                    let cond_val = parse_condition_value(id_field, elem)?;
+                                    let encoded_child = encode_condition_value(id_field, &cond_val)?;
+
+                                    let mut surviving_parents = HashSet::new();
+                                    for parent_id in &candidate_parents {
+                                        let mut key = parent_id.clone();
+                                        key.extend_from_slice(&encoded_child);
+                                        if tree.get(&key).unwrap().is_some() {
+                                            surviving_parents.insert(parent_id.clone());
+                                        }
+                                    }
+                                    candidate_parents = surviving_parents;
+
+                                    if candidate_parents.is_empty() {
+                                        break;
+                                    }
+                                }
+                                candidate_parents.into_iter().collect()
+                            }
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+
+                _ => {
+                    let ops = parse_conditions(field, where_field)?;
+                    if ops.is_empty() {
+                        continue;
+                    }
+                    get_ids_for_condition(ctx, model, field, ops, current_ids.as_ref())?
+                }
+            }
+        };
+
+        if ids_for_field.is_empty() {
+            if current_ids.is_some() {
+                return Ok(Some(vec![]));
+            } else {
+                return Ok(Some(vec![]));
+            }
+        } else {
+            let new_set: HashSet<_> = ids_for_field.into_iter().collect();
+            current_ids = match current_ids {
+                Some(prev) => {
+                    let intersected: HashSet<_> = prev.intersection(&new_set).cloned().collect();
+                    if intersected.is_empty() {
+                        return Ok(Some(vec![]));
+                    }
+                    Some(intersected)
+                }
+                None => Some(new_set),
+            };
+        }
     }
 
-    Ok(result.map(|set| set.into_iter().collect()))
+    Ok(current_ids.map(|set| set.into_iter().collect()))
 }
 
 fn get_ids_by_scanning(
@@ -1042,68 +1341,75 @@ fn get_ids_by_scanning(
     ops: &[(Operator, ConditionValue)],
     existing_ids: Option<&HashSet<Vec<u8>>>,
 ) -> Result<Vec<Vec<u8>>, ParseWhereError> {
-    println!("[get_ids_by_scanning] >>> Starting full scan for field '{}' on model '{}'", field.name, model.name);
-    println!("[get_ids_by_scanning] Conditions ({} ops): {:?}", ops.len(), ops);
-
     let rx = ctx.db.db.begin_read().unwrap();
     let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
     // Определяем, какие ID проверять
     let ids_to_check: Vec<Vec<u8>> = if let Some(existing) = existing_ids {
-        println!("[get_ids_by_scanning] Using existing_ids set of size {}", existing.len());
         existing.iter().cloned().collect()
     } else {
-        println!("[get_ids_by_scanning] No existing_ids – scanning all keys from tree");
         tree.keys().unwrap().map(|k| k.unwrap().to_vec()).collect()
     };
-    println!("[get_ids_by_scanning] Total IDs to check: {}", ids_to_check.len());
 
     let mut ids = Vec::new();
     for id in ids_to_check {
         // Получаем данные записи по ID
         let data = match tree.get(&id).unwrap() {
             Some(d) => d,
-            None => {
-                println!("[get_ids_by_scanning]   ID {:02x?} – data not found (skipping)", id);
-                continue;
-            }
+            None => continue,
         };
 
         // Извлекаем значение поля
         let value_opt = get_value_from_data(field, &id, &data, field.get_size());
         let cond_value = if let Some(bytes) = value_opt {
             match decode_field_value(field, bytes) {
-                Ok(val) => {
-                    println!("[get_ids_by_scanning]   ID {:02x?} – extracted value bytes: {:?}, decoded: {:?}", id, bytes, val);
-                    val
-                }
-                Err(e) => {
-                    println!("[get_ids_by_scanning]   ID {:02x?} – ERROR decoding value: {:?}", id, e);
-                    return Err(e);
-                }
+                Ok(val) => val,
+                Err(e) => return Err(e),
             }
         } else {
-            println!("[get_ids_by_scanning]   ID {:02x?} – value is NULL", id);
             ConditionValue::Null
         };
 
         // Проверяем условия
-        let passes = ops.iter().all(|(op, target)| {
-            let result = check_condition(&cond_value, op, target);
-            println!("[get_ids_by_scanning]     condition {:?} {:?} -> {}", op, target, result);
-            result
-        });
+        let passes = ops.iter().all(|(op, target)| check_condition(&cond_value, op, target));
 
         if passes {
-            println!("[get_ids_by_scanning]   --> ID {:02x?} PASSED, adding to result", id);
             ids.push(id);
-        } else {
-            println!("[get_ids_by_scanning]   --> ID {:02x?} FAILED", id);
         }
     }
 
-    println!("[get_ids_by_scanning] <<< Finished. Found {} matching IDs", ids.len());
     Ok(ids)
+}
+
+fn condition_priority(model: &Entity, cond: &Value) -> u8 {
+    let obj = match cond.as_object() {
+        Some(o) => o,
+        None => return 3,
+    };
+    let mut best = 3;
+    for (key, _) in obj {
+        if key.starts_with('$') {
+            continue; // операторы не дают индекса напрямую
+        }
+        if let Some(field) = model.fields.iter().find(|f| f.name == *key) {
+            let prio = if field.get_field_index().is_some() {
+                0
+            } else if field.get_rev_index().is_some() {
+                1
+            } else if field.id_idx.is_some() {
+                2
+            } else {
+                3
+            };
+            if prio < best {
+                best = prio;
+                if best == 0 {
+                    return 0;
+                }
+            }
+        }
+    }
+    best
 }
 
 fn eval_and(
@@ -1112,21 +1418,15 @@ fn eval_and(
     conditions: &[Value],
     existing_ids: Option<&HashSet<Vec<u8>>>,
 ) -> Result<Option<Vec<Vec<u8>>>, ParseWhereError> {
-    println!("[eval_and] >>> Entering with model '{}'", model.name);
-    if let Some(existing) = existing_ids {
-        println!("[eval_and] Initial existing_ids size: {}", existing.len());
-    } else {
-        println!("[eval_and] No initial existing_ids, will start from first condition");
-    }
-    println!("[eval_and] Number of AND conditions: {}", conditions.len());
-    println!("[eval_and] All AND conditions: {:?}", conditions); // <-- added line
+    // Сортируем условия по приоритету индексов
+    let mut conditions_with_prio: Vec<(u8, &Value)> = conditions.iter()
+        .map(|c| (condition_priority(model, c), c))
+        .collect();
+    conditions_with_prio.sort_by_key(|(p, _)| *p);
 
     let mut current_ids: Option<HashSet<Vec<u8>>> = existing_ids.map(|s| s.clone());
 
-    for (i, cond) in conditions.iter().enumerate() {
-        println!("[eval_and] --- Processing condition #{} ---", i + 1);
-        println!("[eval_and] Condition #{} value: {:?}", i + 1, cond);
-
+    for (_, cond) in conditions_with_prio {
         let ids_opt = parse_where(
             ctx,
             model,
@@ -1138,38 +1438,23 @@ fn eval_and(
 
         match ids_opt {
             Some(ids) => {
-                println!("[eval_and]   Condition #{} returned {} IDs", i + 1, ids.len());
                 let new_set: HashSet<_> = ids.into_iter().collect();
                 current_ids = Some(match current_ids {
                     Some(prev) => {
-                        let intersection_size_before = prev.len();
-                        let result: HashSet<_> = prev.intersection(&new_set).cloned().collect();
-                        println!("[eval_and]   Intersected previous set (size {}) with new set (size {}) -> result size {}",
-                            intersection_size_before, new_set.len(), result.len());
-                        result
+                        let intersected: HashSet<_> = prev.intersection(&new_set).cloned().collect();
+                        intersected
                     }
-                    None => {
-                        println!("[eval_and]   First condition – set becomes size {}", new_set.len());
-                        new_set
-                    }
+                    None => new_set,
                 });
 
-                // если пересечение пусто – можно сразу вернуть пустой результат
                 if current_ids.as_ref().map_or(false, |s| s.is_empty()) {
-                    println!("[eval_and]   Intersection is empty, returning empty result early");
                     return Ok(Some(vec![]));
                 }
             }
-            None => {
-                println!("[eval_and]   Condition #{} returned None (no restriction) – set unchanged", i + 1);
-                // условие не накладывает ограничений – оставляем текущий набор без изменений
-                continue;
-            }
+            None => continue, // условие не накладывает ограничений
         }
     }
 
-    let final_count = current_ids.as_ref().map(|s| s.len()).unwrap_or(0);
-    println!("[eval_and] <<< Finished, final set size: {}", final_count);
     Ok(current_ids.map(|set| set.into_iter().collect()))
 }
 

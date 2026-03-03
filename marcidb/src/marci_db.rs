@@ -224,8 +224,6 @@ impl MarciDB {
 
     // Обновляем индексы
     for index in indexes {
-      println!("Insert index to {:#?} {:?}", str::from_utf8(index.tree_name).unwrap(), index.key);
-
       let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
       index_tree.insert(&index.key, &[1]).unwrap();
     }
@@ -235,130 +233,23 @@ impl MarciDB {
     return Ok(())
   }
 
- pub fn get_all<U, F>(
+pub fn get_all<U, F>(
     &self,
     model: &Entity,
     select: &MarciSelect,
     f: F
 ) -> Vec<U>
 where
-  F: Fn(DecodeCtx<'_, U>) -> U,
+    F: Fn(DecodeCtx<'_, U>) -> U,
 {
-    println!("=== GET_ALL: {} ===", model.name);
-
     let rx = self.db.begin_read().unwrap();
     let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-
-    // Вывод информации о созданных индексах модели
-    println!("\nИндексы модели {}:", model.name);
-    for (field_index, field) in model.fields.iter().enumerate() {
-        if field.inserted_indexes.is_empty() {
-            continue;
-        }
-
-        println!("  Поле '{}' (index: {}):", field.name, field_index);
-
-        if let Some(direct) = field.get_direct_index() {
-            let index_tree = rx.get_tree(direct.tree_name()).unwrap();
-            if let Some(index_tree) = index_tree {
-                let keys: Vec<_> = index_tree.keys().unwrap()
-                    .map(|k| k.unwrap().to_vec())
-                    .collect();
-                println!("    - Direct индекс '{}': {} записей", direct.tree_name, keys.len());
-                for (i, key) in keys.iter().enumerate() {
-                    println!("      [{}] {:?} (len: {})", i, key, key.len());
-                    if key.len() >= 8 {
-                        let id = u64::from_be_bytes(key[..8].try_into().unwrap());
-                        println!("          ID prefix: {}", id);
-                        if key.len() >= 16 {
-                            let value = u64::from_be_bytes(key[8..16].try_into().unwrap());
-                            println!("          Value: {}", value);
-                        }
-                    }
-                }
-            } else {
-                println!("    - Direct индекс '{}': дерево не найдено", direct.tree_name);
-            }
-        }
-
-        if let Some(rev) = field.get_rev_index() {
-            let index_tree = rx.get_tree(rev.tree_name()).unwrap();
-            if let Some(index_tree) = index_tree {
-                let keys: Vec<_> = index_tree.keys().unwrap()
-                    .map(|k| k.unwrap().to_vec())
-                    .collect();
-                println!("    - Reverse индекс '{}': {} записей", rev.tree_name, keys.len());
-                for (i, key) in keys.iter().enumerate() {
-                    println!("      [{}] {:?} (len: {})", i, key, key.len());
-                    if key.len() >= 8 {
-                        let value = u64::from_be_bytes(key[..8].try_into().unwrap());
-                        println!("          Value prefix: {}", value);
-                        if key.len() >= 16 {
-                            let id = u64::from_be_bytes(key[8..16].try_into().unwrap());
-                            println!("          ID: {}", id);
-                        }
-                    }
-                }
-            } else {
-                println!("    - Reverse индекс '{}': дерево не найдено", rev.tree_name);
-            }
-        }
-
-        if let Some(field_idx) = field.get_field_index() {
-            let index_tree = rx.get_tree(field_idx.tree_name()).unwrap();
-            if let Some(index_tree) = index_tree {
-                let keys: Vec<_> = index_tree.keys().unwrap()
-                    .map(|k| k.unwrap().to_vec())
-                    .collect();
-                println!("    - Field индекс '{}': {} записей", field_idx.tree_name, keys.len());
-                for (i, key) in keys.iter().enumerate() {
-                    println!("      [{}] {:?} (len: {})", i, key, key.len());
-
-                    // Для field индекса структура: [value][null-terminator?][id]
-                    // ID всегда последние 8 байт
-                    if key.len() >= 8 {
-                        let id_start = key.len() - 8;
-                        let id = u64::from_be_bytes(key[id_start..].try_into().unwrap());
-                        println!("          ID (last 8 bytes): {}", id);
-
-                        // Выводим значение (всё до ID)
-                        let value_bytes = &key[..id_start];
-                        println!("          Value bytes: {:?}", value_bytes);
-
-                        // Пытаемся интерпретировать как строку (если это строковое поле)
-                        if let Ok(s) = std::str::from_utf8(value_bytes) {
-                            println!("          Value as string: '{}'", s.trim_end_matches('\0'));
-                        }
-                    }
-                }
-            } else {
-                println!("    - Field индекс '{}': дерево не найдено", field_idx.tree_name);
-            }
-        }
-    }
-
-    let record_count = tree.iter().unwrap().count();
-    println!("\nОсновное дерево '{}': {} записей", model.name, record_count);
-
-    // Выводим ключи основного дерева
-    println!("Ключи основного дерева:");
-    for (i, key) in tree.keys().unwrap().enumerate() {
-        let key = key.unwrap();
-        println!("  [{}] {:?} (len: {})", i, key, key.len());
-        if key.len() >= 8 {
-            let id = u64::from_be_bytes(key[..8].try_into().unwrap());
-            println!("      ID: {}", id);
-        }
-    }
-
-    println!("=================================\n");
 
     let mut tctx = TransationContext::new(&rx, f);
     let mut ctx = ProcessDataContext::new(select);
 
     tree.iter().unwrap().map(|item| {
         let (id, value) = item.unwrap();
-
         process_data(&id, &value, model, &mut tctx, &mut ctx, None)
     }).collect()
 }
@@ -420,347 +311,235 @@ where
   }
 
 pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<(), InsertError> {
+    let foreign_keys = collect_foreign_keys(id, new_data, model, structs, &self.schema);
 
-  println!("=== UPDATE START ===");
-  println!("Model: {}", model.name);
-  println!("ID: {:?}", id);
-  println!("New data length: {}", new_data.len());
-  println!("Changed mask: {:?}", changed_mask);
-  println!("Structs count: {}", structs.len());
+    let mut indexes = get_indexes(new_data, id, model, None);
 
-  let foreign_keys = collect_foreign_keys(id, new_data, model, structs, &self.schema);
-  println!("Foreign keys collected: {}", foreign_keys.len());
-
-  let mut indexes = get_indexes(new_data, id, model, None);
-  println!("Initial indexes count: {}", indexes.len());
-
-  for st in structs {
-    match st {
-      InsertStruct::One { st, data, .. } => {
-        println!("Processing InsertStruct::One for struct: {}", st.name);
-        let new_indexes = get_indexes(data, id, *st, None);
-        println!("  Added {} indexes", new_indexes.len());
-        indexes.extend(new_indexes);
-      }
-      _ => {}
-    }
-  }
-  println!("Total indexes after collection: {}", indexes.len());
-
-  let mut indexes_to_remove = vec![];
-
-  println!("Beginning transaction...");
-  let tx = self.db.begin_write().unwrap();
-
-  println!("Checking foreign keys...");
-  check_foreign_keys(&tx, &foreign_keys)?;
-  println!("Foreign keys OK");
-
-  {
-    println!("Opening main tree: {}", model.name);
-    let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-
-    println!("Fetching existing data...");
-    let Some(data) = tree.get(id).unwrap() else {
-      println!("ERROR: Item not found!");
-      return Err(InsertError::ItemNotFound)
-    };
-    println!("Existing data length: {}", data.len());
-
-    for (field_index, field) in model.fields.iter().enumerate() {
-        if !field.is_unique { continue; }
-        let Some(field_index_tree) = field.get_field_index() else { continue; };
-
-        if !changed_mask[field_index] {
-            continue; // поле не изменилось
-        }
-
-        let Some(new_value) = get_value_from_data(field, id, new_data, field.get_size()) else {
-            // новое значение NULL – уникальность не нарушается
-            continue;
-        };
-
-        let prefix = make_index_prefix(field, new_value);
-        let index_tree = tx.get_tree(field_index_tree.tree_name()).unwrap().unwrap();
-        let mut iter = index_tree.prefix_keys(&prefix).unwrap();
-        let mut conflict = false;
-        for key in iter {
-            let key = key.unwrap();
-            if key.len() < 8 { continue; }
-            let other_id = &key[key.len()-8..];
-            if other_id != id {
-                conflict = true;
-                break;
+    for st in structs {
+        match st {
+            InsertStruct::One { st, data, .. } => {
+                let new_indexes = get_indexes(data, id, *st, None);
+                indexes.extend(new_indexes);
             }
-        }
-        if conflict {
-            return Err(InsertError::UniqueViolation(field.full_name.clone(), new_value.to_vec()));
+            _ => {}
         }
     }
 
-    let updated_data = update_data(&model, &data, new_data, &changed_mask);
-    println!("Updated data length: {}", updated_data.len());
-
-    tree.insert(id, &updated_data).unwrap();
-    println!("Data inserted successfully");
-
-    let old_indexes = get_indexes(&data, id, model, Some(&changed_mask));
-    println!("Old indexes to remove: {}", old_indexes.len());
-    indexes_to_remove.extend(old_indexes);
-  };
-
-  println!("\n--- Processing dependent structs ---");
-  // Добавляем зависимые структуры
-  for (i, st) in structs.iter().enumerate() {
-    println!("Struct #{}: {:?}", i, std::mem::discriminant(st));
-    match st {
-      InsertStruct::Empty { st } => {
-          println!("  Empty struct: {}", st.name);
-
-          // Удаляем все индексы для полей структуры
-          for field in st.fields.iter() {
-              if field.inserted_indexes.is_empty() {
-                  continue;
-              }
-              println!("    Removing indexes for field: {}", field.name);
-              remove_indexes(&tx, &self.schema, st, field, id);
-          }
-
-          // Удаляем сами записи структуры
-          let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          let end = increment_bytes_be(id);
-          struct_tree.delete_range(id..&end).unwrap();
-          println!("  Struct records deleted");
-      }
-      InsertStruct::Many { st, data: new_data, .. } => {
-          println!("  Many struct: {}, items: {}", st.name, new_data.len());
-
-          // Удаляем все индексы для полей структуры
-          for field in st.fields.iter() {
-              if field.inserted_indexes.is_empty() {
-                  continue;
-              }
-              println!("    Removing indexes for field: {}", field.name);
-              remove_indexes(&tx, &self.schema, st, field, id);
-          }
-
-          // Удаляем старые записи структуры
-          let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          let end = increment_bytes_be(id);
-          struct_tree.delete_range(id..&end).unwrap();
-          println!("    Old struct records deleted");
-
-          // Добавляем новые записи
-          for (idx, (item_id, item_data)) in new_data.iter().enumerate() {
-              let mut new_item_id = item_id.clone();
-              new_item_id[0..8].copy_from_slice(id);
-
-              println!("    Item #{}: ID before counter: {:?}", idx, &new_item_id[..16.min(new_item_id.len())]);
-              self.insert_counter_value(*st, &mut new_item_id);
-              println!("    Item #{}: ID after counter: {:?}", idx, &new_item_id[..16.min(new_item_id.len())]);
-
-              struct_tree.insert(&new_item_id, item_data).unwrap();
-
-              let item_indexes = get_indexes(item_data, &new_item_id, *st, None);
-              println!("    Item #{}: Added {} indexes", idx, item_indexes.len());
-              indexes.extend(item_indexes);
-          }
-
-          println!("    Many struct processing complete");
-      }
-      InsertStruct::One { st, data: new_data, changed_mask } => {
-        println!("  One struct: {}", st.name);
-        let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-        if let Some(data) = tree.get(id).unwrap() {
-          println!("    Existing data found, updating...");
-          let updated_data = update_data(&st, &data.as_ref(), new_data, &changed_mask);
-          tree.insert(id, &updated_data).unwrap();
-
-          let old_indexes = get_indexes(&data, id, *st, Some(&changed_mask));
-          println!("    Old indexes to remove: {}", old_indexes.len());
-          indexes_to_remove.extend(old_indexes);
-        } else {
-          println!("    No existing data, inserting new...");
-          tree.insert(id, new_data).unwrap()
-        }
-      }
-      InsertStruct::Connect { field, ids, model, .. } => {
-        println!("  Connect: field={}, model={}, ids count={}", field.name, model.name, ids.len());
-        remove_indexes(&tx, &self.schema, model, &field, id);
-        insert_indexes(&tx, field, id, ids);
-        println!("    Indexes updated");
-      },
-      InsertStruct::None { st } => {
-        println!("  None struct: {}", st.name);
-        let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-        tree.delete(id).unwrap();
-        println!("    Deleted");
-      },
-      _ => {
-        println!("  Other struct variant");
-      }
-    }
-  }
-
-  println!("\n--- Removing old indexes ---");
-  println!("Total indexes to remove: {}", indexes_to_remove.len());
-  for (i, index) in indexes_to_remove.iter().enumerate() {
-    println!("  Removing index #{}: tree={}, key_len={}", i,
-             String::from_utf8_lossy(index.tree_name), index.key.len());
-    let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
-    index_tree.delete(&index.key).unwrap();
-  }
-
-  println!("\n--- Inserting new indexes ---");
-  println!("Total indexes to insert: {}", indexes.len());
-  for (i, index) in indexes.iter().enumerate() {
-    println!("  Inserting index #{}: tree={}, key_len={}", i,
-             String::from_utf8_lossy(index.tree_name), index.key.len());
-    let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
-    index_tree.insert(&index.key, &[1]).unwrap();
-  }
-
-  println!("\nCommitting transaction...");
-  tx.commit().unwrap();
-  println!("=== UPDATE COMPLETE ===\n");
-
-  return Ok(());
-}
-
-pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<(), DeleteError> {
-    println!("=== НАЧАЛО УДАЛЕНИЯ ===");
-    println!("Модель: {}, ID: {:?}", model.name, id);
+    let mut indexes_to_remove = vec![];
 
     let tx = self.db.begin_write().unwrap();
 
-    println!("\n2. Обработка полей модели:");
+    check_foreign_keys(&tx, &foreign_keys)?;
+
+    {
+        let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+
+        let Some(data) = tree.get(id).unwrap() else {
+            return Err(InsertError::ItemNotFound)
+        };
+
+        for (field_index, field) in model.fields.iter().enumerate() {
+            if !field.is_unique { continue; }
+            let Some(field_index_tree) = field.get_field_index() else { continue; };
+
+            if !changed_mask[field_index] {
+                continue;
+            }
+
+            let Some(new_value) = get_value_from_data(field, id, new_data, field.get_size()) else {
+                continue;
+            };
+
+            let prefix = make_index_prefix(field, new_value);
+            let index_tree = tx.get_tree(field_index_tree.tree_name()).unwrap().unwrap();
+            let iter = index_tree.prefix_keys(&prefix).unwrap();
+            let mut conflict = false;
+            for key in iter {
+                let key = key.unwrap();
+                if key.len() < 8 { continue; }
+                let other_id = &key[key.len()-8..];
+                if other_id != id {
+                    conflict = true;
+                    break;
+                }
+            }
+            if conflict {
+                return Err(InsertError::UniqueViolation(field.full_name.clone(), new_value.to_vec()));
+            }
+        }
+
+        let updated_data = update_data(&model, &data, new_data, &changed_mask);
+
+        tree.insert(id, &updated_data).unwrap();
+
+        let old_indexes = get_indexes(&data, id, model, Some(&changed_mask));
+        indexes_to_remove.extend(old_indexes);
+    };
+
+    for st in structs.iter() {
+        match st {
+            InsertStruct::Empty { st } => {
+                for field in st.fields.iter() {
+                    if field.inserted_indexes.is_empty() {
+                        continue;
+                    }
+                    remove_indexes(&tx, &self.schema, st, field, id);
+                }
+
+                let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+                let end = increment_bytes_be(id);
+                struct_tree.delete_range(id..&end).unwrap();
+            }
+            InsertStruct::Many { st, data: new_data, .. } => {
+                for field in st.fields.iter() {
+                    if field.inserted_indexes.is_empty() {
+                        continue;
+                    }
+                    remove_indexes(&tx, &self.schema, st, field, id);
+                }
+
+                let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+                let end = increment_bytes_be(id);
+                struct_tree.delete_range(id..&end).unwrap();
+
+                for (item_id, item_data) in new_data.iter() {
+                    let mut new_item_id = item_id.clone();
+                    new_item_id[0..8].copy_from_slice(id);
+
+                    self.insert_counter_value(*st, &mut new_item_id);
+
+                    struct_tree.insert(&new_item_id, item_data).unwrap();
+            
+                    let item_indexes = get_indexes(item_data, &new_item_id, *st, None);
+                    indexes.extend(item_indexes);
+                }
+            }
+            InsertStruct::One { st, data: new_data, changed_mask } => {
+                let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+                if let Some(data) = tree.get(id).unwrap() {
+                    let updated_data = update_data(&st, &data.as_ref(), new_data, &changed_mask);
+                    tree.insert(id, &updated_data).unwrap();
+
+                    let old_indexes = get_indexes(&data, id, *st, Some(&changed_mask));
+                    indexes_to_remove.extend(old_indexes);
+                } else {
+                    tree.insert(id, new_data).unwrap()
+                }
+            }
+            InsertStruct::Connect { field, ids, model, .. } => {
+                remove_indexes(&tx, &self.schema, model, &field, id);
+                insert_indexes(&tx, field, id, ids);
+            },
+            InsertStruct::None { st } => {
+                let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
+                tree.delete(id).unwrap();
+            },
+            _ => {}
+        }
+    }
+
+    for index in indexes_to_remove.iter() {
+        let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
+        index_tree.delete(&index.key).unwrap();
+    }
+
+    for index in indexes.iter() {
+        let mut index_tree = tx.get_tree(index.tree_name).unwrap().unwrap();
+        index_tree.insert(&index.key, &[1]).unwrap();
+    }
+
+    tx.commit().unwrap();
+
+    Ok(())
+}
+
+pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<(), DeleteError> {
+    let tx = self.db.begin_write().unwrap();
+
     for field in model.fields.iter() {
-        println!("   - Поле '{}':", field.name);
         if let Some(field_index) = field.get_field_index() {
             let data_tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
 
             if let Some(data) = data_tree.get(id).unwrap() {
                 let known_size = field.get_size();
                 if let Some(value) = get_value_from_data(field, id, &data, known_size) {
-                    // Строим ключ индекса и удаляем его
                     let index_key = build_index_value(id, value, known_size.is_some());
                     let mut index_tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
                     index_tree.delete(&index_key).unwrap();
-                    println!("     ✓ Field индекс удален");
-                } else {
-                    println!("     ✗ Не удалось получить значение поля для удаления индекса");
                 }
-            } else {
-                // Это не должно происходить, так как запись должна существовать
-                println!("     ⚠️  Данные записи не найдены (уже удалены?)");
             }
-        } else {
-            println!("     ✗ Field индекс отсутствует");
         }
 
         match &field.ty {
             FieldType::Struct(st) => {
                 let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-                println!("   - Структура '{}': удаление по ключу {:?}", st.name, id);
                 tree.delete(id).unwrap();
-                println!("     ✓ Удалено");
             },
             FieldType::StructList(st) => {
                 let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
                 let end = increment_bytes_be(id);
-                println!("   - Список структур '{}': удаление диапазона {:?}..{:?}",
-                         st.name, id, end);
                 tree.delete_range(id..&end).unwrap();
-                println!("     ✓ Диапазон удален");
             }
-            _ => {
-                println!("   - Поле '{}': тип {:?} - пропускаем", field.name, field.ty);
-            }
+            _ => {}
         }
     }
 
     {
         let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-        println!("1. Удаление основной записи из дерева '{}'", model.name);
         if !tree.delete(id).unwrap() {
-            println!("   ОШИБКА: Запись не найдена");
             return Err(DeleteError::ItemNotFound);
         }
-        println!("   ✓ Запись удалена");
     }
 
-    println!("\n3. Обработка внешних ключей:");
     for (field_ref, constraint) in self.schema.foreign_bindings[model_index].iter() {
         let field = self.schema.get_field(field_ref);
         let entity = self.schema.get_field_entity(field_ref);
 
-        println!("   - Поле: {}, Сущность: {}, Ограничение: {:?}",
-                 field.name, entity.name, constraint);
         match &field.ty {
             FieldType::ModelRef(idx) => {
-                println!("     Тип: ModelRef, целевая модель: {}", *idx);
                 if *idx != model_index {
-                    println!("     ⚠️  Несоответствие индексов ({} != {}). Пропускаем", *idx, model_index);
                     continue;
                 }
 
                 let keys = match field.get_rev_index()  {
                     Some(rev_index) => {
-                        println!("     Поиск по reverse индексу: {}", rev_index.tree_name);
                         find_by_direct(&tx, rev_index.tree_name.as_bytes(), id)
                     }
                     None => {
-                        println!("     Поиск по значению поля");
                         find_keys_by_field(&tx, entity, field, id)
                     }
                 };
 
-                println!("     Найдено связанных записей: {}", keys.len());
-                if !keys.is_empty() {
-                    println!("     Ключи: {:?}", keys);
-                }
-
                 if keys.is_empty() {
-                    println!("     ✓ Нет связанных записей");
                     continue;
                 }
 
                 match constraint {
                     &DeleteConstraint::Cascade => {
-                        println!("     Действие: CASCADE - удаление всех связанных записей");
                         let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
                         for key in keys.iter() {
-                            println!("       Удаление ключа {:?} из {}", key, entity.name);
                             tree.delete(key).unwrap();
                         }
-                        println!("     ✓ Каскадное удаление {} документов из {}",
-                                keys.len(), entity.name);
                     }
                     &DeleteConstraint::SetNull => {
-                        println!("     Действие: SET NULL - установка поля в NULL");
                         let mut updates = Vec::new();
                         let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
                         for key in keys.iter() {
-                            println!("       Обработка ключа {:?}", key);
                             let data = tree.get(key).unwrap().unwrap();
                             let Some(new_data) = set_field_null(entity, &data,
                                                                 field_ref.field_index,
                                                                 field_ref.enum_variant_index) else {
-                                println!("       ⚠️  Не удалось установить NULL. Пропускаем.");
                                 continue;
                             };
                             updates.push((key.clone(), new_data));
-                            println!("       ✓ Данные подготовлены для обновления");
                         }
                         if !updates.is_empty() {
                             for (key, new_data) in updates {
                                 tree.insert(&key, &new_data).unwrap();
                             }
-                            println!("       ✓ Все поля установлены в NULL");
                         }
                     }
                     &DeleteConstraint::Restrict => {
-                        println!("     Действие: RESTRICT - запрет удаления");
                         let ids: Vec<u64> = keys.iter()
                             .filter_map(|key| {
                                 match key.len() {
@@ -776,68 +555,47 @@ pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<()
                                 }
                             })
                             .collect();
-                        println!("     ⚠️  Нарушение ограничения. Связанные ID: {:?}", ids);
                         return Err(DeleteError::RestrictConstraints(
                             field.full_name.clone(),
                             ids
                         ));
                     }
-                    _ => {
-                        println!("     Действие: {:?} - не обрабатывается", constraint);
-                    }
+                    _ => {}
                 }
             },
             FieldType::ModelRefList(idx) => {
-                println!("     Тип: ModelRefList, целевая модель: {}", *idx);
                 if *idx != model_index {
-                    println!("     ⚠️  Несоответствие индексов ({} != {}). Пропускаем", *idx, model_index);
                     continue;
                 }
 
                 let keys = match field.get_rev_index()  {
                     Some(rev_index) => {
-                        println!("     Поиск по reverse индексу: {}", rev_index.tree_name);
                         find_by_direct(&tx, rev_index.tree_name.as_bytes(), id)
                     }
                     None => match field.get_direct_index() {
                         Some(direct) => {
-                            println!("     Поиск по direct индексу: {}", direct.tree_name);
                             find_by_rev(&tx, direct.tree_name.as_bytes(), id, &self.schema)
                         },
                         None => {
-                            println!("     ⚠️  Индексы не найдены");
                             vec![]
                         }
                     }
                 };
 
-                println!("     Найдено ключей: {}", keys.len());
-                if !keys.is_empty() {
-                    println!("     Ключи: {:?}", keys);
-                }
-
                 if keys.is_empty() {
-                    println!("     ✓ Нет связанных записей");
                     continue;
                 }
 
                 match constraint {
                     &DeleteConstraint::Cascade => {
-                        println!("     ⚠️  ОШИБКА: Каскадное удаление не поддерживается для списков");
                         panic!("You cannot using cascade delete in list field {}", field.name)
                     }
                     &DeleteConstraint::RemoveItem => {
-                        println!("     Действие: REMOVE_ITEM - удаление из списка");
                         if let Some(direct_index) = field.get_direct_index() {
-                            println!("     Удаление индексов из дерева: {}", direct_index.tree_name);
                             remove_indexes_by_keys(&tx, id, &direct_index, &keys);
-                            println!("     ✓ Индексы удалены");
-                        } else {
-                            println!("     ⚠️  Reverse индекс не найден");
                         }
                     }
                     &DeleteConstraint::Restrict => {
-                        println!("     Действие: RESTRICT - запрет удаления");
                         let ids: Vec<u64> = keys.iter()
                             .filter_map(|key| {
                                 match key.len() {
@@ -853,39 +611,28 @@ pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<()
                                 }
                             })
                             .collect();
-                        println!("     ⚠️  Нарушение ограничения. Связанные ID: {:?}", ids);
                         return Err(DeleteError::RestrictConstraints(
                             field.full_name.clone(),
                             ids
                         ));
                     }
-                    _ => {
-                        println!("     Действие: {:?} - не обрабатывается", constraint);
-                    }
+                    _ => {}
                 }
             },
-            _ => {
-                println!("     Тип {:?} - не обрабатывается", field.ty);
-            }
+            _ => {}
         }
     }
 
-    println!("\n4. Удаление direct индексов для полей без ограничений:");
     for field in model.fields.iter() {
-        let Some(direct_index) = field.get_direct_index() else {
+        let Some(_direct_index) = field.get_direct_index() else {
             continue;
         };
-
-        println!("   - Поле '{}': удаление direct индекса '{}'", field.name, direct_index.tree_name);
         remove_indexes(&tx, &self.schema, model, field, id);
-        println!("     ✓ Индекс очищен");
     }
 
-    println!("\n5. Фиксация транзакции");
     tx.commit().unwrap();
 
-    println!("=== УДАЛЕНИЕ УСПЕШНО ЗАВЕРШЕНО ===");
-    return Ok(());
+    Ok(())
 }
 
 }
@@ -1059,171 +806,86 @@ pub fn find_by_direct(rx: &Transaction, tree_name: &[u8], item_id: &[u8]) -> Vec
 }
 
 #[inline(always)]
-/// **Перебирает** все ключи, и находит нужные
 pub fn find_by_rev(rx: &Transaction, tree_name: &[u8], item_id: &[u8], schema: &Schema) -> Vec<Vec<u8>> {
-  println!("[DEBUG] find_by_rev called");
-  println!("[DEBUG] tree_name: {:?} ({})", tree_name, str::from_utf8(tree_name).unwrap_or("<invalid UTF-8>"));
-  println!("[DEBUG] item_id: {:?} (len: {})", item_id, item_id.len());
+    let index_tree = rx.get_tree(tree_name).unwrap()
+        .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
 
-  let index_tree = rx.get_tree(tree_name).unwrap()
-    .unwrap_or_else(|| panic!("Index {} not found", str::from_utf8(tree_name).unwrap()));
+    let tree_name_str = str::from_utf8(tree_name).unwrap();
+    let model_name = tree_name_str.split('.').next().unwrap();
 
-  // Парсим имя дерева чтобы получить имя модели
-  // Формат: "Model.field" где Model - модель с direct индексом
-  let tree_name_str = str::from_utf8(tree_name).unwrap();
-  let model_name = tree_name_str.split('.').next().unwrap();
+    let target_model = schema.models.iter()
+        .find(|m| m.name == model_name)
+        .unwrap_or_else(|| panic!("Model {} not found in schema", model_name));
 
-  println!("[DEBUG] Parsed model name from tree: {}", model_name);
+    let key_min_size = target_model.key_min_size();
 
-  // Находим модель по имени
-  let target_model = schema.models.iter()
-    .find(|m| m.name == model_name)
-    .unwrap_or_else(|| panic!("Model {} not found in schema", model_name));
+    let mut arr = vec![];
 
-  let key_min_size = target_model.key_min_size();
-  println!("[DEBUG] Target model key_min_size: {}", key_min_size);
+    for key in index_tree.keys().unwrap() {
+        let key = key.unwrap();
 
-  println!("[DEBUG] Tree opened successfully");
+        if key.len() < key_min_size + item_id.len() {
+            continue;
+        }
 
-  let mut arr = vec![];
-  let mut total_keys = 0;
-  let mut matched_keys = 0;
+        let prefix = &key[..key_min_size];
+        let suffix = &key[key_min_size..];
 
-  for key in index_tree.keys().unwrap() {
-    let key = key.unwrap();
-    total_keys += 1;
-
-    println!("[DEBUG] Key #{}: {:?} (len: {})", total_keys, key, key.len());
-
-    // Проверяем, что ключ достаточно длинный
-    if key.len() < key_min_size + item_id.len() {
-      println!("[DEBUG]   - WARNING: Key too short, skipping");
-      continue;
+        if suffix.starts_with(item_id) {
+            arr.push(prefix.to_vec());
+        }
     }
 
-    let prefix = &key[..key_min_size];
-    let suffix = &key[key_min_size..];
-
-    println!("[DEBUG]   - Prefix ({} bytes): {:?}", key_min_size, prefix);
-    println!("[DEBUG]   - Suffix (from byte {} onwards): {:?}", key_min_size, suffix);
-
-    // Проверяем, что суффикс НАЧИНАЕТСЯ с item_id
-    if suffix.starts_with(item_id) {
-      matched_keys += 1;
-      println!("[DEBUG]   - MATCH FOUND! Adding prefix to result");
-      arr.push(prefix.to_vec());
-    } else {
-      println!("[DEBUG]   - No match");
-    }
-  }
-
-  println!("[DEBUG] Scan complete: {} total keys, {} matches", total_keys, matched_keys);
-  println!("[DEBUG] Returning {} results", arr.len());
-
-  return arr;
+    arr
 }
 
 fn find_keys_by_field(rx: &Transaction, entity: &Entity, field: &Field, value: &[u8]) -> Vec<Vec<u8>> {
-  println!("=== find_keys_by_field DEBUG ===");
-  println!("Entity: {}", entity.name);
-  println!("Field: {}", field.name);
-  println!("Search value: {:?} (len: {})", value, value.len());
-  println!("Field id_idx: {:?}", field.id_idx);
-  println!("Field offset_pos: {}", field.offset_pos);
+    let tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
 
-  let tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-  println!("Tree opened successfully");
+    let mut arr = vec![];
 
-  let mut arr = vec![];
+    if let Some(id_idx) = field.id_idx {
+        if id_idx == 0 {
+            return tree
+                .prefix_keys(&value)
+                .unwrap()
+                .map(|i| i.unwrap().to_vec())
+                .collect();
+        }
 
-  // Поиск по id_idx
-  if let Some(id_idx) = field.id_idx {
-    println!("Searching by id_idx: {}", id_idx);
-
-    if id_idx == 0 {
-      println!("Using prefix_keys search");
-      let results: Vec<Vec<u8>> = tree
-        .prefix_keys(&value)
-        .unwrap()
-        .map(|i| i.unwrap().to_vec())
-        .collect();
-      println!("Found {} results via prefix_keys", results.len());
-      return results;
+        for entry in tree.keys().unwrap() {
+            let id = entry.unwrap();
+            let extracted_value = get_value_from_id(&id, id_idx, field);
+            if extracted_value == value {
+                arr.push(id.to_vec());
+            }
+        }
+        return arr;
     }
 
-    println!("Iterating through all keys");
-    let mut checked = 0;
-    for entry in tree.keys().unwrap() {
-      let id = entry.unwrap();
-      let extracted_value = get_value_from_id(&id, id_idx, field);
-
-      if checked < 5 {  // Выводим первые 5 для примера
-        println!("  Key #{}: {:?}, extracted value: {:?}", checked, id, extracted_value);
-      }
-
-      if extracted_value == value {
-        println!("  ✓ MATCH found for key: {:?}", id);
-        arr.push(id.to_vec());
-      }
-      checked += 1;
-    }
-    println!("Checked {} keys, found {} matches", checked, arr.len());
-    return arr;
-  }
-
-  // Проверка виртуального поля
-  if field.offset_pos == 0 {
-    println!("⚠ Trying to find by virtual field {}", field.name);
-    return vec![];
-  }
-
-  // Поиск по offset_pos
-  println!("Searching by offset_pos: {}", field.offset_pos);
-  let mut checked = 0;
-
-  for entry in tree.iter().unwrap() {
-    let (id, data) = &entry.unwrap();
-
-    let offset = get_offset(data, field.offset_pos);
-
-    if checked < 5 {  // Выводим первые 5 для примера
-      println!("  Entry #{}: id={:?}, data_len={}, offset={}",
-               checked, id, data.len(), offset);
+    if field.offset_pos == 0 {
+        return vec![];
     }
 
-    if offset == 0 {
-      if checked < 5 {
-        println!("    Skipping (offset=0)");
-      }
-      checked += 1;
-      continue;
+    for entry in tree.iter().unwrap() {
+        let (id, data) = &entry.unwrap();
+        let offset = get_offset(data, field.offset_pos);
+
+        if offset == 0 {
+            continue;
+        }
+
+        if offset + value.len() > data.len() {
+            continue;
+        }
+
+        let data_slice = &data[offset..offset+value.len()];
+        if data_slice == value {
+            arr.push(id.to_vec());
+        }
     }
 
-    if offset + value.len() > data.len() {
-      println!("    ⚠ WARNING: offset({}) + value.len({}) > data.len({})",
-               offset, value.len(), data.len());
-      checked += 1;
-      continue;
-    }
-
-    let data_slice = &data[offset..offset+value.len()];
-
-    if checked < 5 {
-      println!("    Comparing data_slice={:?} with value={:?}", data_slice, value);
-    }
-
-    if data_slice == value {
-      println!("  ✓ MATCH found for id: {:?}", id);
-      arr.push(id.to_vec());
-    }
-
-    checked += 1;
-  }
-
-  println!("Checked {} entries, found {} matches", checked, arr.len());
-  println!("=== END DEBUG ===\n");
-
-  return arr;
+    arr
 }
 
 // #[inline(always)]
@@ -1260,92 +922,47 @@ struct IndexData<'a> {
 #[inline(always)]
 /// В этой функции собираем все индексы с данных. Обычно это собирается только с OneToMany
 fn get_indexes<'a>(data: &[u8], id: &[u8], model: &'a Entity, mask: Option<&BitVec>) -> Vec<IndexData<'a>> {
-
-    println!("  >> get_indexes called");
-    println!("     Model: {}", model.name);
-    println!("     ID: {:?}", id);
-    println!("     Data length: {}", data.len());
-    println!("     Mask: {:?}", mask);
-    println!("     Total fields: {}", model.fields.len());
-
     let mut indexes = vec![];
-    let mut skipped_no_indexes = 0;
-    let mut skipped_derived = 0;
-    let mut skipped_not_changed = 0;
-    let mut skipped_no_value = 0;
 
-    for (field_index, field) in model.fields.iter().enumerate(){
+    for (field_index, field) in model.fields.iter().enumerate() {
+        if field.inserted_indexes.is_empty() {
+            continue;
+        }
 
-      println!("     Field #{} ({}): checking...", field_index, field.name);
+        if field.id_idx.is_none() && field.offset_pos == 0 {
+            continue;
+        }
 
-      // Skip values without indexes
-      if field.inserted_indexes.is_empty() {
-        println!("       -> Skipped: no indexes");
-        skipped_no_indexes += 1;
-        continue;
-      }
+        if mask.is_some_and(|f| !f[field_index]) {
+            continue;
+        }
 
-      // Skip derived values
-      if field.id_idx.is_none() && field.offset_pos == 0 {
-        println!("       -> Skipped: derived value (id_idx={:?}, offset_pos={})",
-                 field.id_idx, field.offset_pos);
-        skipped_derived += 1;
-        continue;
-      }
+        let size = field.get_size();
+        let Some(value) = get_value_from_data(field, id, data, size) else {
+            continue;
+        };
 
-      // Skip not changed values
-      if mask.is_some_and(|f| !f[field_index]) {
-        println!("       -> Skipped: not changed in mask");
-        skipped_not_changed += 1;
-        continue;
-      }
+        if let Some(index) = field.get_rev_index() {
+            let mut key = Vec::with_capacity(value.len() + id.len());
+            key.extend_from_slice(value);
+            key.extend_from_slice(id);
+            indexes.push(IndexData { tree_name: index.tree_name(), key });
+        }
 
-      let size = field.get_size();
-      println!("       Field size: {:?}", size);
+        if let Some(index) = field.get_direct_index() {
+            let mut key = Vec::with_capacity(value.len() + id.len());
+            key.extend_from_slice(id);
+            key.extend_from_slice(value);
+            indexes.push(IndexData { tree_name: index.tree_name(), key });
+        }
 
-      let Some(value) = get_value_from_data(field, id, data, size) else {
-        println!("       -> Skipped: no value extracted");
-        skipped_no_value += 1;
-        continue;
-      };
-
-      println!("       Value extracted: {} bytes", value.len());
-
-      if let Some(index) = field.get_rev_index() {
-        let mut key = Vec::with_capacity(value.len() + id.len());
-        key.extend_from_slice(value);
-        key.extend_from_slice(id);
-        println!("       + Rev index: tree={}, key_len={}",
-                 String::from_utf8_lossy(index.tree_name()), key.len());
-        indexes.push(IndexData { tree_name: index.tree_name(), key });
-      }
-
-      if let Some(index) = field.get_direct_index() {
-        let mut key = Vec::with_capacity(value.len() + id.len());
-        key.extend_from_slice(id);
-        key.extend_from_slice(value);
-        println!("       + Direct index: tree={}, key_len={}",
-                 String::from_utf8_lossy(index.tree_name()), key.len());
-        indexes.push(IndexData { tree_name: index.tree_name(), key });
-      }
-
-      if let Some(index) = field.get_field_index() {
-        let key = build_index_value(id, value, size.is_some());
-        println!("       + Field index: tree={}, key_len={}",
-                 String::from_utf8_lossy(index.tree_name()), key.len());
-        indexes.push(IndexData { tree_name: index.tree_name(), key });
-      }
+        if let Some(index) = field.get_field_index() {
+            let key = build_index_value(id, value, size.is_some());
+            indexes.push(IndexData { tree_name: index.tree_name(), key });
+        }
     }
 
-    println!("     Summary:");
-    println!("       Skipped (no indexes): {}", skipped_no_indexes);
-    println!("       Skipped (derived): {}", skipped_derived);
-    println!("       Skipped (not changed): {}", skipped_not_changed);
-    println!("       Skipped (no value): {}", skipped_no_value);
-    println!("       Total indexes created: {}", indexes.len());
-    println!("  << get_indexes returns {} indexes", indexes.len());
-
-    return indexes;
+    indexes
 }
 
 

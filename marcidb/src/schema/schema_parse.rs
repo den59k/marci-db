@@ -338,17 +338,6 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
         field.injected_fields = Some((st_ref, aliases ));
     }
 
-    println!("=== Bindings ===");
-    println!("Total bindings: {}", bindings.len());
-    for (a, b) in &bindings {
-        let field_a = schema.get_field(a);
-        let field_b = schema.get_field(b);
-        println!("Binding: {}  <-> {}",
-            field_a.name,
-            field_b.name,
-        );
-    }
-    println!("================\n");
     // Добавляем inserted_indexes
     for (a, b) in bindings {
 
@@ -367,13 +356,10 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
     }
 }
 
-// Собираем foreign_bindings для schema
 fn resolve_foreign_constraints(schema: &mut Schema) {
-
     let mut foreign_bindings: Vec<Vec<(FieldRef,DeleteConstraint)>> = schema.models.iter().map(|_| Vec::new()).collect();
 
     schema.walk(| field, field_ref | {
-
         match &field.ty {
             FieldType::ModelRefList(ref_model_idx) => {
                 let constraint = field.attributes.iter().find_map(|f| match f {
@@ -381,8 +367,6 @@ fn resolve_foreign_constraints(schema: &mut Schema) {
                     _ => None,
                 }).unwrap_or(DeleteConstraint::RemoveItem);
 
-
-                // Если у текущего поля есть reverse index -> у таблицы есть поле с direct индексом, и она сама удалит элемент при зачистке индексов
                 if matches!(constraint, DeleteConstraint::SetNull) {
                     panic!("Use RemoveItem instead SetNull in list field {}", field.full_name);
                 }
@@ -401,29 +385,17 @@ fn resolve_foreign_constraints(schema: &mut Schema) {
                     }
                 });
 
-
                 if matches!(constraint, DeleteConstraint::RemoveItem) {
                     panic!("Use SetNull instead RemoveItem in non-list field {}", field.full_name);
                 }
 
                 foreign_bindings[*ref_model_idx].push((field_ref, constraint));
             }
-            _ => {
-            }
+            _ => {}
         }
     });
 
     schema.foreign_bindings = foreign_bindings;
-    println!("=== Foreign Bindings ===");
-    for (model_idx, bindings) in schema.foreign_bindings.iter().enumerate() {
-        if !bindings.is_empty() {
-            println!("Model {} has {} foreign constraint(s):", model_idx, bindings.len());
-            for (field_ref, constraint) in bindings {
-                println!("  - Field: {:?}, Constraint: {:?}", field_ref, constraint);
-            }
-        }
-    }
-    println!("=======================");
 }
 
 
