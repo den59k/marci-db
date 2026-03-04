@@ -5,3 +5,8 @@ members = [
     "marci-vector",
     "marcidb-server"
 ]
+
+default-members = [
+    "marcidb",
+    "marcidb-server"
+]

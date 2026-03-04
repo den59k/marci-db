@@ -388,7 +388,7 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
 
                 let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
                 let end = increment_bytes_be(id);
-                struct_tree.delete_range(id..&end).unwrap();
+                struct_tree.delete_range(id..end.as_slice()).unwrap();
             }
             InsertStruct::Many { st, data: new_data, .. } => {
                 for field in st.fields.iter() {
@@ -400,7 +400,7 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
 
                 let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
                 let end = increment_bytes_be(id);
-                struct_tree.delete_range(id..&end).unwrap();
+                struct_tree.delete_range(id..end.as_slice()).unwrap();
 
                 for (item_id, item_data) in new_data.iter() {
                     let mut new_item_id = item_id.clone();
@@ -478,7 +478,7 @@ pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<()
             FieldType::StructList(st) => {
                 let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
                 let end = increment_bytes_be(id);
-                tree.delete_range(id..&end).unwrap();
+                tree.delete_range(id..end.as_slice()).unwrap();
             }
             _ => {}
         }
@@ -1057,7 +1057,7 @@ pub fn remove_indexes(tx: &WriteTransaction, schema: &Schema, model: &Entity, fi
     // Удаляем сам direct индекс (все записи с префиксом id)
     let mut tree = tx.get_tree(direct_index.tree_name()).unwrap().unwrap();
     let end = increment_bytes_be(id);
-    tree.delete_range(id..&end).unwrap();
+    tree.delete_range(id..end.as_slice()).unwrap();
 
     return;
   }

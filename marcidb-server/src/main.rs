@@ -11,11 +11,13 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{Attribute, Field, Entity, FieldType, MarciDB, MarciSelect, VectorIndexType, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select, PrimitiveFieldType, find_by_direct, find_by_rev};
+use marcidb::{Field, Entity, FieldType, MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, get_value_from_data, parse_schema, parse_select, PrimitiveFieldType, find_by_direct, find_by_rev};
 use serde_json::Value;
 use tokio::net::TcpListener;
-use marci_vector::{CustomDistance, ReadCluster, WriteCluster};
 
+#[cfg(feature = "marci_vector")]
+use marci_vector::{CustomDistance, ReadCluster, WriteCluster};
+#[cfg(feature = "marci_vector")]
 mod marci_vector_utils;
 
 use std::collections::HashSet;
@@ -185,6 +187,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
         }
 
         // Only marci vector utils
+        #[cfg(feature = "marci_vector")]
         (&Method::POST, "index") => {
             for (field_index, field) in model.fields.iter().enumerate() {
                 let Some(vector_index_type) = field.attributes.iter().find_map(|f| {
@@ -1158,6 +1161,7 @@ fn parse_where_sequential(
         
         } else {
             match &field.ty {
+                #[cfg(feature = "marci_vector")]
                 _ if field.attributes.iter().any(|a| matches!(a, Attribute::VectorIndex(_))) => {
                     let vector_index_type = field.attributes.iter().find_map(|f| {
                         if let Attribute::VectorIndex(i) = f { Some(i) } else { None }
