@@ -79,8 +79,8 @@ pub fn set_field_null(entity: &Entity, data: &[u8], field_index: usize, enum_idx
   let offset_end: usize = get_end(&data, field.offset_pos, entity.payload_offset);
 
   if let Some(enum_idx) = enum_idx {
-    let FieldType::Enum(en) = &field.ty else { 
-      panic!("Trying to get enum variant from non-enum field {}", field.full_name) 
+    let FieldType::Enum(en) = &field.ty else {
+      panic!("Trying to get enum variant from non-enum field {}", field.full_name)
     };
     let variant = &en.variants[enum_idx.0];
 
@@ -90,15 +90,15 @@ pub fn set_field_null(entity: &Entity, data: &[u8], field_index: usize, enum_idx
 
     let new_offset_end = offset + enum_data.len();
     let diff = (new_offset_end as isize) - offset_end as isize;
-    
+
     let mut data = data.to_vec();
     shift_and_resize(&mut data, offset_end, new_offset_end, diff);
     move_offsets(&mut data, field.offset_pos+4, entity.payload_offset, diff);
-    
+
     return Some(data);
   } else {
     let diff = offset  as isize - offset_end as isize;
-  
+
     let mut data = data.to_vec();
     shift_and_resize(&mut data, offset_end, offset, diff);
     move_offsets(&mut data, field.offset_pos+4, entity.payload_offset, diff);

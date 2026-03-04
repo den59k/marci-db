@@ -53,6 +53,7 @@ pub fn update_key_fields(fields: &mut Vec<Field>) -> () {
             id_idx: Some(0),
             attributes: vec![Attribute::Id], 
             counter_idx: Some(0),
+            is_unique: false,
             injected_fields: None
         });
     }
@@ -137,6 +138,7 @@ fn parse_field_raw(line: &str) -> Field {
         .collect();
     
     let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
+    let is_unique = attributes.iter().any(|attr| matches!(attr, Attribute::Unique));
 
     Field {
         name,
@@ -148,6 +150,7 @@ fn parse_field_raw(line: &str) -> Field {
         inserted_indexes: InsertedIndexSt::new(),
         counter_idx: None,
         id_idx: is_id.then_some(0),
+        is_unique,
         injected_fields: None
     }
 }
@@ -259,6 +262,7 @@ fn resolve_fields(
                         counter_idx: None, 
                         inserted_indexes: InsertedIndexSt::new(), 
                         attributes: vec![Attribute::Id],
+                        is_unique: false,
                         injected_fields: None
                     });
 
@@ -293,7 +297,7 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
                 
                     let field_ref = field_ref.clone();
                     // TODO: Create modelRef also from struct
-                    let key: (FieldRef,FieldRef) = if derived_ref > field_ref { (field_ref,derived_ref) } else { (field_ref,derived_ref) };
+                    let key: (FieldRef,FieldRef) = if derived_ref > field_ref { (field_ref,derived_ref) } else { (derived_ref,field_ref) };
                     bindings.insert(key);
                 }
                 Attribute::InjectUnresolved(items) => {
@@ -314,7 +318,7 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
                         field_injects.1.insert(field_name.to_string(), alias.to_string());
                     }
                 }
-                Attribute::Index => {
+                Attribute::Index | Attribute::Unique => {
                     field_indexes.insert(field_ref.clone());
                 }
                 _ => {}
@@ -352,9 +356,7 @@ fn resolve_attributes(schema: &mut Schema, model_by_name: &HashMap<String, usize
     }
 }
 
-// Собираем foreign_bindings для schema
 fn resolve_foreign_constraints(schema: &mut Schema) {
-
     let mut foreign_bindings: Vec<Vec<(FieldRef,DeleteConstraint)>> = schema.models.iter().map(|_| Vec::new()).collect();
 
     schema.walk(| field, field_ref | {
@@ -365,15 +367,9 @@ fn resolve_foreign_constraints(schema: &mut Schema) {
                     _ => None,
                 }).unwrap_or(DeleteConstraint::RemoveItem);
 
-                // Если у текущего поля есть reverse index -> у таблицы есть поле с direct индексом, и она сама удалит элемент при зачистке индексов
-                if matches!(constraint, DeleteConstraint::RemoveItem) {
-                    if field.get_rev_index().is_some() {
-                        return;
-                    }
-                }
                 if matches!(constraint, DeleteConstraint::SetNull) {
                     panic!("Use RemoveItem instead SetNull in list field {}", field.full_name);
-                }         
+                }
 
                 foreign_bindings[*ref_model_idx].push((field_ref, constraint));
             },

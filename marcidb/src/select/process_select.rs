@@ -154,7 +154,6 @@ where
     },
     MarciSelectBinding::Many(tree_name) => {
       let keys = find_by_direct(tctx.rx, tree_name, id);
-      
       if keys.is_empty() {
         return IncludeResult::Many(include.field, vec![]);
       }
