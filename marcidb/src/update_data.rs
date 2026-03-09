@@ -127,7 +127,6 @@ fn shift_and_resize(data: &mut Vec<u8>, from: usize, to: usize, diff: isize) {
   }
 }
 
-
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -242,7 +241,7 @@ model User {
     assert_eq!(&data[model.payload_offset..model.payload_offset+2], &[0,1]);
 
     let mut obj = String::with_capacity(256);
-    
+
     obj.push('{');
     decode_fields(&[], &data[model.payload_offset..], &en.variants[1].fields, &mut obj, mask, None, en.variants[1].payload_offset).unwrap();
     obj.push('}');
@@ -259,14 +258,14 @@ model User {
       "admin_count": 10
     });
     let (new_data, changed_mask) = encode_document(&schema, model, &json_update, &mut structs).unwrap();
-    
+
     let data = update_data(&model, &data, &new_data, &changed_mask);
     assert_eq!(&data[model.payload_offset..model.payload_offset+2], &[0,1]);
 
     let mut obj = String::with_capacity(256);
     obj.push('{');
     decode_fields(&[], &data[model.payload_offset..], &en.variants[1].fields, &mut obj, mask, None, en.variants[1].payload_offset).unwrap();
-    
+
     obj.push('}');
     assert_eq!(serde_json::from_str::<Value>(&obj).unwrap(), json!({
       "admin_count": 10,
@@ -333,7 +332,7 @@ model User {
         let mut obj = String::with_capacity(256);
         obj.push('{');
 
-        let mask = &bitvec::bitvec!(1; admin_variant.fields.len()); 
+        let mask = &bitvec::bitvec!(1; admin_variant.fields.len());
         decode_fields(
             &[],
             &updated_1,
