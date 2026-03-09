@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::{fs, vec};
+use std::{fs};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,7 +11,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use marcidb::{MarciDB, MarciSelect, array_to_json, decode_document, decode_id, encode_document, encode_id, parse_schema, parse_select, parse_and_execute_where};
+use marcidb::{MarciDB, MarciDocument, MarciSelect, array_to_json, decode_document, decode_id, encode_id, parse_and_execute_where, parse_schema, parse_select};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -30,11 +30,11 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
 
     let slash_index = path[1..].find('/').map(|i| i + 1).unwrap_or(path.len());
 
-    let model_name = &path[1..slash_index].to_string();
+    let model_name = path[1..slash_index].to_string();
 
     let action = &path[slash_index+1..];
-    let Some((model_index, model)) = ctx.db.get_model(model_name) else {
-        return Ok(error(StatusCode::NOT_FOUND, &format!("Model {} not found", &path[1..slash_index])));
+    let Some(model) = ctx.db.get_model(&model_name) else {
+        return Ok(error(StatusCode::NOT_FOUND, &format!("Model {} not found", &model_name)));
     };
 
     match (req.method(), action) {
@@ -53,30 +53,25 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
             // Например: вставка в БД и т. д.
             // db.insert(json_val.clone()); // пример
 
-            let mut structs = vec![];
-            let (data, _) = match encode_document(&ctx.db.schema, model, &json_val, &mut structs) {
-                Ok(result) => result,
-                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
-            };
-            let mut id = match encode_id(model, &json_val, true) {
+            let data = match MarciDocument::from_json(&ctx.db.schema, model, &json_val) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            if let Err(err) = ctx.db.insert_data(model, &mut id, &data, &mut structs) {
+            if let Err(err) = ctx.db.insert_data(&data) {
                 return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to insert document: {:?}", err)));
             }
 
-            let body = Bytes::from(decode_id(&id, model).unwrap().to_string());
+            let body = Bytes::from(decode_id(&data.id, model).unwrap().to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
 
         (&Method::GET, "findMany") => {
 
-            let select = MarciSelect::all(&model.fields);
+            let select = MarciSelect::all(&model);
 
-            let data = ctx.db.get_all(model, &select, | ctx | {
+            let data = ctx.db.get_all(&select, | ctx | {
                 return decode_document(ctx).unwrap();
             });
 
@@ -95,7 +90,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let select = match parse_select(&model.fields, &body_json, &ctx.db.schema, None) {
+            let select = match parse_select(&model, &body_json, &ctx.db.schema, None) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to parse select: {:?}", err)))
             };
@@ -115,9 +110,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                 Some(ids) => ctx.db.get_by_ids(&ids, model, &select, |ctx | {
                     return decode_document(ctx).unwrap();
                 }),
-                None => ctx.db.get_all(model, &select, |ctx | {
-                    return decode_document(ctx).unwrap();
-                })
+                None => ctx.db.get_all(&select, |ctx | decode_document(ctx).unwrap())
             };
 
             let body = Bytes::from(array_to_json(&data));
@@ -140,22 +133,16 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                 return Ok(error(StatusCode::BAD_REQUEST, "Failed to parse JSON"));
             };
 
-            let mut structs = vec![];
-            let (new_data, changed_mask) = match encode_document(&ctx.db.schema, model, &json_val, &mut structs) {
+            let new_data = match MarciDocument::from_json(&ctx.db.schema, model, &json_val) {
                 Ok(result) => result,
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
             };
 
-            let id = match encode_id(model, &json_val, false) {
-                Ok(result) => result,
-                Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to encode document: {:?}", err)))
-            };
-
-            if let Err(err) =  ctx.db.update(model, &id, &new_data, changed_mask, &structs) {
+            if let Err(err) =  ctx.db.update(&new_data) {
                return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to update document: {:?}", err)));
             }
 
-            let body = Bytes::from(decode_id(&id, model).unwrap().to_string());
+            let body = Bytes::from(decode_id(&new_data.id, model).unwrap().to_string());
             let resp = Response::new(Full::new(body));
             Ok(resp)
         }
@@ -173,7 +160,7 @@ async fn handle(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) ->
                 Err(err) => return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to delete document: {:?}", err)))
             };
 
-            if let Err(err) = ctx.db.delete(model_index, model, &id) {
+            if let Err(err) = ctx.db.delete(model, &id) {
                 return Ok(error(StatusCode::BAD_REQUEST, &format!("Failed to delete document: {:?}", err)));
             };
 
@@ -277,7 +264,7 @@ async fn main() {
         println!("{:#?}", model);
     }
 
-    let ctx: Arc<ServerContext> = Arc::new(ServerContext{ db: MarciDB::new(schema) });
+    let ctx: Arc<ServerContext> = Arc::new(ServerContext{ db: MarciDB::new(schema, "./data") });
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 

@@ -113,6 +113,16 @@ pub fn parse_schema(input: &str) -> Schema {
 
     resolve_foreign_constraints(&mut schema);
 
+    let mut counter_id = 0;
+    for model in schema.models.iter_mut() {
+        for field in model.fields.iter_mut() {
+            if field.counter_idx.is_some() {
+                field.counter_idx = Some(counter_id);
+                counter_id += 1;
+            }
+        }
+    }
+
     schema
 }
 

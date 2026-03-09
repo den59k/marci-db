@@ -550,7 +550,7 @@ mod tests {
             "role": true,
             "features": true
         });
-        let select = parse_select(&st.fields, &input_select, &schema, None).unwrap();
+        let select = parse_select(st, &input_select, &schema, None).unwrap();
 
         let resp = decode_document(DecodeCtx { 
             id: &data[0].0, 

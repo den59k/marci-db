@@ -39,16 +39,18 @@ pub struct MarciSelect<'a> {
   pub mask: BitVec,
   pub includes: Vec<MarciSelectInclude<'a>>,
   pub enum_selects: EnumSelect<'a>,
-  pub aliases: Option<&'a Aliases>
+  pub aliases: Option<&'a Aliases>,
+  pub model: &'a Entity
 }
 
 impl MarciSelect<'_> {
-  pub fn all(fields: &'_[Field]) -> MarciSelect<'_> {
+  pub fn all(model: &'_ Entity) -> MarciSelect<'_> {
     return MarciSelect {
-      mask: bitvec![1; fields.len()],
+      model,
+      mask: bitvec![1; model.fields.len()],
       includes: vec![],
       aliases: None,
-      enum_selects: fields.iter().enumerate().filter_map(|(i, field)| {
+      enum_selects: model.fields.iter().enumerate().filter_map(|(i, field)| {
         let FieldType::Enum(en) = &field.ty else { return None; };
 
         let variants_map: HashMap<u16, MarciSelect<'_>> = en
@@ -59,7 +61,7 @@ impl MarciSelect<'_> {
             if v.fields.is_empty() {
                 None
             } else {
-                Some((i as u16, MarciSelect::all(&v.fields)))
+                Some((i as u16, MarciSelect::all(&v)))
             }
           })
           .collect();
@@ -71,12 +73,13 @@ impl MarciSelect<'_> {
     };
   }
 
-  pub fn new(model: &Entity) -> Self {
+  pub fn new(model: &'_ Entity) -> MarciSelect<'_> {
     return MarciSelect {
       mask: bitvec![0; model.fields.len()],
       includes: vec![],
       enum_selects: HashMap::new(),
-      aliases: None
+      aliases: None,
+      model
     }
   }
 }

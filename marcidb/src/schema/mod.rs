@@ -10,7 +10,7 @@ mod schema_enum;
 mod schema_attributes;
 mod schema_parse;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Schema {
     pub models: Vec<Entity>,
     pub foreign_bindings: Vec<Vec<(FieldRef,DeleteConstraint)>>

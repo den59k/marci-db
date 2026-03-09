@@ -1,27 +1,26 @@
-
 use std::collections::HashMap;
 
 use serde_json::Value;
 use bitvec::prelude::*;
 
-use crate::{schema::{Aliases, Field, FieldType, Schema}, select::{EnumSelect, Injected, MarciSelect, MarciSelectBinding, MarciSelectInclude}};
+use crate::{Entity, schema::{Aliases, Field, FieldType, Schema}, select::{EnumSelect, Injected, MarciSelect, MarciSelectBinding, MarciSelectInclude}};
 
 #[derive(Debug)]
 pub enum MarciSelectError {
   MissingField(String)
 }
 
-pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, aliases: Option<&'a Aliases>) -> Result<MarciSelect<'a>, MarciSelectError> {
+pub fn parse_select<'a>(model: &'a Entity, json: &Value, schema: &'a Schema, aliases: Option<&'a Aliases>) -> Result<MarciSelect<'a>, MarciSelectError> {
 
   if json.is_boolean() {
-    return Ok(MarciSelect::all(fields));
+    return Ok(MarciSelect::all(model));
   }
 
-  let mut changed_mask = bitvec![0; fields.len()];
+  let mut changed_mask = bitvec![0; model.fields.len()];
   let mut includes = vec![];
   let mut enum_selects: EnumSelect<'_> = HashMap::new();
 
-  for (field_index, field) in fields.iter().enumerate() {
+  for (field_index, field) in model.fields.iter().enumerate() {
 
     let field_name: &str = {
       if let Some(aliases) = aliases {
@@ -43,7 +42,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
     match &field.ty {
       FieldType::ModelRef(model_index) => {
         let model = &schema.models[*model_index];
-        let select = parse_select(&model.fields, &val, schema, None)?;
+        let select = parse_select(model, &val, schema, None)?;
       
         includes.push(MarciSelectInclude {
           field,
@@ -56,7 +55,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
       },
       FieldType::ModelRefList(model_index) => {
         let model = &schema.models[*model_index];
-        let select = parse_select(&model.fields, &val, schema, None)?;
+        let select = parse_select(model, &val, schema, None)?;
         let index = field.inserted_indexes.direct.as_ref().unwrap();
 
         includes.push(MarciSelectInclude {
@@ -69,7 +68,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
         });
       },
       FieldType::Struct(st) => {
-        let select = parse_select(&st.fields, &val, schema, None)?;
+        let select = parse_select(st, &val, schema, None)?;
         includes.push(MarciSelectInclude {
           field,
           model: st,
@@ -80,7 +79,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
         });
       },
       FieldType::StructList(st) => {
-        let select = parse_select(&st.fields, &val, schema, None)?;
+        let select = parse_select(st, &val, schema, None)?;
         includes.push(MarciSelectInclude {
           field,
           model: st,
@@ -95,7 +94,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
         for (variant_index, variant) in en.variants.iter().enumerate() {
           if variant.fields.is_empty() { continue; }
 
-          let select = parse_select(&variant.fields, json, schema, aliases)?;
+          let select = parse_select(variant, json, schema, aliases)?;
           if !select.includes.is_empty() || select.mask.any() {
             enum_selects
               .entry(field_index)
@@ -122,7 +121,7 @@ pub fn parse_select<'a>(fields: &'a [Field], json: &Value, schema: &'a Schema, a
     }
   }
 
-  return Ok(MarciSelect { mask: changed_mask, includes: includes, enum_selects, aliases })
+  return Ok(MarciSelect { mask: changed_mask, includes: includes, enum_selects, aliases, model })
 }
 
 fn parse_injected<'a>(schema: &'a Schema, field: &'a Field, val: &Value) -> Result<Option<Injected<'a>>, MarciSelectError> {
@@ -135,7 +134,7 @@ fn parse_injected<'a>(schema: &'a Schema, field: &'a Field, val: &Value) -> Resu
       _ => panic!("Trying to inject field from non-struct")
     };
 
-    let select = parse_select(&st.fields, val, schema, Some(aliases))?;
+    let select = parse_select(st, val, schema, Some(aliases))?;
     if select.mask.not_any() && select.includes.is_empty() {
       return Ok(None);
     }
@@ -171,7 +170,7 @@ struct UserInfo {
     let input = json!({
         "name": true
     });
-    let parsed = parse_select(&model.fields, &input, &schema, None).unwrap();
+    let parsed = parse_select(model, &input, &schema, None).unwrap();
     let mut expect = bitvec::bitvec![0; model.fields.len()];
     expect.set(1, true);
     assert_eq!(parsed.mask, expect);
@@ -181,7 +180,7 @@ struct UserInfo {
         "name": true,
         "info": true
     });
-    let parsed = parse_select(&model.fields, &input, &schema, None).unwrap();
+    let parsed = parse_select(model, &input, &schema, None).unwrap();
     let mut expect = bitvec::bitvec![0; model.fields.len()];
     expect.set(1, true);
     assert_eq!(parsed.mask, expect);
@@ -225,7 +224,7 @@ struct UserRole {
         }
     });
     let model = &schema.models[0];
-    let parsed = parse_select(&model.fields, &input, &schema, None).unwrap();
+    let parsed = parse_select(model, &input, &schema, None).unwrap();
     assert_eq!(parsed.includes.len(), 1);
 
     assert!(parsed.includes[0].injected.is_some());

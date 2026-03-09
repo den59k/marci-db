@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use bitvec::prelude::*;
+use bitvec::{prelude::*};
 
 use crate::{marci_db::InsertStruct, schema::{Entity, Field, FieldType, PrimitiveFieldType, Schema}};
 
@@ -14,6 +14,25 @@ pub enum EncodeError {
     EmptyObject,
     DerivedFieldNotWritable(String)
 }
+
+pub struct MarciDocument<'a> {
+    pub id: Vec<u8>,
+    pub data: Vec<u8>,
+    pub structs: Vec<InsertStruct<'a>>,
+    pub mask: BitVec,
+    pub model: &'a Entity
+}
+
+impl MarciDocument<'_> {
+   pub fn from_json<'a>(schema: &'a Schema, model: &'a Entity, json_val: &Value) -> Result<MarciDocument<'a>, EncodeError> {
+        let mut structs = vec![];
+        let (data, mask) = encode_document(schema, model, json_val, &mut structs)?;
+        let id = encode_id(model, json_val, true)?;
+
+        Ok(MarciDocument { id, data, structs, mask, model })
+   } 
+}
+
 
 /// Кодируем JSON-документ для заданной модели в бинарный формат. Возвращает данные и changed_mask
 /// Не все данные записываются в document, используйте также функцию encode_id для кодирования полей в ID

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}, u64}
 use bitvec::vec::BitVec;
 use canopydb::{Database, Environment, Transaction, Tree, WriteTransaction};
 
-use crate::{schema::{DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, select::{DecodeCtx, MarciSelect, ProcessDataContext, TransationContext, get_value_from_data, get_value_from_id, process_data}, update_data::{set_field_null, update_data}};
+use crate::{MarciDocument, schema::{DeleteConstraint, Entity, Field, FieldType, InsertedIndex, Schema}, select::{DecodeCtx, MarciSelect, ProcessDataContext, TransationContext, get_value_from_data, get_value_from_id, process_data}, update_data::{set_field_null, update_data}};
 
 pub struct MarciDB {
   pub db: Database,
@@ -68,8 +68,8 @@ pub enum InsertStruct<'a> {
 
 impl MarciDB {
 
-  pub fn new(mut schema: Schema) -> MarciDB {
-    let env = Environment::new("./data").unwrap(); 
+  pub fn new(schema: Schema, path: &str) -> MarciDB {
+    let env = Environment::new(path).unwrap(); 
     let db = env.get_or_create_database("mydb.db").unwrap();
 
     let mut counters = Vec::with_capacity(schema.models.len());
@@ -80,19 +80,11 @@ impl MarciDB {
     }
 
     let tx = db.begin_write().unwrap();
-    for model in schema.models.iter_mut() {
-      let tree = tx.get_or_create_tree(model.name.as_bytes()).unwrap();
+    for model in schema.models.iter() {
+      let model_tree = tx.get_or_create_tree(model.name.as_bytes()).unwrap();
 
-      for field in model.fields.iter_mut() {
-        if field.counter_idx.is_some() {
-          let max_id = get_max_id(&tree);
-          field.counter_idx = Some(counters.len());
-          counters.push(Arc::new(AtomicU64::new(max_id)));
-        }
-      }
-
-      // Создаем индексы для полей
-      for field in model.fields.iter_mut() {
+      // Создаем индексы для полей и назначаем counters
+      for field in model.fields.iter() {
         if let Some(index) = field.get_direct_index() {
           tx.get_or_create_tree(index.tree_name.as_bytes()).unwrap();
         }
@@ -103,12 +95,22 @@ impl MarciDB {
         if let FieldType::Struct(st) = &field.ty {
           tx.get_or_create_tree(st.name.as_bytes()).unwrap();
         }
+        
         if let FieldType::StructList(st) = &field.ty {
-          let tree = tx.get_or_create_tree(st.name.as_bytes()).unwrap();
-          if field.counter_idx.is_some() {
+          tx.get_or_create_tree(st.name.as_bytes()).unwrap();
+        } 
+
+        if let Some(counter_idx) = field.counter_idx {
+          if counters.len() <= counter_idx {
+            counters.resize(counter_idx+1, Arc::new(AtomicU64::new(0)));
+          }
+          if let FieldType::StructList(st) = &field.ty {
+            let tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
             let max_id = get_max_id_struct(&tree);
-            field.counter_idx = Some(counters.len());
-            counters.push(Arc::new(AtomicU64::new(max_id)));
+            counters[counter_idx] = Arc::new(AtomicU64::new(max_id));
+          } else {
+            let max_id = get_max_id(&model_tree);
+            counters[counter_idx] = Arc::new(AtomicU64::new(max_id));
           }
         }
       }
@@ -133,9 +135,9 @@ impl MarciDB {
     self.counters[counter_idx].fetch_add(1, Ordering::Relaxed)
   }
   
-  pub fn get_model(&self, name: &str) -> Option<(usize, &Entity)> {
+  pub fn get_model(&self, name: &str) -> Option<&Entity> {
     self.model_by_name.get(name).and_then(|model_index| {
-      Some((*model_index, &self.schema.models[*model_index]))
+      Some(&self.schema.models[*model_index])
     })
   }
 
@@ -149,17 +151,18 @@ impl MarciDB {
     }
   }
 
-  pub fn insert_data(&self, model: &Entity, id: &mut [u8], data: &[u8], structs: &[InsertStruct]) -> Result<(), InsertError> {
+  pub fn insert_data(&self, insert: &MarciDocument) -> Result<Vec<u8>, InsertError> {
 
-    let foreign_keys = collect_foreign_keys(id, data, model, structs, &self.schema);
+    let model = insert.model;
+    let foreign_keys = collect_foreign_keys(&insert.id, &insert.data, model, &insert.structs, &self.schema);
 
     let tx = self.db.begin_write().unwrap();
     check_foreign_keys(&tx, &foreign_keys)?;
 
     {
         let tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-        if tree.get(id).unwrap().is_some() {
-            return Err(InsertError::DuplicateKey(id.to_vec()));
+        if tree.get(&insert.id).unwrap().is_some() {
+            return Err(InsertError::DuplicateKey(insert.id.clone()));
         }
     }
 
@@ -167,7 +170,7 @@ impl MarciDB {
         if !field.is_unique { continue; }
         let Some(field_index) = field.get_field_index() else { continue; };
 
-        let Some(value) = get_value_from_data(field, id, data, field.get_size()) else {
+        let Some(value) = get_value_from_data(field, &insert.id, &insert.data, field.get_size()) else {
             // NULL пропускаем (уникальность не нарушается)
             continue;
         };
@@ -180,19 +183,22 @@ impl MarciDB {
         }
     }
 
-    self.insert_counter_value(model, id);
+    let mut id = insert.id.clone();
+    let data = &insert.data;
+    
+    self.insert_counter_value(model, &mut id);
 
     // После получения ID - получаем индексы
-    let mut indexes = get_indexes(data, id, model, None);
+    let mut indexes = get_indexes(data, &id, model, None);
 
     // Добавляем само значение
     {
       let mut tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
-      tree.insert(id, data).unwrap();
+      tree.insert(&id, data).unwrap();
     }
 
     // Добавляем зависимые структуры
-    for st in structs {
+    for st in insert.structs.iter() {
       match st {
         InsertStruct::Many { st, data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
@@ -200,7 +206,7 @@ impl MarciDB {
           for (item_id, item_data) in data {
 
             let mut new_item_id = item_id.clone();
-            new_item_id[0..8].copy_from_slice(id);
+            new_item_id[0..8].copy_from_slice(&id);
 
             self.insert_counter_value(*st, &mut new_item_id);
 
@@ -212,11 +218,11 @@ impl MarciDB {
         },
         InsertStruct::One { st, data, .. } => {
           let mut tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
-          tree.insert(id, data).unwrap();
-          indexes.extend(get_indexes(data, id, *st, None));
+          tree.insert(&id, data).unwrap();
+          indexes.extend(get_indexes(data, &id, *st, None));
         }
         InsertStruct::Connect { field, ids, .. } => {
-          insert_indexes(&tx, field, id, ids);
+          insert_indexes(&tx, field, &id, ids);
         }
         _ => {}
       }
@@ -230,12 +236,11 @@ impl MarciDB {
 
     tx.commit().unwrap();
 
-    return Ok(())
+    return Ok(id);
   }
 
 pub fn get_all<U, F>(
     &self,
-    model: &Entity,
     select: &MarciSelect,
     f: F
 ) -> Vec<U>
@@ -243,14 +248,14 @@ where
     F: Fn(DecodeCtx<'_, U>) -> U,
 {
     let rx = self.db.begin_read().unwrap();
-    let tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+    let tree = rx.get_tree(select.model.name.as_bytes()).unwrap().unwrap();
 
     let mut tctx = TransationContext::new(&rx, f);
     let mut ctx = ProcessDataContext::new(select);
 
     tree.iter().unwrap().map(|item| {
         let (id, value) = item.unwrap();
-        process_data(&id, &value, model, &mut tctx, &mut ctx, None)
+        process_data(&id, &value, select.model, &mut tctx, &mut ctx, None)
     }).collect()
 }
 
@@ -310,12 +315,18 @@ where
     return tree.get(key.as_bytes()).unwrap().map(|item| f(item.as_ref()))
   }
 
-pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: BitVec, structs: &[InsertStruct]) -> Result<(), InsertError> {
-    let foreign_keys = collect_foreign_keys(id, new_data, model, structs, &self.schema);
+pub fn update(&self, data: &MarciDocument) -> Result<(), InsertError> {
+    
+    let id = &data.id;
+    let new_data = &data.data;
+    let changed_mask = &data.mask;
+    let model = data.model;
+    
+    let foreign_keys = collect_foreign_keys(id, new_data, model, &data.structs, &self.schema);
 
     let mut indexes = get_indexes(new_data, id, model, None);
 
-    for st in structs {
+    for st in data.structs.iter() {
         match st {
             InsertStruct::One { st, data, .. } => {
                 let new_indexes = get_indexes(data, id, *st, None);
@@ -376,7 +387,7 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
         indexes_to_remove.extend(old_indexes);
     };
 
-    for st in structs.iter() {
+    for st in data.structs.iter() {
         match st {
             InsertStruct::Empty { st } => {
                 for field in st.fields.iter() {
@@ -388,7 +399,7 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
 
                 let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
                 let end = increment_bytes_be(id);
-                struct_tree.delete_range(id..end.as_slice()).unwrap();
+                struct_tree.delete_range(id.as_slice()..end.as_slice()).unwrap();
             }
             InsertStruct::Many { st, data: new_data, .. } => {
                 for field in st.fields.iter() {
@@ -400,7 +411,7 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
 
                 let mut struct_tree = tx.get_tree(st.name.as_bytes()).unwrap().unwrap();
                 let end = increment_bytes_be(id);
-                struct_tree.delete_range(id..end.as_slice()).unwrap();
+                struct_tree.delete_range(id.as_slice()..end.as_slice()).unwrap();
 
                 for (item_id, item_data) in new_data.iter() {
                     let mut new_item_id = item_id.clone();
@@ -453,9 +464,10 @@ pub fn update(&self, model: &Entity, id: &[u8], new_data: &[u8], changed_mask: B
     Ok(())
 }
 
-pub fn delete(&self, model_index: usize, model: &Entity, id: &[u8]) -> Result<(), DeleteError> {
+pub fn delete(&self, model: &Entity, id: &[u8]) -> Result<(), DeleteError> {
     let tx = self.db.begin_write().unwrap();
 
+    let model_index = self.model_by_name[&model.name];
     for field in model.fields.iter() {
         if let Some(field_index) = field.get_field_index() {
             let data_tree = tx.get_tree(model.name.as_bytes()).unwrap().unwrap();
