@@ -1,0 +1,92 @@
+use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
+
+use canopydb::{Database, Transaction, Tree};
+
+use crate::{query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many}, schema::{Entity, FieldDefault, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
+
+pub struct MarciDB {
+  pub schema: Schema,
+  db: Database,
+  pub(crate) counters: Vec<Arc<AtomicU64>>,
+  model_by_name: HashMap<String, usize>
+}
+
+impl MarciDB {
+
+  pub fn new(schema_str: &str, path: &str) -> MarciDB {
+    let schema = parse_schema(schema_str);
+
+    let db = canopydb::Database::new(path).unwrap();
+    let model_by_name = schema.build_model_name_map();
+
+    let tx = db.begin_write().unwrap();
+
+    for model in schema.models.iter() {
+      tx.get_or_create_tree(model.name.as_bytes()).unwrap();
+    }
+
+    let counters = build_counters(&schema, &tx);
+    tx.commit().unwrap();
+
+    MarciDB {
+      db,
+      schema,
+      counters,
+      model_by_name
+    }
+  }
+
+  pub fn get_model(&self, name: &str) -> Option<&Entity> {
+    self.model_by_name.get(name).and_then(|idx| { Some(&self.schema.models[*idx]) })
+  }
+  
+  pub fn query_data<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where F: Fn(DecodeCtx<U>) -> U { 
+    let rx = self.db.begin_read().unwrap();
+    let mut ctx = TransationContext::new(&rx, &self.schema, f);
+    return process_query_many(query, &mut ctx,None);
+  }
+
+  pub fn count(&self, entity: &Entity) -> u64 {
+    let rx = self.db.begin_read().unwrap();
+    let tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+    return tree.len();
+  }
+
+  pub fn insert_data(&self, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
+    let tx = self.db.begin_write().unwrap();
+    let item_id = write_data(insert, &tx, &self, None)?;
+    tx.commit().unwrap();
+    Ok(item_id)
+  }
+
+
+}
+
+#[derive(Debug)]
+pub enum DeleteError {
+  ItemNotFound,
+  RestrictConstraints(String,Vec<u64>)
+}
+
+fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {
+  let mut counters = Vec::with_capacity(schema.models.len());
+  for model in schema.models.iter() {
+    let model_tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+
+    for field in model.fields.iter() {
+      if let Some(FieldDefault::Counter(counter_idx)) = field.default_value {
+        counters.resize(counter_idx+1, Arc::new(AtomicU64::new(0)));
+        
+        let max_id = get_max_id(&model_tree);
+        counters[counter_idx] = Arc::new(AtomicU64::new(max_id));
+      }
+    }
+  }
+  return counters;
+}
+
+pub fn get_max_id(tree: &Tree) -> u64 {
+  return tree.last().unwrap()
+    .map(|(key, _)| u64::from_be_bytes(key.as_ref().try_into().unwrap()) + 1)
+    .unwrap_or(1);
+}
