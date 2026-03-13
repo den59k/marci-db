@@ -263,7 +263,7 @@ fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut
         insert_value(obj, &field_name, &value);
         Ok(())
     },
-    FieldType::Ref(model_index) => {
+    FieldType::Ref { model_index, .. } => {
         let ref_entity = &schema.models[model_index];
         let value = &decode_id(data, ref_entity, schema);
         insert_value(obj, &field_name, value);
@@ -281,7 +281,7 @@ fn get_id_field_size<'a>(id: &'a [u8], field: &Field, offset: usize, schema: &Sc
             id[offset..].iter().position(|&b| b == b'\0').unwrap_or(id.len()-offset)
         })
     },
-    FieldType::Ref(model_index) => {
+    FieldType::Ref { model_index, .. } => {
         let ref_entity = &schema.models[model_index];
         let mut id_size = 0;
         let ref_id = &id[offset..];

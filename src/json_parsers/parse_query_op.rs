@@ -31,7 +31,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
       continue;
     }
     match &field.ty {
-      FieldType::Ref(model_index) => {
+      FieldType::Ref { model_index, .. } => {
         if matches!(val, Value::Bool(true)) {
           // TODO: add full struct here
           continue;
@@ -43,7 +43,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
         let op = parse_query_internal(schema, &schema.models[*model_index], obj, Some(entity))?;
         includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
       }
-      FieldType::RefList(model_index) => {
+      FieldType::RefList { model_index, .. } => {
         if matches!(val, Value::Bool(true)) {
           // TODO: add full struct here
           continue;

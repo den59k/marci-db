@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap};
 
-use crate::schema::{Entity, FieldDefault, Schema, schema_field::{Field, FieldLocation, FieldType, parse_field_raw}};
+use crate::{FieldRef, schema::{Entity, FieldDefault, Schema, schema_attributes::Attribute, schema_field::{Field, FieldLocation, FieldType, parse_field_raw}}};
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
@@ -30,6 +30,7 @@ pub fn parse_schema(input: &str) -> Schema {
         }
     }
 
+    // Добавляем всем моделям обязательный id, если его нет
     for model in models.iter_mut() {
       resolve_model_id(model);
     }
@@ -40,6 +41,7 @@ pub fn parse_schema(input: &str) -> Schema {
     }
     models.extend(model_structs);
 
+    // На этом этапе у нас есть конечный список моделей с конечным списком ID. Остается только скорректировать ссылки
     let model_by_name = models.iter().enumerate()
         .map(|(i, m)| (m.name.clone(), i))
         .collect();
@@ -56,6 +58,27 @@ pub fn parse_schema(input: &str) -> Schema {
     for model in models.iter_mut() {
         resolve_counter_idx(model, &mut counter_id);
     }
+    
+    resolve_derived_refs(&mut models);
+
+    // let mut ref_indexes = vec![];
+    // for (model_index, model) in models.iter().enumerate() {
+    //   for (field_index, field) in model.fields.iter().enumerate() {
+    //     let FieldType::RefList(ref_model_index) = field.ty else {
+    //       continue
+    //     };
+    //     let ref_model = &models[ref_model_index];
+    //     // Пропускаем те модели, у которых первым значением в ID стоит ссылка на текущую таблицу
+    //     if matches!(ref_model.fields[0].ty, FieldType::Ref(idx) if idx == model_index) {
+    //       continue;
+    //     }
+    //     ref_indexes.push((model_index,ref_model_index,field_index));
+    //   }
+    // }
+
+    // for (model_index,ref_model_index,field_index) in ref_indexes {
+
+    // }
 
     // resolve_attributes(&mut schema, &model_by_name);
 
@@ -116,7 +139,7 @@ fn resolve_structs(entity: &mut Entity, structs: &HashMap<String, Entity>, model
     field.full_name = field_full_name.clone();
   }
 
-  for field in entity.fields.iter_mut(){
+  for field in entity.fields.iter_mut() {
     match &mut field.ty {
       FieldType::RefUnresolved(name) | FieldType::RefListUnresolved(name) => {
         let Some(st) = structs.get(name) else {
@@ -137,6 +160,7 @@ fn resolve_structs(entity: &mut Entity, structs: &HashMap<String, Entity>, model
         parent_id.name = "@parent_id".to_string();
         parent_id.ty = FieldType::RefUnresolved(entity.name.to_string());
         parent_id.default_value = None;
+        parent_id.attributes.push(Attribute::DerivedUnresolved(field.name.clone()));
         entity_model.fields.insert(0, parent_id);
 
         resolve_structs(&mut entity_model, structs, model_structs);
@@ -160,7 +184,7 @@ fn resolve_refs(
         match &field.ty {
             FieldType::RefUnresolved(name) => {
               if let Some(model_index) = model_by_name.get(name) {
-                field.ty = FieldType::Ref(*model_index);
+                field.ty = FieldType::Ref { model_index: *model_index, rev_field_idx: None, st_index: None };
               } else {
                 panic!("Unknown type {}", name)
               }
@@ -187,9 +211,8 @@ fn resolve_refs(
                 // }
             }
             FieldType::RefListUnresolved(name) => {
-
               if let Some(model_index) = model_by_name.get(name) {
-                field.ty = FieldType::RefList(*model_index);
+                field.ty = FieldType::RefList { model_index: *model_index, rev_field_idx: None, st_index: None };
                 // let index_name = format!("{}.{}", model_name, field.name);
                 // field.inserted_indexes.direct = Some(InsertedIndex { tree_name: index_name });
               } else {
@@ -281,9 +304,72 @@ fn resolve_counter_idx(entity: &mut Entity, counter_id: &mut usize) {
   }
 }
 
+fn split_derived_name(value: &str) -> (Option<&str>,&str) {
+    let Some(last_index) = value.rfind('.') else {
+        return (None,value)
+    };
+
+    return (Some(&value[..last_index]),&value[last_index+1..]);
+}
+
+fn resolve_derived_refs(models: &mut [Entity]) {
+
+    let mut field_bindings = vec![];
+    let mut st_refs = HashMap::new();
+
+    for (model_index, model) in models.iter().enumerate() {
+        for (field_index, field) in model.fields.iter().enumerate() {
+            let (
+                FieldType::Ref { model_index: ref_model_index, .. } | 
+                FieldType::RefList { model_index: ref_model_index, .. }
+            ) = field.ty else {
+                continue;
+            };
+            let Some(derived_field_name) = field.attributes
+                .iter()
+                .find_map(|a| match a {
+                    Attribute::DerivedUnresolved(name) => Some(name),
+                    _ => None
+                }) else { continue; };
+
+            let (table_name,derived_field_name) = split_derived_name(derived_field_name);
+            let mut ref_model_index = ref_model_index;
+            if let Some(table_name) = table_name && table_name.contains(".") {
+                ref_model_index = models.iter().position(|m| m.name == table_name).unwrap_or_else(|| {
+                    panic!("Cannot find derived field {}.{} ({})", table_name, derived_field_name, field.full_name);
+                });
+
+                st_refs.insert(FieldRef::new(model_index, field_index), ref_model_index);
+            }
+
+            let ref_model = &models[ref_model_index];
+            let ref_field_index = ref_model.fields.iter().position(|f| &f.name == derived_field_name).unwrap_or_else(|| {
+                panic!("Cannot find nested derived field {}.{} ({})", ref_model.name, derived_field_name, field.full_name);
+            });
+            
+            field_bindings.push((FieldRef::new(model_index, field_index), FieldRef::new(ref_model_index, ref_field_index)));
+        }
+    }    
+
+    for (field_a_ref, field_b_ref) in field_bindings.iter() {
+        let field_a = &mut models[field_a_ref.model_index].fields[field_a_ref.field_index];
+        if let FieldType::Ref { rev_field_idx, st_index, .. } | FieldType::RefList { rev_field_idx, st_index, .. } = &mut field_a.ty {
+            *rev_field_idx = Some(field_b_ref.field_index);
+            *st_index = st_refs.get(field_a_ref).copied();
+        }
+        
+        let field_b = &mut models[field_b_ref.model_index].fields[field_b_ref.field_index];
+        if let FieldType::Ref { rev_field_idx, st_index, .. } | FieldType::RefList { rev_field_idx, st_index, .. } = &mut field_b.ty {
+            *rev_field_idx = Some(field_a_ref.field_index);
+            *st_index = st_refs.get(field_b_ref).copied();
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
-  use crate::schema::{parse_schema};
+  use crate::schema::{FieldType, parse_schema};
 
   #[test]
   fn test_parse_schema() {
@@ -312,6 +398,24 @@ mod tests {
     // user
     // role
     assert_eq!(schema.models[2].fields.len(), 3);
+
+    match schema.models[2].fields[1].ty {
+        FieldType::Ref { model_index, rev_field_idx, st_index } => {
+            assert_eq!(schema.models[model_index].name, "User");
+            assert_eq!(st_index, None);
+            assert_eq!(schema.models[model_index].fields[rev_field_idx.unwrap()].name, "projects");
+        },
+        _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
+    }
+
+    match schema.models[0].fields[2].ty {
+        FieldType::RefList { model_index, rev_field_idx, st_index } => {
+            assert_eq!(schema.models[model_index].name, "Project");
+            assert_eq!(schema.models[st_index.unwrap()].name, "Project.users");
+            assert_eq!(schema.models[st_index.unwrap()].fields[rev_field_idx.unwrap()].name, "user");
+        },
+        _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
+    }
 
   }
 }

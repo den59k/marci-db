@@ -94,8 +94,8 @@ pub enum FieldType {
     RefUnresolved(String),
     // Ссылка на список либо model, либо struct
     RefListUnresolved(String),
-    Ref(usize),
-    RefList(usize),
+    Ref { model_index: usize, rev_field_idx: Option<usize>, st_index: Option<usize> },
+    RefList { model_index: usize, rev_field_idx: Option<usize>, st_index: Option<usize> },
     PrimitiveList(PrimitiveFieldType),
     PrimitiveFixedList(PrimitiveFieldType,usize),
     // Struct(Entity),
