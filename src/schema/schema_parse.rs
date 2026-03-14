@@ -385,7 +385,7 @@ fn resolve_ref_bindings(models: &mut [Entity]) {
                     continue;
                 }
                 // Также нам незачем ставить индексы на не виртуальные поля, если нет обратной ссылки
-                if !matches!(field.location, FieldLocation::Virtual) && ref_info.rev_field_idx.is_none() {
+                if !matches!(field.location, FieldLocation::Virtual) {
                     ref_info.binding = RefBinding::FieldValue;
                     continue;
                 }
@@ -410,6 +410,7 @@ mod tests {
     model User {
         name            String
         projects        Project[]       @derived(Project.users.user)
+        projectOwners   Project[]       @derived(Project.author)
     }
 
     model Project {
@@ -439,17 +440,28 @@ mod tests {
     // role
     assert_eq!(schema.models[2].fields.len(), 3);
 
+    // Check Project.users.user field type
     match &schema.models[2].fields[1].ty {
         FieldType::Ref (ref_info) => {
             assert_eq!(schema.models[ref_info.model_index].name, "User");
             assert_eq!(schema.models[ref_info.model_index].fields[ref_info.rev_field_idx.unwrap()].name, "projects");
             assert_eq!(ref_info.parent_index, None);
 
-            assert_eq!(ref_info.binding, RefBinding::IndexTree("Project.users.user->User".to_string()));
+            assert_eq!(ref_info.binding, RefBinding::FieldValue);
+        },
+        _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
+    }
+
+    // Check Project.author type
+    match &schema.models[1].fields[4].ty {
+        FieldType::Ref (ref_info) => {
+            assert_eq!(schema.models[ref_info.model_index].name, "User");
+            assert_eq!(ref_info.binding, RefBinding::FieldValue);
         },
         _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
     }
     
+    // Check User.projects type
     match &schema.models[0].fields[2].ty {
         FieldType::RefList(ref_info) => {
             assert_eq!(schema.models[ref_info.model_index].name, "Project.users");

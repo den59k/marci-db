@@ -1,29 +1,21 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldType, Schema}};
+use crate::{Field, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
     return Err(ParseError::NotAnObject)
   };
-  return parse_query_internal(schema, entity, obj, None);
+  return parse_query_internal(schema, entity, obj);
 }
 
-pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Map<String,Value>, parent: Option<&Entity>) -> Result<QueryOp<'a>, ParseError> {
+pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Map<String,Value>) -> Result<QueryOp<'a>, ParseError> {
   
   let mut mask = bitvec![0; entity.fields.len()];
   let mut includes = vec![];
-
-  let mut prefix_key: Option<PrefixKey> = None;
   
   for (field_index, field) in entity.fields.iter().enumerate() {
-    
-    if let Some(parent) = parent && field_index == 0 && schema.is_parent_key(field, parent) {
-      prefix_key = Some(PrefixKey::ParentId);
-      continue;
-    }
-
     let Some(val) = json_val.get(&field.name) else {
       continue;
     };
@@ -33,25 +25,45 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     match &field.ty {
       FieldType::Ref (ref_info) => {
         if matches!(val, Value::Bool(true)) {
-          // TODO: add full struct here
-          continue;
+          todo!("Add select all fields from model");
         }
         let Some(obj) = val.as_object() else {
           return Err(ParseError::type_mismatch(field, "object"))
         };
         
-        let op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj, Some(entity))?;
+        let mut op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj)?;
+        match &ref_info.binding {
+          RefBinding::CurrentId => {
+            op.prefix_key = Some(PrefixKey::ParentId);
+          }
+          RefBinding::FieldValue => {
+            op.prefix_key = Some(PrefixKey::ParentField(field));
+          },
+          RefBinding::IndexTree(tree_name) => {
+            op.prefix_key = Some(PrefixKey::ParentIndexTree(tree_name.clone()))
+          },
+        }
         includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
       }
       FieldType::RefList (ref_info) => {
         if matches!(val, Value::Bool(true)) {
-          // TODO: add full struct here
-          continue;
+          todo!("Add select all fields from model");
         }
         let Some(obj) = val.as_object() else {
           return Err(ParseError::type_mismatch(field, "object"))
         };
-        let op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj, Some(entity))?;
+        let mut op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj)?;
+        match &ref_info.binding {
+          RefBinding::CurrentId => {
+            op.prefix_key = Some(PrefixKey::ParentId);
+          }
+          RefBinding::FieldValue => {
+            op.prefix_key = Some(PrefixKey::ParentField(field));
+          },
+          RefBinding::IndexTree(tree_name) => {
+            op.prefix_key = Some(PrefixKey::ParentIndexTree(tree_name.clone()))
+          },
+        }
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
       }
       _ => {
@@ -60,7 +72,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  Ok(QueryOp { mask, entity, sort: None, filter: None, prefix_key, includes, take: None, skip: None })
+  Ok(QueryOp { mask, entity, sort: None, filter: None, prefix_key: None, includes, take: None, skip: None })
 }
 
 #[derive(Debug)]

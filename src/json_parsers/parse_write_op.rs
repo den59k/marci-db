@@ -102,9 +102,13 @@ fn from_json_internal<'a>(
                         encode_list(&mut data, value, field, &primitive_type, Some(*fixed_size))?;
                     },
                     FieldType::Ref (ref_info) => {
-                        let connect_id = encode_id(schema, &schema.models[ref_info.model_index], value)?;
+                        let ref_entity = &schema.models[ref_info.model_index];
+                        let connect_id = encode_id(schema, ref_entity, value)?;
                         write_header(&mut data, offset);
                         data.extend(connect_id);
+                        
+                        let ref_id = encode_id(schema, ref_entity, value)?;
+                        refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ] });
                     },
                     _ => { 
                         return Err(EncodeError::UnavailableKeyField(field.full_name.clone()));
@@ -123,8 +127,8 @@ fn from_json_internal<'a>(
                         let op = from_json_internal(schema, ref_entity, value, true, Some(entity))?;
                         refs.push(WriteRelation::Create { field, op });
                     } else {
-                        let id = encode_id(schema, ref_entity, value)?;
-                        refs.push(WriteRelation::Connect { field, st: ref_entity, ids: vec![id] });
+                        let ref_id = encode_id(schema, ref_entity, value)?;
+                        refs.push(WriteRelation::Connect { field, ids: vec![ref_id] });
                     }
                 },
                 FieldType::RefList (ref_info) => {
@@ -132,7 +136,7 @@ fn from_json_internal<'a>(
                     let Some(value) = value.as_array() else {
                         return Err(EncodeError::type_mismatch(field, "Array"))
                     };
-                    if value.len() == 0 {
+                    if value.is_empty() {
                         refs.push(WriteRelation::Empty { field, st: ref_entity });
                         continue;
                     }
@@ -153,7 +157,7 @@ fn from_json_internal<'a>(
                             let id = encode_id(schema, ref_entity, obj)?;
                             ids.push(id);
                         }
-                        refs.push(WriteRelation::Connect { field, st: ref_entity, ids });
+                        refs.push(WriteRelation::Connect { field, ids });
                     }
                 },
                 _ => { 
@@ -444,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_encode_struct_data() {
-        let schema_str = "
+        let schema=  parse_schema("
             model User {
                 name        String
             }
@@ -458,9 +462,7 @@ mod tests {
                 user        User          @id
                 role        String
             }
-        ";
-
-        let schema=  parse_schema(schema_str);
+        ");
         let model = &schema.models[1];
 
         let input = json!({
@@ -491,5 +493,29 @@ mod tests {
         // assert_eq!()
 
     }   
+
+     #[test]
+    fn test_encode_relation_data() {
+        let schema = parse_schema("
+            model User {
+                name        String
+                posts       Post[]  @derived(Post.author)
+            }
+
+            model Post {
+                title        String
+                author       User?
+            }
+        ");
+
+        let post_model = &schema.models[1];
+        let input = json!({
+            "title": "First Post",
+            "author": { "id": 1 },
+        });
+
+        let encoded = parse_insert(&schema, post_model, &input).unwrap();
+        assert_eq!(encoded.refs.len(), 1);
+    }
 
 }

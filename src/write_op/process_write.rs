@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
 
-use canopydb::WriteTransaction;
+use canopydb::{Tree, WriteTransaction};
 
-use crate::{MarciDB, schema::FieldDefault, write_op::{WriteDefault, WriteOp, WriteRelation}};
+use crate::{MarciDB, schema::{FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteOp, WriteRelation}};
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -56,9 +56,59 @@ pub fn write_data(insert: &WriteOp, tx: &WriteTransaction, db: &MarciDB, parent_
           write_data(op, tx, db, Some(&write_id))?;
         }
       }
+      WriteRelation::Connect { field, ids } => {
+        match &field.ty {
+          FieldType::Ref(ref_info) => {
+            write_index(tx, ref_info, &db.schema, &write_id, &ids);
+          },
+          FieldType::RefList(ref_info) => {
+            write_index(tx, ref_info, &db.schema, &write_id, &ids);
+          },
+          _ => panic!("Trying to connect to non-Ref field")
+        }
+      }
       _ => {}
     }
   }
 
   Ok(write_id)
+}
+
+#[inline(always)]
+fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) {
+  let mut key = Vec::with_capacity(left.len() + right.len());
+  key.extend_from_slice(left);
+  key.extend_from_slice(right);
+  tree.insert(&key, &[1]).unwrap();
+}
+
+fn write_index(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) {
+  
+  if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+    let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+    for item_id in ids {
+      insert_index(&mut tree, id, item_id);
+    }
+  }
+
+  if let Some(ref_field_idx) = ref_info.rev_field_idx {
+    match &schema.models[ref_info.model_index].fields[ref_field_idx].ty {
+      FieldType::Ref(ref_info) => {
+        write_index_opposite(tx, ref_info, id, ids);
+      },
+      FieldType::RefList(ref_info) => {
+        write_index_opposite(tx, ref_info, id, ids);
+      },
+      _ => panic!("Trying to connect to non-Ref field")
+    }
+  }
+}
+
+fn write_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>) {
+  if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+    let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+    for item_id in ids {
+      insert_index(&mut tree, item_id, id);
+    }
+  }
 }

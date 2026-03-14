@@ -45,7 +45,6 @@ pub enum WriteRelation<'a> {
     },
     Connect {
         field: &'a Field,
-        st: &'a Entity,
         ids: Vec<Vec<u8>>
     },
     Update {

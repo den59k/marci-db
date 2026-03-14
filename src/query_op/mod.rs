@@ -14,7 +14,7 @@ pub struct QueryOp<'a> {
   pub filter: Option<Where<'a>>,
   pub take: Option<usize>,
   pub skip: Option<usize>,
-  pub prefix_key: Option<PrefixKey>,
+  pub prefix_key: Option<PrefixKey<'a>>,
   pub includes: Vec<QueryInclude<'a>>
 }
 
@@ -42,8 +42,10 @@ pub struct QueryInclude<'a> {
 }
 
 #[derive(Debug)]
-pub enum PrefixKey {
-  ParentId
+pub enum PrefixKey<'a> {
+  ParentId,
+  ParentField(&'a Field),
+  ParentIndexTree(String)
 }
 
 impl QueryOp<'_> {

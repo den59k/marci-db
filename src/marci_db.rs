@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
+use crate::{query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -48,10 +48,16 @@ impl MarciDB {
     self.model_by_name.get(name).and_then(|idx| { Some(&self.schema.models[*idx]) })
   }
   
-  pub fn query_data<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where F: Fn(DecodeCtx<U>) -> U { 
+  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where F: Fn(DecodeCtx<U>) -> U { 
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
     return process_query_many(query, &mut ctx,None);
+  }
+
+  pub fn find_unique<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
+    let rx = self.db.begin_read().unwrap();
+    let mut ctx = TransationContext::new(&rx, &self.schema, f);
+    return process_query_one(query, &mut ctx,None);
   }
 
   pub fn count(&self, entity: &Entity) -> u64 {
@@ -70,11 +76,11 @@ impl MarciDB {
 
 }
 
-#[derive(Debug)]
-pub enum DeleteError {
-  ItemNotFound,
-  RestrictConstraints(String,Vec<u64>)
-}
+// #[derive(Debug)]
+// pub enum DeleteError {
+//   ItemNotFound,
+//   RestrictConstraints(String,Vec<u64>)
+// }
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {
   let mut counters = Vec::with_capacity(schema.models.len());

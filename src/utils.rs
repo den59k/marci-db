@@ -39,7 +39,7 @@ pub fn get_id_field_size<'a>(id: &'a [u8], field: &Field, offset: usize, schema:
   }
 }
 
-pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], schema: Schema) -> Option<&'a[u8]> {
+pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], schema: &Schema) -> Option<&'a[u8]> {
   match field.location {
     FieldLocation::Key { index: field_location_index } => {
       let mut offset = 0;
