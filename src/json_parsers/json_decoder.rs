@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bitvec::vec::BitVec;
 
-use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{get_end, get_offset}};
+use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{get_end, get_id_field_size, get_offset}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -220,7 +220,7 @@ pub fn decode_id(id: &[u8], entity: &Entity, schema: &Schema) -> String {
     return str;
 }
 
-// Декодирует 
+// Декодирует все поля
 pub fn decode_fields<'a>(
     id: &'a [u8],
     data: &'a [u8], 
@@ -234,20 +234,20 @@ pub fn decode_fields<'a>(
     let mut id_offset = 0;
     for (field_index, field) in fields.iter().enumerate() {
         match field.location {
-          FieldLocation::Key { .. } => {
-            let size = get_id_field_size(id, field, id_offset, schema);
-            if !mask[field_index] { 
-              id_offset += size;
-              continue;
-            }
-            decode_id_field(&id[id_offset..id_offset+size], field, schema, obj)?;
-            id_offset += size;
-          },
-          FieldLocation::Body { offset } => {
-            if !mask[field_index] { continue;  }
-            decode_body_field(data, offset, field, obj, payload_offset)?
-          },
-          FieldLocation::Virtual => {}
+            FieldLocation::Key { .. } => {
+                let size = get_id_field_size(id, field, id_offset, schema);
+                if !mask[field_index] { 
+                    id_offset += size;
+                    continue;
+                }
+                decode_id_field(&id[id_offset..id_offset+size], field, schema, obj)?;
+                id_offset += size;
+            },
+            FieldLocation::Body { offset } => {
+                if !mask[field_index] { continue; }
+                decode_body_field(data, offset, field, obj, payload_offset)?
+            },
+            FieldLocation::Virtual => {}
         }
     }
 
@@ -257,41 +257,18 @@ pub fn decode_fields<'a>(
 // Декодирует в JSON значение из ID
 fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut String) -> Result<(), DecodeError> {
   let field_name = field.name.clone();
-  match field.ty {
+  match &field.ty {
     FieldType::Primitive(primitive) => {
         let value = decode_value(&primitive, &data)?;
         insert_value(obj, &field_name, &value);
         Ok(())
     },
-    FieldType::Ref { model_index, .. } => {
-        let ref_entity = &schema.models[model_index];
+    FieldType::Ref (ref_info) => {
+        let ref_entity = &schema.models[ref_info.model_index];
         let value = &decode_id(data, ref_entity, schema);
         insert_value(obj, &field_name, value);
         Ok(())
     },
-    _ => { panic!("Non primitive types in key is not supported") }
-  }
-}
-
-// Вычисляет размер значения из ID
-fn get_id_field_size<'a>(id: &'a [u8], field: &Field, offset: usize, schema: &Schema) -> usize {
-  match field.ty {
-    FieldType::Primitive(primitive) => {
-        primitive.get_size().unwrap_or_else(|| {
-            id[offset..].iter().position(|&b| b == b'\0').unwrap_or(id.len()-offset)
-        })
-    },
-    FieldType::Ref { model_index, .. } => {
-        let ref_entity = &schema.models[model_index];
-        let mut id_size = 0;
-        let ref_id = &id[offset..];
-        for ref_field in ref_entity.fields.iter() {
-            if matches!(ref_field.location, FieldLocation::Key { .. }) {
-                id_size += get_id_field_size(ref_id, ref_field, id_size, schema);
-            }
-        }
-        id_size
-    },  
     _ => { panic!("Non primitive types in key is not supported") }
   }
 }

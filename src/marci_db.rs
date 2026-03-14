@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many}, schema::{Entity, FieldDefault, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
+use crate::{query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -23,6 +23,14 @@ impl MarciDB {
 
     for model in schema.models.iter() {
       tx.get_or_create_tree(model.name.as_bytes()).unwrap();
+
+      for field in model.fields.iter() {
+        if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
+          if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+            tx.get_or_create_tree(tree_name.as_bytes()).unwrap();
+          }
+        }
+      }
     }
 
     let counters = build_counters(&schema, &tx);

@@ -3,11 +3,9 @@ use std::collections::HashMap;
 mod schema_field;
 mod schema_parse;
 mod schema_attributes;
-mod schema_index;
 
-pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,FieldDefault};
+pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,FieldDefault,RefInfo,RefBinding};
 pub use crate::schema::{schema_parse::parse_schema};
-pub use crate::schema::schema_index::{InsertedIndex,InsertedIndexSt};
 
 #[derive(Debug,Clone)]
 pub struct Schema {
@@ -45,12 +43,12 @@ impl Schema {
     }
 
     pub(crate) fn is_parent_key(&self, field: &Field, entity: &Entity) -> bool {
-        let FieldType::Ref { model_index, .. } = field.ty else {
+        let FieldType::Ref (ref_info) = &field.ty else {
             return false;
         };
         if !matches!(field.location, FieldLocation::Key { .. }) {
             return false;
         }
-        return self.models[model_index].name == entity.name;
+        return self.models[ref_info.model_index].name == entity.name;
     }
 }

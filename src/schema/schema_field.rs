@@ -27,7 +27,6 @@ pub enum FieldDefault {
 }
 
 impl Field {
-
     pub fn new_id() -> Self {
         Field { 
             name: "id".to_string(), 
@@ -43,6 +42,13 @@ impl Field {
     pub fn is_id(&self) -> bool {
         return matches!(self.location, FieldLocation::Key { .. });
     }
+
+    pub fn get_size(&self) -> Option<usize> {
+        return match self.ty {
+            FieldType::Primitive(primitive) => primitive.get_size(),
+            _ => None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,7 +63,6 @@ pub enum PrimitiveFieldType {
 }
 
 impl PrimitiveFieldType {
-
     pub fn get_size(&self) -> Option<usize> {
         return match *self {
             PrimitiveFieldType::Bool => Some(1),
@@ -90,17 +95,39 @@ impl fmt::Display for PrimitiveFieldType {
 #[derive(Debug, Clone)]
 pub enum FieldType {
     Primitive(PrimitiveFieldType),
-    // Ссылка на либо model, либо struct
+    // Unresolved тип используется только при парсинге
     RefUnresolved(String),
-    // Ссылка на список либо model, либо struct
     RefListUnresolved(String),
-    Ref { model_index: usize, rev_field_idx: Option<usize>, st_index: Option<usize> },
-    RefList { model_index: usize, rev_field_idx: Option<usize>, st_index: Option<usize> },
+    // Ref хранит в себе ID от model_index
+    Ref(RefInfo),
+    // RefList - это всегда Virtual поле, то есть он хранит инфо только в индексе
+    RefList(RefInfo),
     PrimitiveList(PrimitiveFieldType),
     PrimitiveFixedList(PrimitiveFieldType,usize),
     // Struct(Entity),
     // StructList(Entity),
     // Enum(EnumDef)
+}
+
+#[derive(Debug, Clone)]
+pub struct RefInfo {
+    pub model_index: usize, 
+    pub rev_field_idx: Option<usize>, 
+    pub parent_index: Option<usize>, 
+    pub binding: RefBinding
+}
+
+impl RefInfo {
+    pub fn new(model_index: usize) -> Self {
+        return RefInfo { model_index, rev_field_idx: None, parent_index: None, binding: RefBinding::CurrentId }
+    }
+}
+
+#[derive(Debug, Clone,PartialEq)]
+pub enum RefBinding {
+    CurrentId,
+    FieldValue,
+    IndexTree(String)
 }
 
 pub fn parse_field_raw(line: &str) -> Field {

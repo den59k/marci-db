@@ -88,7 +88,7 @@ fn from_json_internal<'a>(
                 encode_id_value(&mut id, field, schema, value)?;
             },
             FieldLocation::Body { offset } => {
-                match field.ty {
+                match &field.ty {
                     FieldType::Primitive(primitive_type) => {
                         write_header(&mut data, offset);
                         encode_primitive_value(&mut data, field, &primitive_type, value)?;
@@ -99,10 +99,10 @@ fn from_json_internal<'a>(
                     },
                     FieldType::PrimitiveFixedList(primitive_type, fixed_size) => {
                         write_header(&mut data, offset);
-                        encode_list(&mut data, value, field, &primitive_type, Some(fixed_size))?;
+                        encode_list(&mut data, value, field, &primitive_type, Some(*fixed_size))?;
                     },
-                    FieldType::Ref { model_index, .. } => {
-                        let connect_id = encode_id(schema, &schema.models[model_index], value)?;
+                    FieldType::Ref (ref_info) => {
+                        let connect_id = encode_id(schema, &schema.models[ref_info.model_index], value)?;
                         write_header(&mut data, offset);
                         data.extend(connect_id);
                     },
@@ -112,10 +112,10 @@ fn from_json_internal<'a>(
                 }
             }
             FieldLocation::Virtual => {
-                match field.ty {
-                FieldType::Ref { model_index, .. } => {
+                match &field.ty {
+                FieldType::Ref (ref_info) => {
                     // Здесь может быть как структура, так и модель. Если структура, используем insert
-                    let ref_entity = &schema.models[model_index];
+                    let ref_entity = &schema.models[ref_info.model_index];
                     if ref_entity.autoinsert {
                         let Some(value) = value.as_object() else {
                             return Err(EncodeError::type_mismatch(field, "{ }"))
@@ -127,8 +127,8 @@ fn from_json_internal<'a>(
                         refs.push(WriteRelation::Connect { field, st: ref_entity, ids: vec![id] });
                     }
                 },
-                FieldType::RefList { model_index, .. } => {
-                    let ref_entity = &schema.models[model_index];
+                FieldType::RefList (ref_info) => {
+                    let ref_entity = &schema.models[ref_info.model_index];
                     let Some(value) = value.as_array() else {
                         return Err(EncodeError::type_mismatch(field, "Array"))
                     };
@@ -215,12 +215,12 @@ fn encode_empty(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
 }
 
 fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value: &Value) -> Result<(), EncodeError> {
-    match field.ty {
+    match &field.ty {
         FieldType::Primitive(primitive_type) => {
             encode_primitive_value( dst, field, &primitive_type, value)?;
         }
-        FieldType::Ref { model_index, .. } => {
-            let connect_id = encode_id(schema, &schema.models[model_index], value)?;
+        FieldType::Ref (ref_info) => {
+            let connect_id = encode_id(schema, &schema.models[ref_info.model_index], value)?;
             dst.extend(connect_id);
         }
         _ => {

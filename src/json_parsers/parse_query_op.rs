@@ -31,7 +31,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
       continue;
     }
     match &field.ty {
-      FieldType::Ref { model_index, .. } => {
+      FieldType::Ref (ref_info) => {
         if matches!(val, Value::Bool(true)) {
           // TODO: add full struct here
           continue;
@@ -40,10 +40,10 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
           return Err(ParseError::type_mismatch(field, "object"))
         };
         
-        let op = parse_query_internal(schema, &schema.models[*model_index], obj, Some(entity))?;
+        let op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj, Some(entity))?;
         includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
       }
-      FieldType::RefList { model_index, .. } => {
+      FieldType::RefList (ref_info) => {
         if matches!(val, Value::Bool(true)) {
           // TODO: add full struct here
           continue;
@@ -51,7 +51,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
         let Some(obj) = val.as_object() else {
           return Err(ParseError::type_mismatch(field, "object"))
         };
-        let op = parse_query_internal(schema, &schema.models[*model_index], obj, Some(entity))?;
+        let op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj, Some(entity))?;
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
       }
       _ => {
@@ -116,7 +116,6 @@ mod tests {
       let encoded = parse_query(&schema, user_model, &input).unwrap();
       assert_eq!(encoded.includes.len(), 1);
       
-      println!("{:?}", encoded.includes[0].query);
       assert!(matches!(encoded.includes[0].query.prefix_key, Some(PrefixKey::ParentId)));
     }
 
