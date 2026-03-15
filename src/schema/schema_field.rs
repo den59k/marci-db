@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use crate::schema::{schema_attributes::{Attribute, parse_attribute}};
 
@@ -18,12 +18,8 @@ pub struct Field {
     pub location: FieldLocation,
     pub nullable: bool,
     pub attributes: Vec<Attribute>,
-    pub default_value: Option<FieldDefault>
-}
-
-#[derive(Debug,Clone)]
-pub enum FieldDefault {
-    Counter(usize)
+    pub default_value: Option<FieldDefault>,
+    pub condition: FieldCondition
 }
 
 impl Field {
@@ -35,7 +31,8 @@ impl Field {
             nullable: false,
             location: FieldLocation::Key { index: 0 },
             attributes: vec![],
-            default_value: Some(FieldDefault::Counter(0))
+            default_value: Some(FieldDefault::Counter(0)),
+            condition: FieldCondition::None
         }
     }
 
@@ -46,6 +43,7 @@ impl Field {
     pub fn get_size(&self) -> Option<usize> {
         return match self.ty {
             FieldType::Primitive(primitive) => primitive.get_size(),
+            FieldType::Enum(_) => Some(2),
             _ => None
         }
     }
@@ -106,7 +104,24 @@ pub enum FieldType {
     PrimitiveFixedList(PrimitiveFieldType,usize),
     // Struct(Entity),
     // StructList(Entity),
-    // Enum(EnumDef)
+    Enum(EnumInfo)
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumInfo {
+    pub variants: HashMap<u16,Vec<usize>>,
+    pub variants_map: HashMap<String,u16>,
+    pub variants_names_map: HashMap<u16,String> // Обратная map к variants_map
+}
+
+impl EnumInfo {
+    pub fn keys_to_string(&self) -> String {
+        self.variants_map
+            .keys()
+            .map(|s| [ "\"", s, "\""].concat() )
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +138,7 @@ impl RefInfo {
     }
 }
 
+/// Место хранения связи между таблицами
 #[derive(Debug, Clone,PartialEq)]
 pub enum RefBinding {
     CurrentId,
@@ -130,11 +146,33 @@ pub enum RefBinding {
     IndexTree(String)
 }
 
+
+#[derive(Debug,Clone)]
+pub enum FieldDefault {
+    Counter(usize)
+}
+
+
+#[derive(Debug,Clone)]
+pub enum FieldCondition {
+    None,
+    EnumValue { field_index: usize, variant: u16 }
+}
+
+fn is_valid_string(s: &str) -> bool {
+    s.chars().all(|c| {
+        c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '_'
+    })
+}
+
 pub fn parse_field_raw(line: &str) -> Field {
     // имя и тип
     let mut parts = line.split_whitespace();
 
     let name = parts.next().expect("expected field name").to_string();
+    if !is_valid_string(&name) {
+        panic!("Invalid field name: \"{}\"", name);
+    }
 
     let type_str = parts.next().expect("expected field type");
 
@@ -169,7 +207,8 @@ pub fn parse_field_raw(line: &str) -> Field {
       location,
       nullable,
       attributes,
-      default_value: None
+      default_value: None,
+      condition: FieldCondition::None
     }
 }
 

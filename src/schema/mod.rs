@@ -3,8 +3,9 @@ use std::collections::HashMap;
 mod schema_field;
 mod schema_parse;
 mod schema_attributes;
+mod schema_enum;
 
-pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,FieldDefault,RefInfo,RefBinding};
+pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,FieldDefault,RefInfo,RefBinding,EnumInfo,FieldCondition};
 pub use crate::schema::{schema_parse::parse_schema};
 
 #[derive(Debug,Clone)]

@@ -71,13 +71,8 @@ pub fn get_prefix<'a>(prefix_key: &'a PrefixKey, parent: Option<ParentData<'a>>,
       let (entity,parent_id,parent_body) = &parent.unwrap();
       return get_data(entity, field, parent_id, parent_body, schema);    
     },
-    // PrefixKey::ParentIndexTree(tree_name) => {
-    //   let (_,parent_id,_) = parent.unwrap();
-    //   let index_tree = ctx.get_tree(&tree_name);
-    //   index_tree.range(bounds)
-    // },
     _ => {
-      todo!("Make prefix by {:?}", prefix_key);
+      panic!("Cannot get prefix from {:?}", prefix_key)
     }
   }
 }

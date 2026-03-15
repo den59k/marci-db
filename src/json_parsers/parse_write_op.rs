@@ -2,7 +2,7 @@ use bitvec::{bitvec};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::{Field, schema::{Entity, FieldDefault, FieldLocation, FieldType, PrimitiveFieldType, Schema}, write_op::{WriteDefault, WriteOp, WriteRelation}};
+use crate::{Field, schema::{Entity, EnumInfo, FieldDefault, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_condition}, write_op::{WriteDefault, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -63,8 +63,14 @@ fn from_json_internal<'a>(
             }
         }
 
+        // Если ключ является родительским, то мы сразу его заполняем значением
         if let Some(parent) = parent && schema.is_parent_key(field, parent) {
             defaults.push(WriteDefault::ParentId(id.len()));
+            continue;
+        }
+
+        // Пропускаем внутренние значения enum, если у нас стоит не тот enum
+        if !check_condition(entity, &field.condition, &id, &data, schema) {
             continue;
         }
 
@@ -110,6 +116,10 @@ fn from_json_internal<'a>(
                         let ref_id = encode_id(schema, ref_entity, value)?;
                         refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ] });
                     },
+                    FieldType::Enum(enum_def) => {
+                        write_header(&mut data, offset);
+                        encode_enum(&mut data, field, enum_def, value)?;
+                    }
                     _ => { 
                         return Err(EncodeError::UnavailableKeyField(field.full_name.clone()));
                     }
@@ -327,6 +337,18 @@ fn encode_list(buf: &mut Vec<u8>, value: &Value, field: &Field, primitive_type: 
    Ok(())
 }
 
+fn encode_enum(dst: &mut Vec<u8>, field: &Field, enum_def: &EnumInfo, v: &Value) -> Result<(), EncodeError> {
+    let Some(s) = v.as_str() else {
+        return Err(EncodeError::type_mismatch(field, "string"));
+    };
+    let Some(val) = enum_def.variants_map.get(s) else {
+        return Err(EncodeError::type_mismatch(field, enum_def.keys_to_string() ));
+    };
+
+    dst.extend_from_slice(&val.to_be_bytes());
+    Ok(())
+}
+
 // Записывает в массив значения с переменной длиной (т.е. строки)
 // [item_0_end,item_1_end..item_n_end][item_0,item_1..item_n]
 fn encode_list_dynamic(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive_type: &PrimitiveFieldType, byte_start: usize) -> Result<(), EncodeError> {
@@ -367,6 +389,7 @@ pub enum EncodeError {
     IdFieldIsNull(String),
     TypeMismatch { field: String, expected: String },
     TryWriteToVirtualField,
+    WrongEnumValue(String, String),
     UnavailableKeyField(String),
     UnavailableKeyFieldId(String),
     EmptyObject,
@@ -386,7 +409,7 @@ impl EncodeError {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use crate::{json_parsers::parse_insert, parse_schema, utils::{get_end, get_offsets}, write_op::{WriteDefault, WriteRelation}};
+    use crate::{json_parsers::{parse_insert, parse_write_op::encode_list}, parse_schema, utils::{get_data, get_end, get_offsets}, write_op::{WriteDefault, WriteRelation}};
 
     #[test]
     fn encode_test() {
@@ -494,7 +517,7 @@ mod tests {
 
     }   
 
-     #[test]
+    #[test]
     fn test_encode_relation_data() {
         let schema = parse_schema("
             model User {
@@ -518,4 +541,87 @@ mod tests {
         assert_eq!(encoded.refs.len(), 1);
     }
 
+    #[test]
+    fn test_encode_enum() {
+        let schema = parse_schema("
+            model User {
+                name        String
+            }
+
+            model Project {
+                name        String
+                users       UserRole[]
+            }
+
+            enum RoleKind {
+                viewer
+                admin {
+                    features String[]
+                }
+            }
+
+            struct UserRole {
+                user        User          @id
+                role        RoleKind
+            }
+        ");
+
+        let project_model = &schema.models[1];
+
+         // Проверяем, что field из enum на месте
+        { 
+            let input = json!({
+                "name": "First project",
+                "users": [{ 
+                    "user": { "id": 1 },
+                    "role": "admin",
+                    "features": [ "root", "tester" ]
+                }]
+            });
+
+            let encoded = parse_insert(&schema, project_model, &input).unwrap();
+            assert_eq!(encoded.refs.len(), 1);
+                
+            let WriteRelation::CreateMany { ops, .. } = &encoded.refs[0] else {
+                panic!("Wrong encoded ref type {:?}", encoded.refs[0]);
+            };
+
+            let enum_field = ops[0].entity.fields.iter().find(|i| i.name == "role").unwrap();
+            assert_eq!(get_data(ops[0].entity, enum_field, &ops[0].id, &ops[0].data, &schema).unwrap(), &[ 0, 1 ]);
+            
+            let features_field = ops[0].entity.fields.iter().find(|i| i.name == "features").unwrap();
+
+            let mut buf = vec![];
+            
+            let features_arr = json!([ "root", "tester" ]);
+            encode_list(&mut buf, &features_arr, features_field, &crate::schema::PrimitiveFieldType::String, None).unwrap();
+
+            assert_eq!(get_data(ops[0].entity, features_field, &ops[0].id, &ops[0].data, &schema).unwrap(), buf);
+        }
+
+        // Проверяем, что field из другого option не записывается в данные
+        {
+            let input = json!({
+                "name": "First project",
+                "users": [{ 
+                    "user": { "id": 1 },
+                    "role": "viewer",
+                    "features": [ "root", "tester" ]
+                }]
+            });
+
+            let encoded = parse_insert(&schema, project_model, &input).unwrap();
+            assert_eq!(encoded.refs.len(), 1);
+
+            let WriteRelation::CreateMany { ops, .. } = &encoded.refs[0] else {
+                panic!("Wrong encoded ref type {:?}", encoded.refs[0]);
+            };
+
+            let enum_field = ops[0].entity.fields.iter().find(|i| i.name == "role").unwrap();
+            assert_eq!(get_data(ops[0].entity, enum_field, &ops[0].id, &ops[0].data, &schema).unwrap(), &[ 0, 0 ]);
+
+            let features_field = ops[0].entity.fields.iter().find(|i| i.name == "features").unwrap();
+            assert_eq!(get_data(ops[0].entity, features_field, &ops[0].id, &ops[0].data, &schema), None);
+        }
+    }
 }

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use bitvec::vec::BitVec;
-
-use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{get_end, get_id_field_size, get_offset}};
+use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_condition, get_end, get_id_field_size, get_offset}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -13,6 +11,7 @@ pub enum DecodeError {
     Utf8Error,
     TypeMismatch(String),
     OffsetOutOfRange,
+    WrongEnumValue(u16)
 }
 
 pub trait FieldName {
@@ -94,18 +93,19 @@ pub fn insert_array_arc<F: FieldName, T: JsonStr>(str: &mut String, field: F, ar
     str.push(']');
 }
 
-// #[inline(always)]
-// /// NOTE: this method does not encode string
-// pub fn insert_string<F: FieldName>(str: &mut String, field: F, val: &String) {
-//     if str.len() > 1 {
-//         str.push(',');
-//     }
-//     str.push('"');
-//     str.push_str(&field.field_name());
-//     str.push_str("\":\"");
-//     str.push_str(&val);
-//     str.push('"');
-// }
+#[inline(always)]
+/// Insert value as string to JSON, e.g., insert_string(..,role,admin) -> "role":"admin"
+/// NOTE: this method does not encode string
+pub fn insert_string<F: FieldName>(str: &mut String, field: F, val: &String) {
+    if str.len() > 1 {
+        str.push(',');
+    }
+    str.push('"');
+    str.push_str(&field.field_name());
+    str.push_str("\":\"");
+    str.push_str(&val);
+    str.push('"');
+}
 
 #[inline(always)]
 pub fn array_to_json(arr: &[String]) -> String {
@@ -145,15 +145,15 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
             return Err(DecodeError::BufferTooSmall);
         }
     
-        // let version = data[0];
-        // if version != 1 {
-        //     return Err(DecodeError::WrongVersion);
-        // }
+        let version = data[0];
+        if version != 1 {
+            return Err(DecodeError::WrongVersion);
+        }
     
-        // if u16::from_be_bytes([data[1], data[2]]) != entity.payload_offset as u16 {
-        //     let offset = u16::from_be_bytes([data[1], data[2]]);
-        //     return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", entity.payload_offset, offset)));
-        // }
+        if u16::from_be_bytes([data[1], data[2]]) != entity.payload_offset as u16 {
+            let offset = u16::from_be_bytes([data[1], data[2]]);
+            return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", entity.payload_offset, offset)));
+        }
     
         if data.len() < entity.payload_offset {
             return Err(DecodeError::BufferTooSmall);
@@ -164,7 +164,29 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     let mut str = String::with_capacity(256);
     str.push('{');
 
-    decode_fields(id, data, &entity.fields, &mut str, mask, schema, entity.payload_offset)?;
+    // Декодируем все поля
+    let mut id_offset = 0;
+    for (field_index, field) in entity.fields.iter().enumerate() {
+        match field.location {
+            FieldLocation::Key { .. } => {
+                let size = get_id_field_size(id, field, id_offset, schema);
+                if !mask[field_index] { 
+                    id_offset += size;
+                    continue;
+                }
+                decode_id_field(&id[id_offset..id_offset+size], field, schema, &mut str)?;
+                id_offset += size;
+            },
+            FieldLocation::Body { offset } => {
+                if !mask[field_index] { continue; }
+                if !check_condition(entity, &field.condition, &id, &data, schema) {
+                    continue;
+                }
+                decode_body_field(data, offset, field, &mut str, entity.payload_offset)?
+            },
+            FieldLocation::Virtual => {}
+        }
+    }
     
     // if let Some(inject_str) = inject {
     //     if inject_str.len() > 2 {
@@ -182,16 +204,12 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
         match include {
             IncludeResult::None(field) => {
                 insert_null(&mut str, field);
-                // obj.insert(field.name.clone(), Value::Null);
             },
             IncludeResult::One(field, val) => {
                 insert_value(&mut str, field, &val);
-                // obj.insert(field.name.clone(), val);
             },
             IncludeResult::Many(field, val) => {
                 insert_array_arc(&mut str, field, &val);
-                // let vec = Value::Array(val);
-                // obj.insert(field.name.clone(), vec);
             }
         }
     }
@@ -218,40 +236,6 @@ pub fn decode_id(id: &[u8], entity: &Entity, schema: &Schema) -> String {
     }
     str.push('}');
     return str;
-}
-
-// Декодирует все поля
-pub fn decode_fields<'a>(
-    id: &'a [u8],
-    data: &'a [u8], 
-    fields: &[Field], 
-    obj: &mut String, 
-    mask: &BitVec, 
-    // aliases: Option<&Aliases>,
-    schema: &'a Schema,
-    payload_offset: usize
-) -> Result<(), DecodeError> {
-    let mut id_offset = 0;
-    for (field_index, field) in fields.iter().enumerate() {
-        match field.location {
-            FieldLocation::Key { .. } => {
-                let size = get_id_field_size(id, field, id_offset, schema);
-                if !mask[field_index] { 
-                    id_offset += size;
-                    continue;
-                }
-                decode_id_field(&id[id_offset..id_offset+size], field, schema, obj)?;
-                id_offset += size;
-            },
-            FieldLocation::Body { offset } => {
-                if !mask[field_index] { continue; }
-                decode_body_field(data, offset, field, obj, payload_offset)?
-            },
-            FieldLocation::Virtual => {}
-        }
-    }
-
-    return Ok(());
 }
 
 // Декодирует в JSON значение из ID
@@ -315,17 +299,13 @@ fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: 
         };
         insert_array_arc(obj, field, &vec);
     },
-    // FieldType::Enum(en) => {
-    //     let offset = get_offset_checked(data, field.offset_pos)?;
-    //     // Поле = null
-    //     if offset == 0 {
-    //         insert_null(obj, &field_name);
-    //         continue;
-    //     }
-
-    //     let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap()) as usize;
-    //     insert_string(obj, &field_name, &en.variants[variant_index].name);
-    // }
+    FieldType::Enum(en) => {
+        let variant_index = u16::from_be_bytes(data[offset..offset+2].try_into().unwrap());
+        let Some(variant_value) = &en.variants_names_map.get(&variant_index) else {
+            return Err(DecodeError::WrongEnumValue(variant_index))
+        };
+        insert_string(obj, &field_name, variant_value);
+    }
     _ => {}
   };
 
@@ -525,5 +505,75 @@ mod tests {
             "name": "Project A",
             "users": [{ "user": { "id": 1 }, "role": "creator" }]
         }))
+    }
+
+    #[test]
+    fn test_decode_enum() {
+        let schema = parse_schema("
+            model Account {
+                name        String
+                type        AccountType
+            }
+
+            enum AccountType {
+                basic
+                pro {
+                    features String[]
+                }
+            } 
+        ");
+
+        let account_model = &schema.models[0];
+
+        {
+            let input = json!({
+                "name": "Alice",
+                "type": "basic"
+            });
+    
+            let encoded = parse_insert(&schema, account_model, &input).unwrap();
+                        
+            let resp: String = decode_document(DecodeCtx {
+                id: &encoded.id,
+                data: &encoded.data,
+                entity: account_model,
+                mask: &bitvec!(1;  schema.models[0].fields.len()),
+                includes: vec![],
+                schema: &schema,
+            }).unwrap();
+    
+            assert_eq!(serde_json::from_str::<Value>(&resp).unwrap(), json!({
+                "id": 0,
+                "name": "Alice",
+                "type": "basic"
+            }))
+        }
+
+        {
+            let input = json!({
+                "name": "Bob",
+                "type": "pro",
+                "features": [ "pro-user" ]
+            });
+    
+            let encoded = parse_insert(&schema, account_model, &input).unwrap();
+
+            let resp: String = decode_document(DecodeCtx {
+                id: &encoded.id,
+                data: &encoded.data,
+                entity: account_model,
+                mask: &bitvec!(1; schema.models[0].fields.len()),
+                includes: vec![],
+                schema: &schema,
+            }).unwrap();
+      
+            assert_eq!(serde_json::from_str::<Value>(&resp).unwrap(), json!({
+                "id": 0,
+                "name": "Bob",
+                "type": "pro",
+                "features": [ "pro-user" ]
+            }))
+        }
+
     }
 }

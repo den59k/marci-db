@@ -1,11 +1,11 @@
 use std::{collections::HashMap};
 
-use crate::{FieldRef, schema::{Entity, FieldDefault, RefInfo, Schema, schema_attributes::Attribute, schema_field::{Field, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
+use crate::{FieldRef, schema::{Entity, FieldDefault, RefInfo, Schema, schema_attributes::Attribute, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
     let mut structs: HashMap<String, Entity> = HashMap::new();
-    // let mut enums: HashMap<String,EnumDef> = HashMap::new();
+    let mut enums: HashMap<String,EnumDef> = HashMap::new();
     let mut lines = input.lines().peekable();
 
     while let Some(line) = lines.next() {
@@ -23,9 +23,9 @@ pub fn parse_schema(input: &str) -> Schema {
             "struct" => {
                 structs.insert(name, parse_struct_block(&mut lines));
             },
-            // "enum" => {
-            //     enums.insert(name.clone(), parse_enum_block(name, &mut lines));
-            // }
+            "enum" => {
+                enums.insert(name.clone(), parse_enum_block(&mut lines));
+            }
             _ => {}
         }
     }
@@ -37,17 +37,17 @@ pub fn parse_schema(input: &str) -> Schema {
 
     let mut model_structs: Vec<Entity> = vec![];
     for model in models.iter_mut() {
-        resolve_structs(model, &structs, &mut model_structs);
+        resolve_structs_and_enums(model, &structs, &enums, &mut model_structs);
     }
     models.extend(model_structs);
 
-    // На этом этапе у нас есть конечный список моделей с конечным списком ID. Остается только скорректировать ссылки
+    // На этом этапе у нас есть конечный список моделей с конечным списком Fields. Остается только скорректировать ссылки
     let model_by_name = models.iter().enumerate()
         .map(|(i, m)| (m.name.clone(), i))
         .collect();
 
-    for (model_index, model) in models.iter_mut().enumerate() {
-        resolve_refs(model, model_index, &model_by_name);
+    for model in models.iter_mut() {
+        resolve_refs(model, &model_by_name);
     }
 
     for model in models.iter_mut() {
@@ -134,54 +134,114 @@ fn resolve_model_id(entity: &mut Entity) {
 }
 
 // Находит структуры и превращает их в модели. Также проставляет всем fields field.full_name
-fn resolve_structs(entity: &mut Entity, structs: &HashMap<String, Entity>, model_structs: &mut Vec<Entity>) {
+fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Entity>, enums: &HashMap<String, EnumDef>, model_structs: &mut Vec<Entity>) {
 
-  for field in entity.fields.iter_mut(){
-    let field_full_name: String = [ &entity.name, ".", &field.name ].concat();
-    field.full_name = field_full_name.clone();
-  }
+    for field in entity.fields.iter_mut(){
+        let field_full_name: String = format!("{}.{}", &entity.name, &field.name);
+        field.full_name = field_full_name.clone();
+    }
 
-  for field in entity.fields.iter_mut() {
-    match &mut field.ty {
-      FieldType::RefUnresolved(name) | FieldType::RefListUnresolved(name) => {
-        let Some(st) = structs.get(name) else {
-          continue;
-        };
-        
-        field.location = FieldLocation::Virtual;
-        
-        let mut entity_model = st.clone();
-        entity_model.name = field.full_name.clone();
-        *name = entity_model.name.clone();
-
-        if matches!(&field.ty, FieldType::RefListUnresolved(_)) {
-          resolve_model_id(&mut entity_model);
+    let mut i = 0;
+    loop {
+        if i >= entity.fields.len() {
+            break;
         }
 
-        let mut parent_id = Field::new_id();
-        parent_id.name = "@parent_id".to_string();
-        parent_id.ty = FieldType::RefUnresolved(entity.name.to_string());
-        parent_id.default_value = None;
-        parent_id.attributes.push(Attribute::DerivedUnresolved(field.name.clone()));
-        entity_model.fields.insert(0, parent_id);
+        let field = &mut entity.fields[i];
 
-        resolve_structs(&mut entity_model, structs, model_structs);
+        match &field.ty {
+            FieldType::RefUnresolved(name) | FieldType::RefListUnresolved(name) => {
+                if let Some(st) = structs.get(name) {
+                    let mut entity_model = create_entity_model(field, st, &entity.name); 
+                    field.location = FieldLocation::Virtual;
+                    if let FieldType::RefUnresolved(name) | FieldType::RefListUnresolved(name) = &mut field.ty {
+                        *name = entity_model.name.clone();
+                    }
+                    resolve_structs_and_enums(&mut entity_model, structs, enums, model_structs);
+                    model_structs.push(entity_model);
+                    i += 1;
+                    continue;
+                };
 
-        model_structs.push(entity_model);
-      },
-      _ => {}
+                if let Some(enum_def) = enums.get(name) {
+                    if matches!(&field.ty, FieldType::RefListUnresolved(_)) {
+                        panic!("{}[]: Enum list is not supported!", field.name)
+                    }
+
+                    let field_name = field.name.clone();
+                    let enum_info = create_enum_info(enum_def, entity, &field_name, i);
+
+                    entity.fields[i].ty = FieldType::Enum(enum_info);
+
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {}
+        }
+
+        i += 1;
     }
-  }
+}
+
+// Создает новую модель из Struct
+fn create_entity_model(field: &Field, st: &Entity, parent_name: &String) -> Entity {
+    let mut entity_model = st.clone();
+    entity_model.name = field.full_name.clone();
+
+    if matches!(&field.ty, FieldType::RefListUnresolved(_)) {
+        resolve_model_id(&mut entity_model);
+    }
+
+    let mut parent_id = Field::new_id();
+    parent_id.name = "@parent_id".to_string();
+    parent_id.ty = FieldType::RefUnresolved(parent_name.to_string());
+    parent_id.default_value = None;
+    parent_id.attributes.push(Attribute::DerivedUnresolved(field.name.clone()));
+    entity_model.fields.insert(0, parent_id);
+
+    entity_model
+}
+
+/// Добавляет поля из Enum в текущую Entity
+fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String, field_index: usize) -> EnumInfo {
+    let mut variants: HashMap<u16,Vec<usize>> = HashMap::new();
+    for (variant_name, variant_fields) in enum_def.variants.iter() {
+        let base_name = format!("{}[{}={}]", entity.name, field_name, variant_name);
+        let mut variant_field_indexes = vec![];
+        let variant = *enum_def.variants_map.get(variant_name).unwrap();
+
+        for field in variant_fields {
+            variant_field_indexes.push(entity.fields.len());
+            let mut field = field.clone();
+            field.full_name = format!("{}.{}", base_name, field.name);
+            field.condition = FieldCondition::EnumValue { field_index, variant };
+
+            if let Some(exists_field) = entity.fields.iter().find(|f| f.name == field.name) {
+                panic!("Cannot add enum field {} to {}. Field {} already exists", field.name, entity.name, exists_field.full_name);
+            }
+            entity.fields.push(field);
+        }
+        variants.insert(variant, variant_field_indexes);
+    }
+
+    EnumInfo { 
+        variants, 
+        variants_map: enum_def.variants_map.clone(), 
+        variants_names_map: create_variants_names_map(&enum_def.variants_map) 
+    }
+}
+
+fn create_variants_names_map(variants_map: &HashMap<String,u16>) -> HashMap<u16,String> {
+    let mut inverted_map = HashMap::new();
+    for (key, value) in variants_map {
+        inverted_map.insert(*value, key.clone());
+    }
+    inverted_map
 }
 
 /// Находит нужные модели и структуры для ссылок RefUnresolved и RefListUnresolved
-fn resolve_refs(
-    entity: &mut Entity,
-    _model_index: usize,
-    model_by_name: &HashMap<String, usize>
-    // structs: &HashMap<String, Entity>,
-    // enums: &HashMap<String, EnumDef>,
-) {
+fn resolve_refs(entity: &mut Entity, model_by_name: &HashMap<String, usize>) {
     for field in entity.fields.iter_mut(){
         match &field.ty {
             FieldType::RefUnresolved(name) => {
@@ -190,82 +250,13 @@ fn resolve_refs(
               } else {
                 panic!("Unknown type {}", name)
               }
-              
-                // if let Some(en) = enums.get(name) {
-                //     let mut en = en.clone();
-                //     for variant in en.variants.iter_mut() {
-                //         // Example key for enum fields - User[role=admin].features
-                //         let name = [ model_name, "[", &field.name, "=", &variant.name, "]" ].concat();
-                //         resolve_fields(&mut variant.fields, model_index, &name, model_by_name);
-                //     }
-                //     field.ty = FieldType::Enum(en);
-                // } else if let Some(st) = structs.get(name) {
-                //     let mut st = st.clone();
-                //     st.name = field_full_name.clone();
-                //     resolve_fields(&mut st.fields, model_index, &st.name, model_by_name);
-                //     field.ty = FieldType::Struct(st);
-                //     // StructOne идет вообще без ключа, поскольку она полностью наследует ключ родителя
-
-                // } else if let Some(model_index) = model_by_name.get(name) {
-                //     field.ty = FieldType::ModelRef(*model_index);
-                // } else {
-                //     panic!("Unknown type {}", name)
-                // }
             }
             FieldType::RefListUnresolved(name) => {
               if let Some(model_index) = model_by_name.get(name) {
                 field.ty = FieldType::RefList(RefInfo::new(*model_index));
-                // let index_name = format!("{}.{}", model_name, field.name);
-                // field.inserted_indexes.direct = Some(InsertedIndex { tree_name: index_name });
               } else {
                 panic!("Unknown type {}", name)
               }
-
-                // if let Some(_en) = enums.get(name) {
-                //     todo!("Enum list not implemented yet");
-                // } else if let Some(en) = enums.get(name) {
-                //     let mut en = en.clone();
-                //     for variant in en.variants.iter_mut() {
-                //         resolve_fields(&mut variant.fields, model_index, model_name, model_by_name, structs, enums);
-                //     }
-                //     field.ty = FieldType::Enum(en);
-                // } else if let Some(st) = structs.get(name) {
-                //     let mut st = st.clone();
-                //     st.name = field_full_name.clone();
-                //     update_key_fields(&mut st.fields);
-
-                //     // Мы увеличиваем ключ, сдвигая его, поскольку у нас в структуре первым идет ID родителя
-                //     for field in st.fields.iter_mut() {
-                //         if let Some(idx) = &mut field.id_idx {
-                //             *idx += 1;
-                //         }
-                //     }
-    
-                //     st.fields.insert(0, Field { 
-                //         name: "@parent".to_string(), 
-                //         full_name: [ &st.name, ".@parent" ].concat(),
-                //         ty: FieldType::ModelRef(model_index), 
-                //         offset_pos: 0, 
-                //         is_nullable: true, 
-                //         id_idx: Some(0), 
-                //         counter_idx: None, 
-                //         inserted_indexes: InsertedIndexSt::new(), 
-                //         attributes: vec![Attribute::Id],
-                //         is_unique: false,
-                //         injected_fields: None
-                //     });
-
-                //     resolve_fields(&mut st.fields, model_index, &st.name, model_by_name, structs, enums);
-                //     field.ty = FieldType::StructList(st.clone());
-                // } else if let Some(model_index) = model_by_name.get(name) {
-                //     field.ty = FieldType::ModelRefList(*model_index);
-                    
-                //     // Связь ManyToOne / ManyToMany хранится в индексе
-                //     let index_name = format!("{}.{}", model_name, field.name);
-                //     field.inserted_indexes.direct = Some(InsertedIndex { tree_name: index_name });
-                // } else {
-                //     panic!("Unknown type {}", name)
-                // }
             }
             _ => {}
         }
@@ -306,6 +297,7 @@ fn resolve_counter_idx(entity: &mut Entity, counter_id: &mut usize) {
   }
 }
 
+// Разделяет строку по последней точке (Project.users.user -> [ Project.users, user ])
 fn split_derived_name(value: &str) -> (Option<&str>,&str) {
     let Some(last_index) = value.rfind('.') else {
         return (None,value)
@@ -314,6 +306,7 @@ fn split_derived_name(value: &str) -> (Option<&str>,&str) {
     return (Some(&value[..last_index]),&value[last_index+1..]);
 }
 
+// Связывает между собой derived поля
 fn resolve_derived_refs(models: &mut [Entity]) {
 
     let mut field_bindings = vec![];
@@ -371,6 +364,7 @@ fn resolve_derived_refs(models: &mut [Entity]) {
     }
 }
 
+// Проставляет RefBinding для Ref и RefList
 fn resolve_ref_bindings(models: &mut [Entity]) {
     let model_names: Vec<String> = models.iter().map(|f| f.name.clone()).collect();
     for model in models.iter_mut() {
@@ -402,88 +396,125 @@ fn resolve_ref_bindings(models: &mut [Entity]) {
 
 #[cfg(test)]
 mod tests {
-  use crate::schema::{FieldType, RefBinding, parse_schema};
+    use crate::schema::{FieldType, RefBinding, parse_schema};
 
-  #[test]
-  fn test_parse_schema() {
-    let schema = parse_schema("
-    model User {
-        name            String
-        projects        Project[]       @derived(Project.users.user)
-        projectOwners   Project[]       @derived(Project.author)
+    #[test]
+    fn test_parse_schema() {
+        let schema = parse_schema("
+        model User {
+            name            String
+            projects        Project[]       @derived(Project.users.user)
+            projectOwners   Project[]       @derived(Project.author)
+        }
+
+        model Project {
+            name        String
+            users       UserRole[]
+            info        ProjectInfo?
+            author      User
+        }
+
+        struct UserRole {
+            user        User          @id
+            role        String
+        }
+
+        struct ProjectInfo {
+            description String
+        }
+
+        ");
+
+        assert_eq!(schema.models.len(), 4);
+        // assert_eq!(schema.models[0].fields.len(), 3);
+
+        // Сформирована структура Project.users, у нее 3 поля:
+        // @parent_id
+        // user
+        // role
+        assert_eq!(schema.models[2].fields.len(), 3);
+
+        // Check Project.users.user field type
+        match &schema.models[2].fields[1].ty {
+            FieldType::Ref (ref_info) => {
+                assert_eq!(schema.models[ref_info.model_index].name, "User");
+                assert_eq!(schema.models[ref_info.model_index].fields[ref_info.rev_field_idx.unwrap()].name, "projects");
+                assert_eq!(ref_info.parent_index, None);
+
+                assert_eq!(ref_info.binding, RefBinding::FieldValue);
+            },
+            _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
+        }
+
+        // Check Project.author type
+        match &schema.models[1].fields[4].ty {
+            FieldType::Ref (ref_info) => {
+                assert_eq!(schema.models[ref_info.model_index].name, "User");
+                assert_eq!(ref_info.binding, RefBinding::FieldValue);
+            },
+            _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
+        }
+        
+        // Check User.projects type
+        match &schema.models[0].fields[2].ty {
+            FieldType::RefList(ref_info) => {
+                assert_eq!(schema.models[ref_info.model_index].name, "Project.users");
+                assert_eq!(schema.models[ref_info.model_index].fields[ref_info.rev_field_idx.unwrap()].name, "user");
+                assert_eq!(schema.models[ref_info.parent_index.unwrap()].name, "Project");
+
+                assert_eq!(ref_info.binding, RefBinding::IndexTree("User.projects->Project.users".to_string()));
+            },
+            _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
+        }
+        
+        // assert_eq!(schema.models[0].fields[2].indexes.direct, Some(InsertedIndex { tree_name: "User.projects->Project.users".to_string() }));
+        // assert_eq!(schema.models[0].fields[2].indexes.rev, Some(InsertedIndex { tree_name: "Project.users.user->User".to_string() }));
+
+        // assert_eq!(schema.models[2].fields[1].indexes.direct, Some(InsertedIndex { tree_name: "Project.users.user->User".to_string() }));
+        // assert_eq!(schema.models[2].fields[1].indexes.rev, Some(InsertedIndex { tree_name: "User.projects->Project.users".to_string() }));
+
+
+        // assert!(matches!(schema.models[1].fields[3].location, FieldLocation::Virtual));
+        // assert_eq!(schema.models[1].fields[3].indexes.direct, None );
+        
+
+        // assert_eq!(schema.models[1].fields[4].indexes.direct, None );
     }
 
-    model Project {
-        name        String
-        users       UserRole[]
-        info        ProjectInfo?
-        author      User
+  
+    #[test]
+    fn test_parse_schema_enum() {
+        let schema = parse_schema("
+        model Project {
+            name        String            
+            type        ProjectType
+        }
+
+        model User {
+            name        String
+        }
+
+        enum ProjectType {
+            base
+            shared {
+                users   User[]
+            }
+        }
+        ");
+
+        assert_eq!(schema.models.len(), 2);
+
+        assert_eq!(schema.models[0].fields.len(), 4);
+        
+        match &schema.models[0].fields[2].ty {
+            FieldType::Enum(enum_def) => {
+                assert_eq!(enum_def.variants.len(), 2);
+
+                assert_eq!(enum_def.variants.get(&0).unwrap(), &Vec::<usize>::new());
+                assert_eq!(enum_def.variants.get(&1).unwrap(), &vec![3]);
+                assert_eq!(enum_def.variants_map.len(), 2);
+            },
+            _ => panic!("Wrong field type {:?}", schema.models[0].fields[3].ty)
+        }
     }
-
-    struct UserRole {
-        user        User          @id
-        role        String
-    }
-
-    struct ProjectInfo {
-        description: String
-    }
-
-    ");
-
-    assert_eq!(schema.models.len(), 4);
-    // assert_eq!(schema.models[0].fields.len(), 3);
-
-    // Сформирована структура Project.users, у нее 3 поля:
-    // @parent_id
-    // user
-    // role
-    assert_eq!(schema.models[2].fields.len(), 3);
-
-    // Check Project.users.user field type
-    match &schema.models[2].fields[1].ty {
-        FieldType::Ref (ref_info) => {
-            assert_eq!(schema.models[ref_info.model_index].name, "User");
-            assert_eq!(schema.models[ref_info.model_index].fields[ref_info.rev_field_idx.unwrap()].name, "projects");
-            assert_eq!(ref_info.parent_index, None);
-
-            assert_eq!(ref_info.binding, RefBinding::FieldValue);
-        },
-        _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
-    }
-
-    // Check Project.author type
-    match &schema.models[1].fields[4].ty {
-        FieldType::Ref (ref_info) => {
-            assert_eq!(schema.models[ref_info.model_index].name, "User");
-            assert_eq!(ref_info.binding, RefBinding::FieldValue);
-        },
-        _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
-    }
-    
-    // Check User.projects type
-    match &schema.models[0].fields[2].ty {
-        FieldType::RefList(ref_info) => {
-            assert_eq!(schema.models[ref_info.model_index].name, "Project.users");
-            assert_eq!(schema.models[ref_info.model_index].fields[ref_info.rev_field_idx.unwrap()].name, "user");
-            assert_eq!(schema.models[ref_info.parent_index.unwrap()].name, "Project");
-
-            assert_eq!(ref_info.binding, RefBinding::IndexTree("User.projects->Project.users".to_string()));
-        },
-        _ => panic!("Wrong schema field {} type", schema.models[0].fields[2].name)
-    }
-    
-    // assert_eq!(schema.models[0].fields[2].indexes.direct, Some(InsertedIndex { tree_name: "User.projects->Project.users".to_string() }));
-    // assert_eq!(schema.models[0].fields[2].indexes.rev, Some(InsertedIndex { tree_name: "Project.users.user->User".to_string() }));
-
-    // assert_eq!(schema.models[2].fields[1].indexes.direct, Some(InsertedIndex { tree_name: "Project.users.user->User".to_string() }));
-    // assert_eq!(schema.models[2].fields[1].indexes.rev, Some(InsertedIndex { tree_name: "User.projects->Project.users".to_string() }));
-
-
-    // assert!(matches!(schema.models[1].fields[3].location, FieldLocation::Virtual));
-    // assert_eq!(schema.models[1].fields[3].indexes.direct, None );
-    
-
-    // assert_eq!(schema.models[1].fields[4].indexes.direct, None );
-  }
 }

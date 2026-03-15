@@ -1,5 +1,5 @@
 use crate::{Field};
-use crate::schema::{Entity, FieldLocation, FieldType, Schema};
+use crate::schema::{Entity, FieldCondition, FieldLocation, FieldType, Schema};
 
 pub fn get_offset<'a>(data: &'a [u8], offset_pos: usize) -> usize {
   return u32::from_be_bytes(data[offset_pos..offset_pos + 4].try_into().unwrap()) as usize;
@@ -65,10 +65,31 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
       if offset == 0 {
         return None;
       }
-      let offset_end = get_end(body, offset_pos, entity.payload_offset);
+      let offset_end = field.get_size()
+        .map(|f| offset + f)
+        .unwrap_or_else(|| get_end(body, offset_pos, entity.payload_offset));
+
       return Some(&body[offset..offset_end]);
     },
     FieldLocation::Virtual => { panic!("Trying to get value from virtual field") }
+  }
+}
+
+pub fn check_condition(entity: &Entity, condition: &FieldCondition, id: &[u8], data: &[u8], schema: &Schema) -> bool {
+  match condition {
+      FieldCondition::EnumValue { field_index, variant } => {
+        let Some(val) = get_data(entity, &entity.fields[*field_index], &id, &data, schema) else {
+            return false;
+        };
+        let val = u16::from_be_bytes(val.try_into().unwrap());
+        if val != *variant {
+            return false;
+        }
+        return true;
+      },
+      FieldCondition::None => {
+        return true
+      }
   }
 }
 

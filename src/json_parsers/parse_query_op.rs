@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldType, RefBinding, Schema}};
+use crate::{Field, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldCondition, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -22,6 +22,9 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     if matches!(val, Value::Bool(false)) {
       continue;
     }
+    if let FieldCondition::EnumValue { field_index, .. }  = &field.condition && !mask[*field_index] {
+      continue;
+    }
     match &field.ty {
       FieldType::Ref (ref_info) => {
         if matches!(val, Value::Bool(true)) {
@@ -32,17 +35,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
         };
         
         let mut op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj)?;
-        match &ref_info.binding {
-          RefBinding::CurrentId => {
-            op.prefix_key = Some(PrefixKey::ParentId);
-          }
-          RefBinding::FieldValue => {
-            op.prefix_key = Some(PrefixKey::ParentField(field));
-          },
-          RefBinding::IndexTree(tree_name) => {
-            op.prefix_key = Some(PrefixKey::ParentIndexTree(tree_name.clone()))
-          },
-        }
+        op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
         includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
       }
       FieldType::RefList (ref_info) => {
@@ -53,17 +46,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
           return Err(ParseError::type_mismatch(field, "object"))
         };
         let mut op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj)?;
-        match &ref_info.binding {
-          RefBinding::CurrentId => {
-            op.prefix_key = Some(PrefixKey::ParentId);
-          }
-          RefBinding::FieldValue => {
-            op.prefix_key = Some(PrefixKey::ParentField(field));
-          },
-          RefBinding::IndexTree(tree_name) => {
-            op.prefix_key = Some(PrefixKey::ParentIndexTree(tree_name.clone()))
-          },
-        }
+        op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
       }
       _ => {
@@ -73,6 +56,20 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   }
 
   Ok(QueryOp { mask, entity, sort: None, filter: None, prefix_key: None, includes, take: None, skip: None })
+}
+
+fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {
+  match &binding {
+    RefBinding::CurrentId => {
+      return PrefixKey::ParentId;
+    }
+    RefBinding::FieldValue => {
+      return PrefixKey::ParentField(field);
+    },
+    RefBinding::IndexTree(tree_name) => {
+      return PrefixKey::ParentIndexTree(tree_name.clone())
+    },
+  }
 }
 
 #[derive(Debug)]
