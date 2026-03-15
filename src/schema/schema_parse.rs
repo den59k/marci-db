@@ -118,6 +118,9 @@ pub fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Vec
 
     for line in lines {
         let line = line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
         if line == "}" { break }
         if line.is_empty() { continue; }      
         fields.push(parse_field_raw(line));

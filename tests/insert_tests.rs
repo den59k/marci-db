@@ -41,9 +41,16 @@ fn base_insert_test() {
         users       UserRole[]
     }
 
+    enum Role {
+      creator
+      admin {
+        sign      String
+      }
+    }
+
     struct UserRole {
         user        User          @id
-        role        String
+        role        Role
     }
   ";
 
@@ -55,14 +62,15 @@ fn base_insert_test() {
   
   insert_data(&db, "Project", json!({ "name": "Project A" }));
   insert_data(&db, "Project", json!({ "name": "Project B", "users": [{ "user": user_a, "role": "creator" }] }));
+  insert_data(&db, "Project", json!({ "name": "Alice Project", "users": [{ "user": user_a, "role": "admin", "sign": "AliceSign" }] }));
 
   insert_data(&db, "Post", json!({ "title": "First Alice post", "author": user_a }));
   insert_data(&db, "Post", json!({ "title": "Second Alice post", "author": user_a }));
   insert_data(&db, "Post", json!({ "title": "Unnamed post" }));
 
   assert_eq!(db.count(db.get_model("User").unwrap()), 2);
-  assert_eq!(db.count(db.get_model("Project").unwrap()), 2);
-  assert_eq!(db.count(db.get_model("Project.users").unwrap()), 1);
+  assert_eq!(db.count(db.get_model("Project").unwrap()), 3);
+  assert_eq!(db.count(db.get_model("Project.users").unwrap()), 2);
   assert_eq!(db.count(db.get_model("Post").unwrap()), 3);
 
   {
@@ -84,19 +92,21 @@ fn base_insert_test() {
   
     assert_eq!(resp, json!([
       { "name": "Project A", "users": [] },
-      { "name": "Project B", "users": [{ "role": "creator" }] }
+      { "name": "Project B", "users": [{ "role": "creator" }] },
+      { "name": "Alice Project", "users": [{ "role": "admin" }] },
     ]));
   }
 
   {
     let resp = get_data(&db, "Project", json!({
       "name": true,
-      "users": { "role": true, "user": { "id": true, "name": true } }
+      "users": { "role": true, "sign": true, "user": { "id": true, "name": true } }
     }));
 
     assert_eq!(resp, json!([
       { "name": "Project A", "users": [] },
-      { "name": "Project B", "users": [{ "user": { "id": user_a.get("id").unwrap(), "name": "Alice" }, "role": "creator" }] }
+      { "name": "Project B", "users": [{ "user": { "id": user_a.get("id").unwrap(), "name": "Alice" }, "role": "creator" }] },
+      { "name": "Alice Project", "users": [{ "user": { "id": user_a.get("id").unwrap(), "name": "Alice" }, "role": "admin", "sign": "AliceSign" }] }
     ]));
   }
 

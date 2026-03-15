@@ -1,8 +1,8 @@
-use bitvec::vec::BitVec;
+use bitvec::{bitvec, vec::BitVec};
 
 mod r#where;
 mod process_query;
-use crate::{Field, query_op::r#where::Where, schema::{Entity, FieldLocation}};
+use crate::{Field, query_op::r#where::Where, schema::{Entity, FieldLocation, FieldType}};
 
 pub use process_query::{process_query_many,process_query_one,DecodeCtx,TransationContext,IncludeResult};
 
@@ -48,7 +48,7 @@ pub enum PrefixKey<'a> {
   ParentIndexTree(String)
 }
 
-impl QueryOp<'_> {
+impl<'a> QueryOp<'a> {
   pub fn only_key(&self) -> bool {
     for (idx, field) in self.entity.fields.iter().enumerate() {
       if self.mask[idx] && !matches!(field.location, FieldLocation::Key { .. }) {
@@ -56,5 +56,24 @@ impl QueryOp<'_> {
       }
     }
     return true;
+  }
+
+  pub fn all(entity: &'a Entity) -> Self {
+    let mut mask = bitvec![1; entity.fields.len()];
+    for (field_index,field) in entity.fields.iter().enumerate() {
+      if matches!(field.ty, FieldType::Ref(_) | FieldType::RefList(_)) {
+        mask.set(field_index, false);
+      }
+    }
+    return QueryOp { 
+      mask,
+      entity, 
+      sort: None, 
+      filter: None, 
+      take: None, 
+      skip: None, 
+      prefix_key: None, 
+      includes: vec![]
+    }
   }
 }

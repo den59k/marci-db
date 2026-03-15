@@ -28,7 +28,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     match &field.ty {
       FieldType::Ref (ref_info) => {
         if matches!(val, Value::Bool(true)) {
-          todo!("Add select all fields from model");
+          return Ok(QueryOp::all(&entity))
         }
         let Some(obj) = val.as_object() else {
           return Err(ParseError::type_mismatch(field, "object"))
@@ -40,7 +40,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
       }
       FieldType::RefList (ref_info) => {
         if matches!(val, Value::Bool(true)) {
-          todo!("Add select all fields from model");
+          return Ok(QueryOp::all(&entity))
         }
         let Some(obj) = val.as_object() else {
           return Err(ParseError::type_mismatch(field, "object"))
