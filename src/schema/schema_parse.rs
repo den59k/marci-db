@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::{FieldRef, schema::{Entity, FieldDefault, RefInfo, Schema, schema_attributes::Attribute, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
+use crate::{FieldRef, schema::{Entity, FieldDefault, RefInfo, Schema, schema_attributes::Attribute, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
@@ -218,7 +218,7 @@ fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String
             variant_field_indexes.push(entity.fields.len());
             let mut field = field.clone();
             field.full_name = format!("{}.{}", base_name, field.name);
-            field.condition = FieldCondition::EnumValue { field_index, variant };
+            field.condition = FieldExistsCondition::EnumValue { field_index, variant };
 
             if let Some(exists_field) = entity.fields.iter().find(|f| f.name == field.name) {
                 panic!("Cannot add enum field {} to {}. Field {} already exists", field.name, entity.name, exists_field.full_name);

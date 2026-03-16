@@ -2,9 +2,11 @@ use bitvec::{bitvec, vec::BitVec};
 
 mod r#where;
 mod process_query;
-use crate::{Field, query_op::r#where::Where, schema::{Entity, FieldLocation, FieldType}};
+mod process_where;
+use crate::{Field, schema::{Entity, FieldLocation, FieldType}};
 
 pub use process_query::{process_query_many,process_query_one,DecodeCtx,TransationContext,IncludeResult};
+pub use r#where::{Where,FieldCompare,WhereNumValue};
 
 #[derive(Debug)]
 pub struct QueryOp<'a> {

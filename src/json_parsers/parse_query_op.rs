@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldCondition, FieldType, RefBinding, Schema}};
+use crate::{Field, json_parsers::parse_where::{ParseWhereError, parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldExistsCondition, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -15,6 +15,13 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   let mut mask = bitvec![0; entity.fields.len()];
   let mut includes = vec![];
   
+  let mut filter = None;
+  if let Some(where_value) = json_val.get("$where") {
+    let filter_resp = parse_where(schema, entity, where_value)
+      .map_err(|err| ParseError::WhereError(err))?;
+    filter = Some(filter_resp);
+  }
+  
   for (field_index, field) in entity.fields.iter().enumerate() {
     let Some(val) = json_val.get(&field.name) else {
       continue;
@@ -22,7 +29,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     if matches!(val, Value::Bool(false)) {
       continue;
     }
-    if let FieldCondition::EnumValue { field_index, .. }  = &field.condition && !mask[*field_index] {
+    if let FieldExistsCondition::EnumValue { field_index, .. }  = &field.condition && !mask[*field_index] {
       continue;
     }
     match &field.ty {
@@ -55,7 +62,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  Ok(QueryOp { mask, entity, sort: None, filter: None, prefix_key: None, includes, take: None, skip: None })
+  Ok(QueryOp { mask, entity, sort: None, filter, prefix_key: None, includes, take: None, skip: None })
 }
 
 fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {
@@ -75,6 +82,7 @@ fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a
 #[derive(Debug)]
 pub enum ParseError {
   NotAnObject,
+  WhereError(ParseWhereError),
   TypeMismatch { field: String, expected: String },
 }
 

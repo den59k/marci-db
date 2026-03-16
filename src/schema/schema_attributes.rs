@@ -4,6 +4,7 @@ pub enum Attribute {
     Index,
     DerivedUnresolved (String),
     Id,
+    Default(String),
     Unique,
     VectorIndex(VectorIndexType),
     InjectUnresolved(Vec<(String,String)>),
@@ -35,6 +36,10 @@ pub fn parse_attribute(s: &str) -> Attribute {
     
     if s.starts_with("id") {
         return Attribute::Id
+    }
+
+    if let Some(inside) = s.strip_prefix("default").and_then(|x| x.strip_suffix(')')) {
+        return Attribute::Default(inside.to_string())
     }
 
     if s.starts_with("vectorindex") {

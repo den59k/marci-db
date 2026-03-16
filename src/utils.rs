@@ -1,5 +1,5 @@
 use crate::{Field};
-use crate::schema::{Entity, FieldCondition, FieldLocation, FieldType, Schema};
+use crate::schema::{Entity, FieldExistsCondition, FieldLocation, FieldType, Schema};
 
 pub fn get_offset<'a>(data: &'a [u8], offset_pos: usize) -> usize {
   return u32::from_be_bytes(data[offset_pos..offset_pos + 4].try_into().unwrap()) as usize;
@@ -75,9 +75,9 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
   }
 }
 
-pub fn check_condition(entity: &Entity, condition: &FieldCondition, id: &[u8], data: &[u8], schema: &Schema) -> bool {
+pub fn check_exists_condition(entity: &Entity, condition: &FieldExistsCondition, id: &[u8], data: &[u8], schema: &Schema) -> bool {
   match condition {
-      FieldCondition::EnumValue { field_index, variant } => {
+      FieldExistsCondition::EnumValue { field_index, variant } => {
         let Some(val) = get_data(entity, &entity.fields[*field_index], &id, &data, schema) else {
             return false;
         };
@@ -87,7 +87,7 @@ pub fn check_condition(entity: &Entity, condition: &FieldCondition, id: &[u8], d
         }
         return true;
       },
-      FieldCondition::None => {
+      FieldExistsCondition::None => {
         return true
       }
   }

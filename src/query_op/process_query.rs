@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{ReadTransaction, Tree};
 
-use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
 type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
@@ -19,7 +19,7 @@ pub fn process_query_many<'a, U, F>
     }
     let tree = ctx.get_tree(&query.entity.name);
 
-    return ids.iter().map(|id| {
+    return ids.iter().filter_map(|id| {
       let value = tree.get(&id).unwrap().unwrap();
       process_data(&id, &value, ctx, query)
     }).collect()
@@ -30,14 +30,14 @@ pub fn process_query_many<'a, U, F>
       return vec![];
     };
     let tree = ctx.get_tree(&query.entity.name);
-    return tree.prefix(&prefix).unwrap().map(|item| {
+    return tree.prefix(&prefix).unwrap().filter_map(|item| {
       let (id, value) = item.unwrap();
       process_data(&id, &value, ctx, query)
     }).collect();
   }
   
   let tree = ctx.get_tree(&query.entity.name);
-  return tree.iter().unwrap().map(|item| {
+  return tree.iter().unwrap().filter_map(|item| {
     let (id, value) = item.unwrap();
     process_data(&id, &value, ctx, query)
   }).collect()
@@ -56,7 +56,7 @@ pub fn process_query_one<'a, U,F>
   };
     
   let tree = ctx.get_tree(&query.entity.name);
-  return tree.get(prefix).unwrap().map(|value| {
+  return tree.get(prefix).unwrap().and_then(|value| {
     process_data(prefix, &value, ctx, query)
   });
 }
@@ -86,12 +86,17 @@ pub fn get_ids_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Vec<Vec<u8>> {
     .collect()
 }
 
+// Обрабатывает данные. Если элемент не подходит по условию, возвращает None
 pub fn process_data<'a, 'b, U, F>(
   id: &'b [u8],
   data: &'b [u8],
   ctx: &mut TransationContext<'a, F>,
   query: &'a QueryOp,
-) -> U where F: Fn(DecodeCtx<U>) -> U { 
+) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
+
+  if let Some(where_op) = &query.filter && !process_where(id, data, ctx, query.entity, where_op) {
+    return None
+  }
 
   let mut includes: Vec<IncludeResult<U>> = Vec::with_capacity(query.includes.len());
 
@@ -114,7 +119,7 @@ pub fn process_data<'a, 'b, U, F>(
     }
   }
 
-  return (ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema });
+  return Some((ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema }));
 }
 
 pub struct TransationContext<'a, F> {

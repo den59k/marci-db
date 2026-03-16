@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_condition, get_end, get_id_field_size, get_offset}};
+use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end, get_id_field_size, get_offset}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -179,7 +179,7 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
             },
             FieldLocation::Body { offset } => {
                 if !mask[field_index] { continue; }
-                if !check_condition(entity, &field.condition, &id, &data, schema) {
+                if !check_exists_condition(entity, &field.condition, &id, &data, schema) {
                     continue;
                 }
                 decode_body_field(data, offset, field, &mut str, entity.payload_offset)?

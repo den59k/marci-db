@@ -19,7 +19,7 @@ pub struct Field {
     pub nullable: bool,
     pub attributes: Vec<Attribute>,
     pub default_value: Option<FieldDefault>,
-    pub condition: FieldCondition
+    pub condition: FieldExistsCondition
 }
 
 impl Field {
@@ -32,7 +32,7 @@ impl Field {
             location: FieldLocation::Key { index: 0 },
             attributes: vec![],
             default_value: Some(FieldDefault::Counter(0)),
-            condition: FieldCondition::None
+            condition: FieldExistsCondition::None
         }
     }
 
@@ -154,7 +154,7 @@ pub enum FieldDefault {
 
 
 #[derive(Debug,Clone)]
-pub enum FieldCondition {
+pub enum FieldExistsCondition {
     None,
     EnumValue { field_index: usize, variant: u16 }
 }
@@ -208,7 +208,7 @@ pub fn parse_field_raw(line: &str) -> Field {
       nullable,
       attributes,
       default_value: None,
-      condition: FieldCondition::None
+      condition: FieldExistsCondition::None
     }
 }
 
@@ -243,11 +243,23 @@ fn parse_type(s: &str) -> FieldType {
 fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
     match s {
         "String" => Some(PrimitiveFieldType::String),
+
         "Bool" => Some(PrimitiveFieldType::Bool),
+        "Boolean" => Some(PrimitiveFieldType::Bool),
+        "bool" => Some(PrimitiveFieldType::Bool),
+
         "Int" => Some(PrimitiveFieldType::Int64),
+        "i64" => Some(PrimitiveFieldType::Int64),
+
         "UInt" => Some(PrimitiveFieldType::UInt64),
+        "u64" => Some(PrimitiveFieldType::UInt64),
+
         "Float" => Some(PrimitiveFieldType::Float),
+        "f32" => Some(PrimitiveFieldType::Float),
+
         "Double" => Some(PrimitiveFieldType::Double),
+        "f64" => Some(PrimitiveFieldType::Double),
+        
         "DateTime" => Some(PrimitiveFieldType::DateTime),
         _ => None
     }
