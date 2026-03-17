@@ -38,7 +38,7 @@ pub fn parse_attribute(s: &str) -> Attribute {
         return Attribute::Id
     }
 
-    if let Some(inside) = s.strip_prefix("default").and_then(|x| x.strip_suffix(')')) {
+    if let Some(inside) = s.strip_prefix("default(").and_then(|x| x.strip_suffix(')')) {
         return Attribute::Default(inside.to_string())
     }
 

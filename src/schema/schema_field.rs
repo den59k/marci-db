@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt};
 
-use crate::schema::{schema_attributes::{Attribute, parse_attribute}};
+use crate::schema::{schema_attributes::{Attribute, parse_attribute}, schema_default_value::FieldDefault};
 
 
 #[derive(Debug,Clone)]
@@ -146,13 +146,6 @@ pub enum RefBinding {
     IndexTree(String)
 }
 
-
-#[derive(Debug,Clone)]
-pub enum FieldDefault {
-    Counter(usize)
-}
-
-
 #[derive(Debug,Clone)]
 pub enum FieldExistsCondition {
     None,
@@ -188,7 +181,6 @@ pub fn parse_field_raw(line: &str) -> Field {
         .filter(|s| !s.is_empty())
         .map(parse_attribute)
         .collect();
-    
 
     let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
     let _is_unique = attributes.iter().any(|attr| matches!(attr, Attribute::Unique));
@@ -211,7 +203,6 @@ pub fn parse_field_raw(line: &str) -> Field {
       condition: FieldExistsCondition::None
     }
 }
-
 
 fn parse_type(s: &str) -> FieldType {
     if let Some((ty, bracket)) = s.strip_suffix(']').and_then(|s| s.split_once('[')) {
@@ -264,4 +255,3 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
         _ => None
     }
 }
-

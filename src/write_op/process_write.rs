@@ -35,7 +35,8 @@ pub fn write_data(insert: &WriteOp, tx: &WriteTransaction, db: &MarciDB, parent_
           return Err(InsertError::ParentIdRequired)
         };
         write_id.splice(offset..offset, parent_id.iter().copied());
-      }
+      },
+      _ => {}
     }
   }
 

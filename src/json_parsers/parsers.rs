@@ -76,24 +76,24 @@ pub fn encode_list(buf: &mut Vec<u8>, value: &Value, field: &Field, primitive_ty
 }
 
 // Записывает в массив значения с переменной длиной (т.е. строки)
-// [item_0_end,item_1_end..item_n_end][item_0,item_1..item_n]
+// [item_0_start,item_1_start,item_2_start..item_n_end][item_0,item_1..item_n]
 pub fn encode_list_dynamic(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive_type: &PrimitiveFieldType, byte_start: usize) -> Result<(), EncodeError> {
 
     let mut offset_index = buf.len();
 
     buf.resize(offset_index + arr.len()*4 + 4, 0);
 
-    let el_offset = (buf.len() - byte_start) as u32;
-    buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
-    offset_index += 4;
-
     for arr_item in arr.iter() {
-        encode_primitive_value(buf, field, primitive_type,  arr_item)?;
-
         let el_offset = (buf.len() - byte_start) as u32;
         buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
+
+        encode_primitive_value(buf, field, primitive_type,  arr_item)?;
         offset_index += 4;
     }
+    
+    // Write sentinel offset
+    let el_offset = (buf.len() - byte_start) as u32;
+    buf[offset_index..offset_index + 4].copy_from_slice(&el_offset.to_be_bytes());
 
     return Ok(());
 }
@@ -148,6 +148,7 @@ pub enum EncodeError {
     TryWriteToVirtualField,
     WrongEnumValue(String, String),
     UnavailableKeyField(String),
+    FieldHasDynamicSize(String),
     UnavailableKeyFieldId(String),
     EmptyObject,
     DerivedFieldNotWritable(String)

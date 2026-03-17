@@ -4,9 +4,11 @@ mod schema_field;
 mod schema_parse;
 mod schema_attributes;
 mod schema_enum;
+mod schema_default_value;
 
-pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,FieldDefault,RefInfo,RefBinding,EnumInfo,FieldExistsCondition};
+pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition};
 pub use crate::schema::{schema_parse::parse_schema};
+pub use crate::schema::schema_default_value::FieldDefault;
 
 #[derive(Debug,Clone)]
 pub struct Schema {

@@ -1,4 +1,5 @@
 use bitvec::{bitvec};
+use chrono::Local;
 use serde_json::{Map, Value};
 
 use crate::{Field, json_parsers::parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteOp, WriteRelation}};
@@ -205,10 +206,23 @@ pub fn encode_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -
 }
 
 // Записывает значение по умолчанию. Если значение вычисляется во время записи - возвращает offset
-fn parse_default_value(dst: &mut Vec<u8>, field: &Field, _default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
-    let offset = dst.len();
-    encode_empty(dst, field)?;
-    return Ok(Some(offset));
+fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
+    match default_value {
+        FieldDefault::Value(val) => {
+            dst.extend_from_slice(val);
+            return Ok(None)
+        },
+        FieldDefault::Now => {
+            let now = Local::now().timestamp_millis();
+            dst.extend_from_slice(&now.to_be_bytes());
+            return Ok(None)
+        },
+        FieldDefault::Counter(_) => {
+            let offset = dst.len();
+            encode_empty(dst, field)?;
+            return Ok(Some(offset));
+        }
+    }
 }
 
 // Записывает пустые байты. Само значение заполняется во время выполнения insert
@@ -216,12 +230,12 @@ fn encode_empty(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
     match field.ty {
         FieldType::Primitive(primitive_type) => {
             let Some(size) = primitive_type.get_size() else {
-                return Err(EncodeError::UnavailableKeyField(field.full_name.clone()))
+                return Err(EncodeError::FieldHasDynamicSize(field.full_name.clone()))
             };
             dst.resize(dst.len() + size, 0);
         }
         _ => {
-            return Err(EncodeError::UnavailableKeyField(field.full_name.clone()))
+            return Err(EncodeError::FieldHasDynamicSize(field.full_name.clone()))
         }
     }
     Ok(())

@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::{FieldRef, schema::{Entity, FieldDefault, RefInfo, Schema, schema_attributes::Attribute, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
+use crate::{FieldRef, schema::{Entity, RefInfo, Schema, schema_attributes::Attribute, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
@@ -40,6 +40,12 @@ pub fn parse_schema(input: &str) -> Schema {
         resolve_structs_and_enums(model, &structs, &enums, &mut model_structs);
     }
     models.extend(model_structs);
+
+    for model in models.iter_mut() {
+        for field in model.fields.iter_mut() {
+            resolve_default_value(field);
+        }
+    }
 
     // На этом этапе у нас есть конечный список моделей с конечным списком Fields. Остается только скорректировать ссылки
     let model_by_name = models.iter().enumerate()
@@ -301,7 +307,7 @@ fn resolve_counter_idx(entity: &mut Entity, counter_id: &mut usize) {
 }
 
 // Разделяет строку по последней точке (Project.users.user -> [ Project.users, user ])
-fn split_derived_name(value: &str) -> (Option<&str>,&str) {
+pub fn split_by_last_dot(value: &str) -> (Option<&str>,&str) {
     let Some(last_index) = value.rfind('.') else {
         return (None,value)
     };
@@ -327,7 +333,7 @@ fn resolve_derived_refs(models: &mut [Entity]) {
                     _ => None
                 }) else { continue; };
 
-            let (table_name,derived_field_name) = split_derived_name(derived_field_name);
+            let (table_name,derived_field_name) = split_by_last_dot(derived_field_name);
             let mut ref_model_index = ref_info.model_index;
             if let Some(table_name) = table_name && table_name.contains(".") {
                 ref_model_index = models.iter().position(|m| m.name == table_name).unwrap_or_else(|| {
