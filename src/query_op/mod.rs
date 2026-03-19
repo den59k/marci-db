@@ -43,7 +43,7 @@ pub struct QueryInclude<'a> {
   pub query: QueryOp<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum PrefixKey<'a> {
   ParentId,
   ParentField(&'a Field),

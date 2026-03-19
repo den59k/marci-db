@@ -19,7 +19,7 @@ pub fn process_query_many<'a, U, F>
     }
     let tree = ctx.get_tree(&query.entity.name);
 
-    return ids.iter().filter_map(|id| {
+    return ids.into_iter().filter_map(|id| {
       let value = tree.get(&id).unwrap().unwrap();
       process_data(&id, &value, ctx, query)
     }).collect()

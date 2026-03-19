@@ -1,19 +1,23 @@
 use std::cmp::Ordering;
 
-use crate::Field;
+use crate::{Field, query_op::PrefixKey, schema::Entity};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Where<'a> {
+    True,
     And(Vec<Where<'a>>),
     Or(Vec<Where<'a>>),
     Not(Box<Where<'a>>),
-    Field(&'a Field, FieldCompare)
+    Field(&'a Field, FieldCompare<'a>)
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum FieldCompare {
+#[derive(Debug, Clone)]
+pub enum FieldCompare<'a> {
     EqNull,
     NeNull,
+    Every(&'a Entity, PrefixKey<'a>, Box<Where<'a>>),
+    Some(&'a Entity, PrefixKey<'a>, Box<Where<'a>>),
+    None(&'a Entity, PrefixKey<'a>, Box<Where<'a>>),
     In(Vec<Vec<u8>>,bool),
     NotIn(Vec<Vec<u8>>,bool),
     Eq(Vec<u8>),

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{Field, json_parsers::parsers::{EncodeError, as_datetime, as_f32, as_f64, as_i64, as_u64, encode_enum, encode_list, encode_primitive_value}, query_op::{FieldCompare, Where, WhereNumValue}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
+use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, as_datetime, as_f32, as_f64, as_i64, as_u64, encode_enum, encode_list, encode_primitive_value}}, query_op::{FieldCompare, Where, WhereNumValue}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
 
 /// Парсит JSON объект в where условие
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,ParseWhereError> {
@@ -9,18 +9,21 @@ pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value
   };
 
   if let Some(or_condition) = where_obj.get("$or") {
-    let or_condition = collect_where_conditions(schema, entity, or_condition)?;
+    let or_condition = collect_where_conditions(schema, entity, or_condition, false)?;
+    if or_condition.iter().any(|f| !matches!(f, Where::True)) {
+      return Ok(Where::True)
+    }
     return match or_condition.len() {
-      0 => Err(ParseWhereError::EmptyConditionArray),
+      0 => Ok(Where::True),
       1 => Ok(or_condition.into_iter().next().unwrap()),
       _ => Ok(Where::Or(or_condition))
     }
   }
 
   if let Some(and_conditions) = where_obj.get("$and") {
-    let and_conditions = collect_where_conditions(schema, entity, and_conditions)?;
+    let and_conditions = collect_where_conditions(schema, entity, and_conditions, true)?;
     return match and_conditions.len() {
-      0 => Err(ParseWhereError::EmptyConditionArray),
+      0 => Ok(Where::True),
       1 => Ok(and_conditions.into_iter().next().unwrap()),
       _ => Ok(Where::And(and_conditions))
     }
@@ -39,29 +42,53 @@ pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value
   }
   
   return match conditions.len() {
-    0 => Err(ParseWhereError::EmptyConditionArray),
+    0 => Ok(Where::True),
     1 => Ok(conditions.into_iter().next().unwrap()),
     _ => Ok(Where::And(conditions))
   };
 }
 
-fn collect_where_conditions<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<Vec<Where<'a>>,ParseWhereError> {
+fn collect_where_conditions<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value, filter: bool) -> Result<Vec<Where<'a>>,ParseWhereError> {
   let Some(json_val) = json_val.as_array() else {
     return Err(ParseWhereError::NotAnArray)
   };
-  json_val
-      .iter()
-      .map(|f| parse_where(schema, entity, f))
-      .collect()
+
+  if filter {
+    json_val
+        .iter()
+        .map(|f| parse_where(schema, entity, f))
+        .filter(|f| !matches!(f, Ok(Where::True)))
+        .collect()
+  } else {
+    json_val
+        .iter()
+        .map(|f| parse_where(schema, entity, f))
+        .collect()
+  }
 }
 
-fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) -> Result<FieldCompare,ParseWhereError> {
+fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) -> Result<FieldCompare<'a>,ParseWhereError> {
   match &field.ty {
     FieldType::Ref(ref_info) => {
       todo!("make FieldType::Ref query")
     },
     FieldType::RefList(ref_info) => {
-      todo!("make FieldType::RefList query")
+      let Some(obj) = value.as_object() else {
+        return Err(ParseWhereError::type_mismatch(field, "object"))
+      };
+      if obj.len() != 1 {
+        return Err(ParseWhereError::OnlyOneKeyExpected(field.full_name.clone(), value.to_string()))
+      }
+      let (key, value) = obj.iter().next().unwrap();
+      let entity = &schema.models[ref_info.model_index];
+      let prefix = get_prefix_key(&ref_info.binding, field);
+
+      return match key.as_str() {
+        "$every" => Ok(FieldCompare::Every(entity, prefix, Box::new(parse_where(schema, entity, value)?))),
+        "$some" => Ok(FieldCompare::Some(entity, prefix, Box::new(parse_where(schema, entity, value)?))),
+        "$none" => Ok(FieldCompare::None(entity, prefix, Box::new(parse_where(schema, entity, value)?))),
+        _ => Err(ParseWhereError::UnsupportedOperation(key.clone()))
+      };
     },
     _ => { }
   }
@@ -70,7 +97,7 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
 
   if let Some(obj) = value.as_object() {
     if obj.len() != 1 {
-      return Err(ParseWhereError::OnlyOneKeyExpected(value.to_string()))
+      return Err(ParseWhereError::OnlyOneKeyExpected(field.full_name.clone(), value.to_string()))
     }
     let (key, value) = obj.iter().next().unwrap();
 
@@ -176,7 +203,7 @@ pub enum ParseWhereError {
   EmptyConditionArray,
   NotApplicable(String),
   UnavailableKeyField(String),
-  OnlyOneKeyExpected(String),
+  OnlyOneKeyExpected(String,String),
   UnsupportedOperation(String),
   EncodeError(EncodeError)
 }
@@ -193,6 +220,7 @@ impl ParseWhereError {
 #[cfg(test)]
 mod tests {
   use serde_json::json;
+  use std::assert_matches;
 
 use crate::{json_parsers::parse_where::parse_where, parse_schema, query_op::{FieldCompare, Where, WhereNumValue}};
 
@@ -229,13 +257,11 @@ use crate::{json_parsers::parse_where::parse_where, parse_schema, query_op::{Fie
         panic!("Wrong where_op type");
       };
       if field.name == "email" {
-        assert_eq!(compare, &FieldCompare::NeNull);
+        assert_matches!(compare, &FieldCompare::NeNull);
       }
       if field.name == "age" {
-        assert_eq!(compare, &FieldCompare::Gt(WhereNumValue::UInt64(20)));
+        assert_matches!(compare, &FieldCompare::Gt(WhereNumValue::UInt64(20)));
       }
     }
   }
-  
-
 }

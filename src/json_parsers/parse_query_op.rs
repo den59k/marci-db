@@ -65,7 +65,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   Ok(QueryOp { mask, entity, sort: None, filter, prefix_key: None, includes, take: None, skip: None })
 }
 
-fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {
+pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {
   match &binding {
     RefBinding::CurrentId => {
       return PrefixKey::ParentId;
