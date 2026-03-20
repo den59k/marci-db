@@ -17,7 +17,7 @@ pub fn get_data(db: &MarciDB, model: &str, json_query: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let query = parse_query(&db.schema, entity, &json_query).unwrap();
 
-  // println!("{:#?}", query);
+  println!("{:#?}", query);
 
   let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap());
   Value::from_str(&array_to_json(&items)).unwrap()

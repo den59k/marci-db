@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, as_datetime, as_f32, as_f64, as_i64, as_u64, encode_enum, encode_list, encode_primitive_value}}, query_op::{FieldCompare, Where, WhereNumValue}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
+use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, as_datetime, as_f32, as_f64, as_i64, as_u64, encode_enum, encode_list, encode_primitive_value}}, query_op::{FieldCompare, FieldCompareRef, Where, WhereNumValue}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
 
 /// Парсит JSON объект в where условие
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,ParseWhereError> {
@@ -70,7 +70,30 @@ fn collect_where_conditions<'a>(schema: &'a Schema, entity: &'a Entity, json_val
 fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) -> Result<FieldCompare<'a>,ParseWhereError> {
   match &field.ty {
     FieldType::Ref(ref_info) => {
-      todo!("make FieldType::Ref query")
+      let entity = &schema.models[ref_info.model_index];
+      let prefix = get_prefix_key(&ref_info.binding, field);
+
+      if value.is_null() {
+        return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Ne(Box::new(Where::True))))
+      }
+      let Some(obj) = value.as_object() else {
+        return Err(ParseWhereError::type_mismatch(field, "object"))
+      };
+
+      if obj.len() == 1 {
+        let (key, value) = obj.iter().next().unwrap();
+        match key.as_str() {
+          "$ne" | "$not" => {
+            if value.is_null() { return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Eq(Box::new(Where::True))))  }
+            let filter = Box::new(parse_where(schema, entity, value)?);
+            return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Ne(filter)))
+          }
+          _ => {}
+        }
+      }
+
+      let filter = Box::new(parse_where(schema, entity, value)?);
+      return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Eq(filter)))
     },
     FieldType::RefList(ref_info) => {
       let Some(obj) = value.as_object() else {
@@ -82,11 +105,11 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
       let (key, value) = obj.iter().next().unwrap();
       let entity = &schema.models[ref_info.model_index];
       let prefix = get_prefix_key(&ref_info.binding, field);
-
+      let filter = Box::new(parse_where(schema, entity, value)?);
       return match key.as_str() {
-        "$every" => Ok(FieldCompare::Every(entity, prefix, Box::new(parse_where(schema, entity, value)?))),
-        "$some" => Ok(FieldCompare::Some(entity, prefix, Box::new(parse_where(schema, entity, value)?))),
-        "$none" => Ok(FieldCompare::None(entity, prefix, Box::new(parse_where(schema, entity, value)?))),
+        "$every" => Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Every(filter))),
+        "$some" => Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Some(filter))),
+        "$none" => Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::None(filter))),
         _ => Err(ParseWhereError::UnsupportedOperation(key.clone()))
       };
     },

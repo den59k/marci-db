@@ -71,6 +71,7 @@ fn nested_query_test() {
     
     struct UserInfo {
         bio         String
+        age         Int
     }
 
     model Post {
@@ -100,7 +101,7 @@ fn nested_query_test() {
   let db: MarciDB = MarciDB::new(schema_str, dir.path().to_str().unwrap());  
   
   let user_a =  insert_data(&db, "User", json!({ "name": "Alice" }));
-  insert_data(&db, "User", json!({ "name": "Bob", "info": { "bio": "Just simple first user" } }));
+  insert_data(&db, "User", json!({ "name": "Bob", "info": { "bio": "Just simple first user", "age": 23 } }));
   
   insert_data(&db, "Project", json!({ "name": "Project A" }));
   insert_data(&db, "Project", json!({ "name": "Project B", "users": [{ "user": user_a, "role": "creator" }] }));
@@ -124,6 +125,34 @@ fn nested_query_test() {
     let resp = get_data(&db, "User", json!({
       "name": true,
       "$where": { "posts": { "$none": {} } }
+    }));
+    assert_eq!(resp, json!([
+      { "name": "Bob" }
+    ]))
+  }
+
+  {
+    let resp = get_data(&db, "User", json!({
+      "name": true,
+      "$where": { "info": { "$not": null } }
+    }));
+    assert_eq!(resp, json!([
+      { "name": "Bob" }
+    ]))
+  }
+
+  {
+    let resp = get_data(&db, "User", json!({
+      "name": true,
+      "$where": { "info": { "age": { "$gt": 24 } } }
+    }));
+    assert_eq!(resp, json!([]))
+  }
+
+  {
+    let resp = get_data(&db, "User", json!({
+      "name": true,
+      "$where": { "info": { "age": { "$lt": 24 } } }
     }));
     assert_eq!(resp, json!([
       { "name": "Bob" }

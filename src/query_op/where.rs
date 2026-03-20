@@ -15,9 +15,7 @@ pub enum Where<'a> {
 pub enum FieldCompare<'a> {
     EqNull,
     NeNull,
-    Every(&'a Entity, PrefixKey<'a>, Box<Where<'a>>),
-    Some(&'a Entity, PrefixKey<'a>, Box<Where<'a>>),
-    None(&'a Entity, PrefixKey<'a>, Box<Where<'a>>),
+    Ref(&'a Entity, PrefixKey<'a>, FieldCompareRef<'a>),
     In(Vec<Vec<u8>>,bool),
     NotIn(Vec<Vec<u8>>,bool),
     Eq(Vec<u8>),
@@ -26,6 +24,15 @@ pub enum FieldCompare<'a> {
     Gte(WhereNumValue),
     Lt(WhereNumValue),
     Lte(WhereNumValue),
+}
+
+#[derive(Debug, Clone)]
+pub enum FieldCompareRef<'a> {
+    Every(Box<Where<'a>>),
+    Some(Box<Where<'a>>),
+    None(Box<Where<'a>>),
+    Eq(Box<Where<'a>>),
+    Ne(Box<Where<'a>>)
 }
 
 #[derive(Debug, Clone, PartialEq)]
