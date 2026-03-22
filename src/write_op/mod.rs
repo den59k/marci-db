@@ -12,7 +12,8 @@ pub struct WriteOp<'a> {
   pub refs: Vec<WriteRelation<'a>>,
   pub mask: BitVec,
   pub entity: &'a Entity,
-  pub defaults: Vec<WriteDefault<'a>>
+  pub defaults: Vec<WriteDefault<'a>>,
+  pub write_indexes: Vec<WriteIndex>
 }
 
 #[derive(Debug)]
@@ -23,6 +24,11 @@ pub enum WriteDefault<'a> {
     Body(usize, &'a FieldDefault),
     // Записать значение parentId в Key в заданный offset
     ParentId(usize)
+}
+
+#[derive(Debug)]
+pub enum WriteIndex {
+    Value(String,Vec<u8>)
 }
 
 #[derive(Debug)]

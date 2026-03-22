@@ -11,6 +11,21 @@ pub enum FieldLocation {
 }
 
 #[derive(Debug,Clone)]
+pub enum FieldIndex {
+    Value { tree_name: String, unique: bool },
+    Number { tree_name: String, unique: bool, ty: FieldIndexNum },
+    Custom { tree_name: String, index_idx: usize }
+}
+
+#[derive(Debug,Clone)]
+pub enum FieldIndexNum {
+    Int64,
+    UInt64,
+    Float,
+    Double
+}
+
+#[derive(Debug,Clone)]
 pub struct Field {
     pub name: String,
     pub full_name: String,
@@ -19,6 +34,7 @@ pub struct Field {
     pub nullable: bool,
     pub attributes: Vec<Attribute>,
     pub default_value: Option<FieldDefault>,
+    pub indexes: Vec<FieldIndex>,
     pub condition: FieldExistsCondition
 }
 
@@ -31,6 +47,7 @@ impl Field {
             nullable: false,
             location: FieldLocation::Key { index: 0 },
             attributes: vec![],
+            indexes: vec![],
             default_value: Some(FieldDefault::Counter(0)),
             condition: FieldExistsCondition::None
         }
@@ -73,6 +90,16 @@ impl PrimitiveFieldType {
             _ => None
         }
     }
+
+    pub fn get_num_type(&self) -> Option<FieldIndexNum> {
+        return match *self {
+            PrimitiveFieldType::DateTime | PrimitiveFieldType::Int64 => Some(FieldIndexNum::Int64),
+            PrimitiveFieldType::Float => Some(FieldIndexNum::Float),
+            PrimitiveFieldType::Double => Some(FieldIndexNum::Double),
+            PrimitiveFieldType::UInt64 => Some(FieldIndexNum::UInt64),
+            _ => None
+        }
+    }
 }
 
 impl fmt::Display for PrimitiveFieldType {
@@ -102,8 +129,6 @@ pub enum FieldType {
     RefList(RefInfo),
     PrimitiveList(PrimitiveFieldType),
     PrimitiveFixedList(PrimitiveFieldType,usize),
-    // Struct(Entity),
-    // StructList(Entity),
     Enum(EnumInfo)
 }
 
@@ -147,6 +172,7 @@ pub enum RefBinding {
 }
 
 #[derive(Debug,Clone)]
+/// Структура для проверки существования поля в Entity
 pub enum FieldExistsCondition {
     None,
     EnumValue { field_index: usize, variant: u16 }
@@ -200,7 +226,8 @@ pub fn parse_field_raw(line: &str) -> Field {
       nullable,
       attributes,
       default_value: None,
-      condition: FieldExistsCondition::None
+      condition: FieldExistsCondition::None,
+      indexes: vec![]
     }
 }
 

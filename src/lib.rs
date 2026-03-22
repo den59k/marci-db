@@ -4,6 +4,7 @@ mod write_op;
 mod query_op;
 mod utils;
 mod json_parsers;
+mod index_utils;
 
 pub use crate::schema::{parse_schema, FieldRef, Field};
 pub use crate::json_parsers::{parse_insert,parse_update,parse_query,decode_document,decode_id,array_to_json};

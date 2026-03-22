@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, json_parsers::parse_where::{ParseWhereError, parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType}, schema::{Entity, FieldExistsCondition, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::parse_where::{ParseWhereError, parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Where}, schema::{Entity, FieldExistsCondition, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -14,12 +14,16 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   
   let mut mask = bitvec![0; entity.fields.len()];
   let mut includes = vec![];
+  let mut prefix_key = None;
   
   let mut filter = None;
   if let Some(where_value) = json_val.get("$where") {
-    let filter_resp = parse_where(schema, entity, where_value)
+    let where_op = parse_where(schema, entity, where_value)
       .map_err(|err| ParseError::WhereError(err))?;
-    filter = Some(filter_resp);
+    if !matches!(where_op, Where::True) {
+      prefix_key = generate_prefix_from_where(&where_op);
+      filter = Some(where_op);
+    }
   }
   
   for (field_index, field) in entity.fields.iter().enumerate() {
@@ -62,7 +66,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  Ok(QueryOp { mask, entity, sort: None, filter, prefix_key: None, includes, take: None, skip: None })
+  Ok(QueryOp { mask, entity, sort: None, filter, prefix_key, includes, take: None, skip: None })
 }
 
 pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {

@@ -2,7 +2,7 @@ use bitvec::{bitvec};
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, json_parsers::parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::{encode_data, encode_index_number}, json_parsers::parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -32,6 +32,7 @@ fn from_json_internal<'a>(
     let mut mask = bitvec![0; entity.fields.len()];
     let mut refs: Vec<WriteRelation<'_>> = vec![];
     let mut defaults: Vec<WriteDefault> = vec![];
+    let mut write_indexes = vec![];
 
     let mut data = Vec::with_capacity(entity.payload_offset + 128);
     let mut id = vec![];
@@ -78,7 +79,7 @@ fn from_json_internal<'a>(
             if matches!(field.location, FieldLocation::Key { .. }) {
                 return Err(EncodeError::MissingIdField(field.full_name.clone()));
             }
-            // TODO: set also default value here. Now it setting null (offset = 0)
+            // TODO: check for required fields here
             continue;
         };
 
@@ -89,11 +90,23 @@ fn from_json_internal<'a>(
             continue;
         }
 
+        let value_data: &[u8];
+
         match field.location {
             FieldLocation::Key { index: _ } => {
+                let start_offset = id.len();
                 encode_id_value(&mut id, field, schema, value)?;
+
+                // Добавляем нуль-терминатор в id, если размер неизвестен (для разделения)
+                if field.get_size().is_none() {
+                    id.push(b'\0');
+                    value_data = &id[start_offset..id.len()-1];
+                } else {
+                    value_data = &id[start_offset..];
+                }
             },
             FieldLocation::Body { offset } => {
+                let start_offset = data.len();
                 match &field.ty {
                     FieldType::Primitive(primitive_type) => {
                         write_header(&mut data, offset);
@@ -124,61 +137,75 @@ fn from_json_internal<'a>(
                         return Err(EncodeError::UnavailableKeyField(field.full_name.clone()));
                     }
                 }
+                value_data = &data[start_offset..];
             }
             FieldLocation::Virtual => {
+                value_data = &[];
                 match &field.ty {
-                FieldType::Ref (ref_info) => {
-                    // Здесь может быть как структура, так и модель. Если структура, используем insert
-                    let ref_entity = &schema.models[ref_info.model_index];
-                    if ref_entity.autoinsert {
-                        let Some(value) = value.as_object() else {
-                            return Err(EncodeError::type_mismatch(field, "{ }"))
-                        };
-                        let op = from_json_internal(schema, ref_entity, value, true, Some(entity))?;
-                        refs.push(WriteRelation::Create { field, op });
-                    } else {
-                        let ref_id = encode_id(schema, ref_entity, value)?;
-                        refs.push(WriteRelation::Connect { field, ids: vec![ref_id] });
-                    }
-                },
-                FieldType::RefList (ref_info) => {
-                    let ref_entity = &schema.models[ref_info.model_index];
-                    let Some(value) = value.as_array() else {
-                        return Err(EncodeError::type_mismatch(field, "Array"))
-                    };
-                    if value.is_empty() {
-                        refs.push(WriteRelation::Empty { field, st: ref_entity });
-                        continue;
-                    }
-
-                    if ref_entity.autoinsert {
-                        let mut ops = Vec::with_capacity(value.len());
-                        for item in value {
-                            let Some(item) = item.as_object() else {
-                            return Err(EncodeError::type_mismatch(field, "{ }"))
+                    FieldType::Ref (ref_info) => {
+                        // Здесь может быть как структура, так и модель. Если структура, используем insert
+                        let ref_entity = &schema.models[ref_info.model_index];
+                        if ref_entity.autoinsert {
+                            let Some(value) = value.as_object() else {
+                                return Err(EncodeError::type_mismatch(field, "{ }"))
                             };
-                            let op = from_json_internal(schema, ref_entity, item, true, Some(entity))?;
-                            ops.push(op);
+                            let op = from_json_internal(schema, ref_entity, value, true, Some(entity))?;
+                            refs.push(WriteRelation::Create { field, op });
+                        } else {
+                            let ref_id = encode_id(schema, ref_entity, value)?;
+                            refs.push(WriteRelation::Connect { field, ids: vec![ref_id] });
                         }
-                        refs.push(WriteRelation::CreateMany { field, ops });
-                    } else {
-                        let mut ids = Vec::with_capacity(value.len());
-                        for obj in value.iter() {
-                            let id = encode_id(schema, ref_entity, obj)?;
-                            ids.push(id);
+                    },
+                    FieldType::RefList (ref_info) => {
+                        let ref_entity = &schema.models[ref_info.model_index];
+                        let Some(value) = value.as_array() else {
+                            return Err(EncodeError::type_mismatch(field, "Array"))
+                        };
+                        if value.is_empty() {
+                            refs.push(WriteRelation::Empty { field, st: ref_entity });
+                            continue;
                         }
-                        refs.push(WriteRelation::Connect { field, ids });
+
+                        if ref_entity.autoinsert {
+                            let mut ops = Vec::with_capacity(value.len());
+                            for item in value {
+                                let Some(item) = item.as_object() else {
+                                return Err(EncodeError::type_mismatch(field, "{ }"))
+                                };
+                                let op = from_json_internal(schema, ref_entity, item, true, Some(entity))?;
+                                ops.push(op);
+                            }
+                            refs.push(WriteRelation::CreateMany { field, ops });
+                        } else {
+                            let mut ids = Vec::with_capacity(value.len());
+                            for obj in value.iter() {
+                                let id = encode_id(schema, ref_entity, obj)?;
+                                ids.push(id);
+                            }
+                            refs.push(WriteRelation::Connect { field, ids });
+                        }
+                    },
+                    _ => { 
+                        return Err(EncodeError::DerivedFieldNotWritable(field.full_name.clone()));
                     }
-                },
-                _ => { 
-                    return Err(EncodeError::DerivedFieldNotWritable(field.full_name.clone()));
                 }
+            }
+        }
+
+        for index in field.indexes.iter() {
+            match index {
+                FieldIndex::Value { tree_name, .. } => {
+                    write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_data(field, value_data)));
                 }
+                FieldIndex::Number { tree_name, ty, .. } => {
+                    write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_index_number(ty, value_data) ));
+                }
+                _ => {}
             }
         }
    }
 
-   Ok(WriteOp { id, data, refs, mask, entity, defaults })
+   Ok(WriteOp { id, data, refs, mask, entity, defaults, write_indexes })
 }
 
 // Метод, который кодирует только ID (и ругается, если пропущено какое-либо поле)

@@ -11,29 +11,42 @@ pub fn process_query_many<'a, U, F>
   (query: &'a QueryOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>) -> Vec<U>
   where F: Fn(DecodeCtx<U>) -> U {
 
-  if let Some(PrefixKey::ParentIndexTree(index_tree_name)) = &query.prefix_key {
-    let index_tree = ctx.get_tree(index_tree_name);
-    let ids = get_ids_by_prefix(&index_tree, parent.unwrap().1);
-    if ids.is_empty() {
-      return vec![];
-    }
-    let tree = ctx.get_tree(&query.entity.name);
+  match &query.prefix_key {
+    Some(PrefixKey::ParentIndexTree(index_tree_name)) => {
+      let index_tree = ctx.get_tree(index_tree_name);
+      let ids = get_ids_by_prefix(&index_tree, parent.unwrap().1);
+      if ids.is_empty() {
+        return vec![];
+      }
+      let tree = ctx.get_tree(&query.entity.name);
 
-    return ids.into_iter().filter_map(|id| {
-      let value = tree.get(&id).unwrap().unwrap();
-      process_data(&id, &value, ctx, query)
-    }).collect()
-  }
-    
-  if let Some(prefix_key) = &query.prefix_key {
-    let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
-      return vec![];
-    };
-    let tree = ctx.get_tree(&query.entity.name);
-    return tree.prefix(&prefix).unwrap().filter_map(|item| {
-      let (id, value) = item.unwrap();
-      process_data(&id, &value, ctx, query)
-    }).collect();
+      return ids.into_iter().filter_map(|id| {
+        let value = tree.get(&id).unwrap().unwrap();
+        process_data(&id, &value, ctx, query)
+      }).collect()
+    },
+    Some(PrefixKey::IndexRange { start, end, tree_name, fixed_size }) => {
+      let index_tree = ctx.get_tree(tree_name);
+      let ids = get_ids_by_range(&index_tree, start, end, *fixed_size);
+
+      let tree = ctx.get_tree(&query.entity.name);
+
+      return ids.into_iter().filter_map(|id| {
+        let value = tree.get(&id).unwrap().unwrap();
+        process_data(&id, &value, ctx, query)
+      }).collect()
+    },
+    Some(prefix_key) => {
+      let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
+        return vec![];
+      };
+      let tree = ctx.get_tree(&query.entity.name);
+      return tree.prefix(&prefix).unwrap().filter_map(|item| {
+        let (id, value) = item.unwrap();
+        process_data(&id, &value, ctx, query)
+      }).collect();
+    },
+    _ => {}
   }
   
   let tree = ctx.get_tree(&query.entity.name);
@@ -84,6 +97,47 @@ pub fn get_ids_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Vec<Vec<u8>> {
     .unwrap()
     .map(|e| e.unwrap()[item_id_len..].to_vec())
     .collect()
+}
+
+pub fn get_ids_by_range(
+    index_tree: &Tree,
+    start: &Option<Vec<u8>>,
+    end: &Option<Vec<u8>>,
+    fixed_size: Option<usize>,
+) -> Vec<Vec<u8>> {
+    match (start.as_deref(), end.as_deref()) {
+        (Some(s), Some(e)) => {
+          index_tree.range_keys(s..e)
+            .unwrap()
+            .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
+            .collect()
+        },
+        (Some(s), None) => {
+          index_tree.range_keys(s..)
+            .unwrap()
+            .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
+            .collect()
+        },
+        (None,    Some(e)) => {
+          index_tree.range_keys(..e)
+            .unwrap()
+            .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
+            .collect()
+        },
+        (None,    None) => panic!("Start or end of range must be defined"),
+    }
+}
+
+#[inline]
+pub fn get_id_from_index_key(key: &[u8], fixed_size: Option<usize>) -> Vec<u8> {
+  if let Some(fixed_size) = fixed_size {
+    key[fixed_size..].to_vec()
+  } else {
+    let Some(pos) = key.iter().position(|&b| b == b'\0') else {
+      panic!("Not found null-terminator in variable length index")
+    };
+    return key[pos..].to_vec();
+  }
 }
 
 // Обрабатывает данные. Если элемент не подходит по условию, возвращает None

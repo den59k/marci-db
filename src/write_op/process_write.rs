@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{MarciDB, schema::{FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteOp, WriteRelation}};
+use crate::{MarciDB, schema::{FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -45,6 +45,16 @@ pub fn write_data(insert: &WriteOp, tx: &WriteTransaction, db: &MarciDB, parent_
   { 
     let mut tree = tx.get_tree(insert.entity.name.as_bytes()).unwrap().unwrap();
     tree.insert(&write_id, data).unwrap();
+  }
+  
+  for write_index in insert.write_indexes.iter() {
+    match write_index {
+      WriteIndex::Value(tree_name, data) => {
+        let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+        let val = [ data.as_slice(), write_id.as_slice() ].concat();
+        tree.insert(&val, &[]).unwrap();
+      }
+    }
   }
   
   for st in insert.refs.iter() {

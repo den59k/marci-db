@@ -407,6 +407,7 @@ dependencies = [
  "canopydb",
  "chrono",
  "serde_json",
+ "smallvec 2.0.0-alpha.12",
  "tempfile",
 ]
 

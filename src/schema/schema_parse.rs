@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::{FieldRef, schema::{Entity, RefInfo, Schema, schema_attributes::Attribute, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
+use crate::{FieldRef, schema::{Entity, FieldIndex, RefInfo, Schema, schema_attributes::Attribute, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
@@ -53,6 +53,10 @@ pub fn parse_schema(input: &str) -> Schema {
         .collect();
 
     for model in models.iter_mut() {
+        resolve_indexes(model);
+    }
+
+    for model in models.iter_mut() {
         resolve_refs(model, &model_by_name);
     }
 
@@ -68,39 +72,6 @@ pub fn parse_schema(input: &str) -> Schema {
     resolve_derived_refs(&mut models);
 
     resolve_ref_bindings(&mut models);
-
-    // let mut ref_indexes = vec![];
-    // for (model_index, model) in models.iter().enumerate() {
-    //   for (field_index, field) in model.fields.iter().enumerate() {
-    //     let FieldType::RefList(ref_model_index) = field.ty else {
-    //       continue
-    //     };
-    //     let ref_model = &models[ref_model_index];
-    //     // Пропускаем те модели, у которых первым значением в ID стоит ссылка на текущую таблицу
-    //     if matches!(ref_model.fields[0].ty, FieldType::Ref(idx) if idx == model_index) {
-    //       continue;
-    //     }
-    //     ref_indexes.push((model_index,ref_model_index,field_index));
-    //   }
-    // }
-
-    // for (model_index,ref_model_index,field_index) in ref_indexes {
-
-    // }
-
-    // resolve_attributes(&mut schema, &model_by_name);
-
-    // resolve_foreign_constraints(&mut schema);
-
-    // let mut counter_id = 0;
-    // for model in schema.models.iter_mut() {
-    //     for field in model.fields.iter_mut() {
-    //         if field.counter_idx.is_some() {
-    //             field.counter_idx = Some(counter_id);
-    //             counter_id += 1;
-    //         }
-    //     }
-    // }
 
     Schema { models }
 }
@@ -143,6 +114,7 @@ fn resolve_model_id(entity: &mut Entity) {
 }
 
 // Находит структуры и превращает их в модели. Также проставляет всем fields field.full_name
+// Поскольку у нас могут быть вложенные enum в struct, а также struct в enum, мы разрешаем сразу оба типа в этой функции
 fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Entity>, enums: &HashMap<String, EnumDef>, model_structs: &mut Vec<Entity>) {
 
     for field in entity.fields.iter_mut(){
@@ -352,6 +324,7 @@ fn resolve_derived_refs(models: &mut [Entity]) {
         }
     }    
 
+    // TODO: можно добавить @inject поля здесь
     for (field_a_ref, field_b_ref) in field_bindings.iter() {
         let field_a = &mut models[field_a_ref.model_index].fields[field_a_ref.field_index];
         if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &mut field_a.ty {
@@ -402,6 +375,34 @@ fn resolve_ref_bindings(models: &mut [Entity]) {
     }
 }
 
+fn resolve_indexes(model: &mut Entity) {
+    for field in model.fields.iter_mut() {
+        let mut has_index = false;
+        let mut unique = false;
+        for attr in field.attributes.iter() {
+            match attr {
+                Attribute::Index => {
+                    has_index = true;
+                    break
+                },
+                Attribute::Unique => {
+                    unique = true;
+                    has_index = true;
+                    break
+                }
+                _ => {}
+            }
+        }
+
+        if has_index {
+            if let FieldType::Primitive(ty) = &field.ty && let Some(ty) = ty.get_num_type() {
+                field.indexes.push(FieldIndex::Number { tree_name: format!("index_{}", field.full_name), unique, ty });
+            } else {
+                field.indexes.push(FieldIndex::Value { tree_name: format!("index_{}", field.full_name), unique });
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

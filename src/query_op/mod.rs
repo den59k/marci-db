@@ -47,7 +47,8 @@ pub struct QueryInclude<'a> {
 pub enum PrefixKey<'a> {
   ParentId,
   ParentField(&'a Field),
-  ParentIndexTree(String)
+  ParentIndexTree(String),
+  IndexRange { start: Option<Vec<u8>>, end: Option<Vec<u8>>, tree_name: String, fixed_size: Option<usize> }
 }
 
 impl<'a> QueryOp<'a> {

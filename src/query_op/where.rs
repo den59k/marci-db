@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::{Field, query_op::PrefixKey, schema::Entity};
+use crate::{Field, query_op::PrefixKey, schema::{Entity, FieldIndexNum}};
 
 #[derive(Debug, Clone)]
 pub enum Where<'a> {
@@ -54,14 +54,23 @@ impl WhereNumValue {
                 u64::from_be_bytes(data.try_into().ok()?).partial_cmp(f)
             },
             WhereNumValue::Float(f) => {
-                f.partial_cmp(&f32::from_be_bytes(data.try_into().ok()?))
+                f32::from_be_bytes(data.try_into().ok()?).partial_cmp(f)
             },
             WhereNumValue::Double(f) => {
-                f.partial_cmp(&f64::from_be_bytes(data.try_into().ok()?))
+                f64::from_be_bytes(data.try_into().ok()?).partial_cmp(f)
             },
             WhereNumValue::DateTime(f) => {
-                Some(f.cmp(&i64::from_be_bytes(data.try_into().ok()?)))
+                Some(i64::from_be_bytes(data.try_into().ok()?).cmp(f))
             },
+        }
+    }
+
+    pub fn get_num_type(&self) -> Option<FieldIndexNum> {
+        return match *self {
+            WhereNumValue::DateTime(_) | WhereNumValue::Int64(_) => Some(FieldIndexNum::Int64),
+            WhereNumValue::Float(_) => Some(FieldIndexNum::Float),
+            WhereNumValue::Double(_) => Some(FieldIndexNum::Double),
+            WhereNumValue::UInt64(_) => Some(FieldIndexNum::UInt64)
         }
     }
 }
