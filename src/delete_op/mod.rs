@@ -45,7 +45,8 @@ pub struct DependencyAction<'a> {
 pub enum DependencyActionType<'a> {
   Delete (DeleteAction<'a>),
   SetNull { offset_pos: usize },
-  Restrict
+  Restrict,
+  RemoveIndex { tree_name: String }
 }
 
 #[derive(Debug)]

@@ -99,7 +99,13 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity) ->
         }
       },
       DeleteConstraint::Restrict => DependencyActionType::Restrict,
-      DeleteConstraint::Cascade => DependencyActionType::Delete(parse_delete_internal(schema, rev_entity, None))
+      DeleteConstraint::Cascade => DependencyActionType::Delete(parse_delete_internal(schema, rev_entity, None)),
+      DeleteConstraint::RemoveItem => {
+        let RefBinding::IndexTree(tree_name) = &rev_ref_info.binding else {
+          panic!("DeleteConstraint::RemoveItem cannot use with not-IndexTree binding {:?}", rev_ref_info.binding);
+        };
+        DependencyActionType::RemoveIndex { tree_name: tree_name.clone() }
+      }
     };
 
     // Если обратное поле существует - нам повезло, можно сразу найти элементы, которые связаны с элементом. Если нет - придется перебирать все элементы

@@ -52,13 +52,6 @@ pub fn delete_data(
     let item_ids = get_dep_ids(tx, dep, entity, schema, id, &body_value);
     if item_ids.is_empty() { continue; }
 
-    if let RefBinding::IndexTree(tree_name) = &dep.rev_binding {
-      let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
-      for item_id in item_ids.iter() {
-        tree.delete(&[ item_id, id ].concat()).unwrap();
-      }
-    }
-
     match &dep.action_type {
       DependencyActionType::Delete (action) => {
         for item_id in item_ids.iter() {
@@ -71,6 +64,12 @@ pub fn delete_data(
           let mut body = tree.get(item_id).unwrap().unwrap().to_vec();
           set_null(dep.rev_entity, dep.rev_field, &mut body, *offset_pos);
           tree.insert(item_id, &body).unwrap();
+        }
+      },
+      DependencyActionType::RemoveIndex { tree_name } => {
+        let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+        for item_id in item_ids.iter() {
+          tree.delete(&[ item_id, id ].concat()).unwrap();
         }
       },
       DependencyActionType::Restrict => {

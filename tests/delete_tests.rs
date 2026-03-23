@@ -90,3 +90,66 @@ fn delete_cascade_test() {
     }
 }
 
+
+#[test]
+fn delete_many_to_many() {
+
+    let schema_str = "
+        model User {
+            name        String
+            chats       Chat[]
+        }
+
+        model Chat {
+            name        String
+            users       User[]      @derived(User.chats)
+            messages    Message[]   @derived(Message.chat)
+        }
+
+        model Message {
+            text        String
+            chat        Chat
+            author      User?       @onDelete(SetNull)
+        }
+    ";
+
+    let dir = tempdir().unwrap();
+    let db: MarciDB = MarciDB::new(schema_str, dir.path().to_str().unwrap());  
+
+    let user_a =  insert_data(&db, "User", json!({ "name": "Alice" }));
+    let user_b = insert_data(&db, "User", json!({ "name": "Bob" }));
+    let user_c = insert_data(&db, "User", json!({ "name": "Charlie" }));
+    
+    let chat_a = insert_data(&db, "Chat", json!({ "name": "Empty chat", "users": [] }));
+    let chat_b = insert_data(&db, "Chat", json!({ "name": "Alice & Bob", "users": [ user_a, user_b ] }));
+    let chat_c = insert_data(&db, "Chat", json!({ "name": "Common chat", "users": [ user_a, user_b, user_c ] }));
+
+    insert_data(&db, "Message", json!({ "text": "Hello", "chat": chat_a, "author": null }));
+    insert_data(&db, "Message", json!({ "text": "Hello, I am Alice", "chat": chat_b, "author": user_a }));
+    insert_data(&db, "Message", json!({ "text": "Hi! How are you?", "chat": chat_b, "author": user_b }));
+
+    insert_data(&db, "Message", json!({ "text": "I am Alice", "chat": chat_c, "author": user_a }));
+    insert_data(&db, "Message", json!({ "text": "I am Bob", "chat": chat_c, "author": user_b }));
+    insert_data(&db, "Message", json!({ "text": "I am Charlie", "chat": chat_c, "author": user_c }));
+
+    assert_eq!(db.count_dev("User.chats->Chat"), 5);
+    assert_eq!(db.count_dev("Chat.users->User"), 5);
+    
+    {
+        delete_data(&db, "User", user_a);
+        assert_eq!(db.count(db.get_model("User").unwrap()), 2);
+        assert_eq!(db.count_dev("User.chats->Chat"), 3);
+        assert_eq!(db.count_dev("Chat.users->User"), 3);
+
+        let resp = get_data(&db, "Chat", json!({ 
+            "name": true, 
+            "users": { "name": true }
+        }));
+        
+        assert_eq!(resp, json!([
+            { "name": "Empty chat", "users": [] },
+            { "name": "Alice & Bob", "users": [{ "name": "Bob" }] },
+            { "name": "Common chat", "users": [{ "name": "Bob" }, { "name": "Charlie" }] },
+        ]));        
+    }
+}
