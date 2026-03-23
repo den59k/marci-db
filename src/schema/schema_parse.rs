@@ -390,6 +390,7 @@ fn resolve_ref_constraints(models: &mut [Entity]) {
                     } else {
                         constraint = match &ref_info.binding {
                             RefBinding::CurrentId => {
+                                // Если это дочерний объект, то он никак не может влиять на родительский, поэтому пропускаем его
                                 continue;
                             },
                             RefBinding::FieldValue => DeleteConstraint::SetNull,
@@ -404,6 +405,7 @@ fn resolve_ref_constraints(models: &mut [Entity]) {
                     });
                 }
                 FieldType::RefList(ref_info) => {
+                    continue;
                     // refs[ref_info.model_index].push(EntityDependency { 
                     //     model_index: model_index, 
                     //     field_index: field_index, 

@@ -15,7 +15,7 @@ pub struct DeleteOp<'a> {
 pub struct DeleteAction<'a> {
   pub indexes_to_delete: Vec<DeleteIndex<'a>>,
   pub dependencies: Vec<DependencyAction<'a>>,
-  pub refs_to_delete: Vec<String>
+  pub refs_to_delete: Vec<RefToDelete<'a>>
 }
 
 #[derive(Debug)]
@@ -23,6 +23,12 @@ pub enum DeleteIndex<'a> {
   Value { index: &'a FieldIndex, key: Vec<u8> },
   BodyValue { index: &'a FieldIndex, field: &'a Field, offset_pos: usize },
   KeyValue { index: &'a FieldIndex, field: &'a Field, id_idx: usize },
+}
+
+#[derive(Debug)]
+pub enum RefToDelete<'a> {
+  Index { tree_name: String },
+  ChildEntity { entity: &'a Entity, action: DeleteAction<'a> }
 }
 
 #[derive(Debug)]

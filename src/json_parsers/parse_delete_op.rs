@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{delete_op::{DeleteAction, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType}, index_utils::encode_index, json_parsers::{EncodeError, parsers::encode_id}, schema::{DeleteConstraint, Entity, FieldLocation, FieldType, RefBinding, Schema}, utils::get_next_id_value};
+use crate::{delete_op::{DeleteAction, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::encode_index, json_parsers::{EncodeError, parsers::encode_id}, schema::{DeleteConstraint, Entity, FieldLocation, FieldType, RefBinding, Schema}, utils::get_next_id_value};
 
 pub fn parse_delete<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<DeleteOp<'a>, EncodeError> {
   let id = encode_id(schema, entity, json_val)?;
@@ -11,7 +11,7 @@ pub fn parse_delete_internal<'a>(schema: &'a Schema, entity: &'a Entity, id: Opt
   DeleteAction {
     indexes_to_delete: collect_indexes_to_delete(schema, entity, id),
     dependencies: collect_dependency_actions(schema, entity),
-    refs_to_delete: collect_refs_to_delete(entity)
+    refs_to_delete: collect_refs_to_delete(schema, entity)
   }
 }
 
@@ -50,8 +50,7 @@ pub fn collect_indexes_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, id:
   return indexes_to_delete;
 }
 
-pub fn collect_refs_to_delete(entity: &Entity) -> Vec<String> {
-
+pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity) -> Vec<RefToDelete<'a>> {
   let mut resp = vec![];
 
   for field in entity.fields.iter() {
@@ -59,11 +58,21 @@ pub fn collect_refs_to_delete(entity: &Entity) -> Vec<String> {
       continue;
     };
 
-    let RefBinding::IndexTree(tree_name) = &ref_info.binding else {
-      continue;
-    };
-    
-    resp.push(tree_name.clone());
+    match &ref_info.binding {
+      RefBinding::CurrentId => {
+        // Временный фикс - мы не должны удалять родителей у дочерних ключей
+        if field.name == "@parent_id" {
+          continue;
+        }
+        let ref_entity = &schema.models[ref_info.model_index];
+        let action = parse_delete_internal(schema, ref_entity, None);
+        resp.push(RefToDelete::ChildEntity { entity: &ref_entity, action });
+      },
+      RefBinding::FieldValue => continue,
+      RefBinding::IndexTree(tree_name) => {
+        resp.push(RefToDelete::Index { tree_name: tree_name.clone() });
+      }
+    }
   }
 
   return resp;
@@ -71,7 +80,7 @@ pub fn collect_refs_to_delete(entity: &Entity) -> Vec<String> {
 
 pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity) -> Vec<DependencyAction<'a>> { 
   
-  let mut refs_to_delete = vec![];
+  let mut dependencies = vec![];
 
   for dep in entity.rev_dependencies.iter() {
     let rev_entity = &schema.models[dep.model_index];
@@ -90,7 +99,7 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity) ->
         }
       },
       DeleteConstraint::Restrict => DependencyActionType::Restrict,
-      DeleteConstraint::Cascade => DependencyActionType::Delete(parse_delete_internal(schema, rev_entity, None)),
+      DeleteConstraint::Cascade => DependencyActionType::Delete(parse_delete_internal(schema, rev_entity, None))
     };
 
     // Если обратное поле существует - нам повезло, можно сразу найти элементы, которые связаны с элементом. Если нет - придется перебирать все элементы
@@ -100,11 +109,11 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity) ->
         panic!("Entity dependency has wrong type {} {:?}", rev_field.full_name, rev_field.ty);
       }; 
 
-      refs_to_delete.push(DependencyAction { rev_entity, rev_field, rev_binding: &rev_ref_info.binding, binding: Some((&field, &ref_info.binding)), action_type });
+      dependencies.push(DependencyAction { rev_entity, rev_field, rev_binding: &rev_ref_info.binding, binding: Some((&field, &ref_info.binding)), action_type });
     } else {
-      refs_to_delete.push(DependencyAction { rev_entity, rev_field, rev_binding: &rev_ref_info.binding, binding: None, action_type });
+      dependencies.push(DependencyAction { rev_entity, rev_field, rev_binding: &rev_ref_info.binding, binding: None, action_type });
     }
   }
 
-  return refs_to_delete
+  return dependencies
 }

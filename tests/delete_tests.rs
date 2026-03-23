@@ -48,7 +48,7 @@ fn delete_cascade_test() {
     // println!("{:#?}", db.schema);
 
     let user_a =  insert_data(&db, "User", json!({ "name": "Alice" }));
-    let _user_b = insert_data(&db, "User", json!({ "name": "Bob", "info": { "bio": "Just simple first user" } }));
+    let user_b = insert_data(&db, "User", json!({ "name": "Bob", "info": { "bio": "Just simple first user" } }));
     
     insert_data(&db, "Project", json!({ "name": "Project A" }));
     insert_data(&db, "Project", json!({ "name": "Project B", "users": [{ "user": user_a, "role": "creator" }] }));
@@ -62,6 +62,7 @@ fn delete_cascade_test() {
     assert_eq!(db.count(db.get_model("Project").unwrap()), 3);
     assert_eq!(db.count(db.get_model("Project.users").unwrap()), 2);
     assert_eq!(db.count(db.get_model("Post").unwrap()), 3);
+    assert_eq!(db.count(db.get_model("User.info").unwrap()), 1);
 
     assert_eq!(db.count_dev("User.posts->Post"), 2);
 
@@ -79,6 +80,13 @@ fn delete_cascade_test() {
             { "title": "Second Alice post", "author": null },
             { "title": "Unnamed post", "author": null },
         ]));
+    }
+
+    {
+        delete_data(&db, "User", user_b);
+        assert_eq!(db.count(db.get_model("User").unwrap()), 0);
+
+        assert_eq!(db.count(db.get_model("User.info").unwrap()), 0);
     }
 }
 
