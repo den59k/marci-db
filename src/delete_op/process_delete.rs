@@ -9,11 +9,10 @@ pub fn delete_data(
   action: &DeleteAction,
   schema: &Schema
 ) -> Result<(), DeleteError> {
-
   let mut body_value: Option<Bytes> = None;
   {
     let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-    if action.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. })) {
+    if action.is_body_need() {
       let Some(body) = tree.get(id).unwrap() else {
         return Err(DeleteError::ItemNotFound);
       };

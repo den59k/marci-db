@@ -108,7 +108,7 @@ fn delete_many_to_many() {
 
         model Message {
             text        String
-            chat        Chat
+            chat        Chat        @onDelete(Cascade)
             author      User?       @onDelete(SetNull)
         }
     ";
@@ -150,6 +150,29 @@ fn delete_many_to_many() {
             { "name": "Empty chat", "users": [] },
             { "name": "Alice & Bob", "users": [{ "name": "Bob" }] },
             { "name": "Common chat", "users": [{ "name": "Bob" }, { "name": "Charlie" }] },
+        ]));        
+    }
+
+    println!("Step 2");
+    {
+        delete_data(&db, "Chat", chat_c);
+        assert_eq!(db.count_dev("User.chats->Chat"), 1);
+        assert_eq!(db.count_dev("Chat.users->User"), 1);
+
+        assert_eq!(db.count_dev("Message"), 3);
+
+        let resp = get_data(&db, "Chat", json!({ 
+            "name": true, 
+            "messages": { "text": true, "author": { "name": true } }
+        }));
+        assert_eq!(resp, json!([
+            { "name": "Empty chat", "messages": [
+                { "text": "Hello", "author": null }
+            ] },
+            { "name": "Alice & Bob", "messages": [
+                { "text": "Hello, I am Alice", "author": null },
+                { "text": "Hi! How are you?", "author": { "name": "Bob" } }
+            ] }
         ]));        
     }
 }

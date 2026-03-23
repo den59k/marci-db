@@ -1,16 +1,16 @@
 use serde_json::Value;
 
-use crate::{delete_op::{DeleteAction, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::encode_index, json_parsers::{EncodeError, parsers::encode_id}, schema::{DeleteConstraint, Entity, FieldLocation, FieldType, RefBinding, Schema}, utils::get_next_id_value};
+use crate::{Field, delete_op::{DeleteAction, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::encode_index, json_parsers::{EncodeError, parsers::encode_id}, schema::{DeleteConstraint, Entity, FieldLocation, FieldType, RefBinding, Schema}, utils::get_next_id_value};
 
 pub fn parse_delete<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<DeleteOp<'a>, EncodeError> {
   let id = encode_id(schema, entity, json_val)?;
-  Ok(DeleteOp { entity, action: parse_delete_internal(schema, entity, Some(&id)), id })
+  Ok(DeleteOp { entity, action: parse_delete_internal(schema, entity, Some(&id), None), id })
 }
 
-pub fn parse_delete_internal<'a>(schema: &'a Schema, entity: &'a Entity, id: Option<&[u8]>) -> DeleteAction<'a> {
+pub fn parse_delete_internal<'a>(schema: &'a Schema, entity: &'a Entity, id: Option<&[u8]>, ignore_ref: Option<&Field>) -> DeleteAction<'a> {
   DeleteAction {
     indexes_to_delete: collect_indexes_to_delete(schema, entity, id),
-    dependencies: collect_dependency_actions(schema, entity),
+    dependencies: collect_dependency_actions(schema, entity, ignore_ref),
     refs_to_delete: collect_refs_to_delete(schema, entity)
   }
 }
@@ -60,12 +60,11 @@ pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity) -> Vec<Re
 
     match &ref_info.binding {
       RefBinding::CurrentId => {
-        // Временный фикс - мы не должны удалять родителей у дочерних ключей
         if field.name == "@parent_id" {
           continue;
         }
         let ref_entity = &schema.models[ref_info.model_index];
-        let action = parse_delete_internal(schema, ref_entity, None);
+        let action = parse_delete_internal(schema, ref_entity, None, Some(field));
         resp.push(RefToDelete::ChildEntity { entity: &ref_entity, action });
       },
       RefBinding::FieldValue => continue,
@@ -78,13 +77,17 @@ pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity) -> Vec<Re
   return resp;
 }
 
-pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity) -> Vec<DependencyAction<'a>> { 
+pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity, ignore_ref: Option<&Field>) -> Vec<DependencyAction<'a>> { 
   
   let mut dependencies = vec![];
 
   for dep in entity.rev_dependencies.iter() {
     let rev_entity = &schema.models[dep.model_index];
     let rev_field = &rev_entity.fields[dep.field_index];
+
+    if matches!(ignore_ref, Some(ignore_ref) if std::ptr::eq(rev_field, ignore_ref)) {
+      continue;
+    }
 
     let (FieldType::Ref(rev_ref_info) | FieldType::RefList(rev_ref_info)) = &rev_field.ty else {
       panic!("Entity rev dependency has wrong type {} {:?}", rev_field.full_name, rev_field.ty);
@@ -99,7 +102,10 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity) ->
         }
       },
       DeleteConstraint::Restrict => DependencyActionType::Restrict,
-      DeleteConstraint::Cascade => DependencyActionType::Delete(parse_delete_internal(schema, rev_entity, None)),
+      DeleteConstraint::Cascade => {
+        let ignore_item = rev_ref_info.rev_field_idx.map(|f| &entity.fields[f]);
+        DependencyActionType::Delete(parse_delete_internal(schema, rev_entity, None, ignore_item))
+      },
       DeleteConstraint::RemoveItem => {
         let RefBinding::IndexTree(tree_name) = &rev_ref_info.binding else {
           panic!("DeleteConstraint::RemoveItem cannot use with not-IndexTree binding {:?}", rev_ref_info.binding);

@@ -18,6 +18,13 @@ pub struct DeleteAction<'a> {
   pub refs_to_delete: Vec<RefToDelete<'a>>
 }
 
+impl DeleteAction<'_> {
+  pub fn is_body_need(&self) -> bool {
+    return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. })) ||
+      self.dependencies.iter().any(|f| matches!(f.binding, Some((_, RefBinding::FieldValue))))
+  }
+}
+
 #[derive(Debug)]
 pub enum DeleteIndex<'a> {
   Value { index: &'a FieldIndex, key: Vec<u8> },
