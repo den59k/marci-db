@@ -37,6 +37,18 @@ fn generate_prefix<'a>(val: Vec<u8>, tree_name: &String) -> Option<PrefixKey<'a>
   Some(PrefixKey::IndexRange { start: Some(val), end, tree_name: tree_name.clone(), fixed_size })
 }
 
+pub fn encode_index(field: &Field, index: &FieldIndex, value: &[u8]) -> Vec<u8> {
+  match index {
+    FieldIndex::Value { .. } => {
+      encode_index_data(field, value)
+    }
+    FieldIndex::Number { ty, .. } => {
+      encode_index_number(ty, value)
+    }
+    _ => panic!("Cannot use custom index in ID")
+  }
+}
+
 /// Кодирует число для лексиграфического сравнения
 pub fn encode_index_number(ty: &FieldIndexNum, val: &[u8]) -> Vec<u8> {
   match ty {
@@ -48,7 +60,7 @@ pub fn encode_index_number(ty: &FieldIndexNum, val: &[u8]) -> Vec<u8> {
 }
 
 /// Добавляет нуль-терминатор в конце, если размер неизвестен
-pub fn encode_data(field: &Field, val: &[u8]) -> Vec<u8> {
+pub fn encode_index_data(field: &Field, val: &[u8]) -> Vec<u8> {
     // if field.get_size().is_none() && val[val.len() - 1] != b'\0' {
     if field.get_size().is_none() {
         let mut result = val.to_vec();
@@ -119,7 +131,7 @@ pub fn generate_prefix_from_where<'a>(where_op: &Where) -> Option<PrefixKey<'a>>
         match index {
             FieldIndex::Value { tree_name,  .. } => {
               return match field_compare {
-                  FieldCompare::Eq(val) => generate_prefix(encode_data(field, val), tree_name),
+                  FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name),
                   _ => None
               }
             }

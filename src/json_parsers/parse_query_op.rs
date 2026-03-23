@@ -38,25 +38,12 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
     match &field.ty {
       FieldType::Ref (ref_info) => {
-        if matches!(val, Value::Bool(true)) {
-          return Ok(QueryOp::all(&entity))
-        }
-        let Some(obj) = val.as_object() else {
-          return Err(ParseError::type_mismatch(field, "object"))
-        };
-        
-        let mut op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj)?;
+        let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
         op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
         includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
       }
       FieldType::RefList (ref_info) => {
-        if matches!(val, Value::Bool(true)) {
-          return Ok(QueryOp::all(&entity))
-        }
-        let Some(obj) = val.as_object() else {
-          return Err(ParseError::type_mismatch(field, "object"))
-        };
-        let mut op = parse_query_internal(schema, &schema.models[ref_info.model_index], obj)?;
+        let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
         op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
       }
@@ -67,6 +54,18 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   }
 
   Ok(QueryOp { mask, entity, sort: None, filter, prefix_key, includes, take: None, skip: None })
+}
+
+fn parse_query_ref<'a>(val: &Value, ref_entity: &'a Entity, field: &'a Field, schema: &'a Schema) -> Result<QueryOp<'a>, ParseError> {
+  if matches!(val, Value::Bool(true)) {
+    return Ok(QueryOp::all(ref_entity));
+  }
+
+  let Some(obj) = val.as_object() else {
+    return Err(ParseError::type_mismatch(field, "object"))
+  };
+
+  return parse_query_internal(schema, &ref_entity, obj);
 }
 
 pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {
@@ -86,6 +85,7 @@ pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKe
 #[derive(Debug)]
 pub enum ParseError {
   NotAnObject,
+  MissingIdField(String),
   WhereError(ParseWhereError),
   TypeMismatch { field: String, expected: String },
 }

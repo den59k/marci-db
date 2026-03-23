@@ -15,8 +15,7 @@ pub enum Attribute {
 pub enum DeleteConstraint {
     SetNull,
     Restrict,
-    Cascade,
-    RemoveItem
+    Cascade
 }
 
 #[derive(Debug,Clone,PartialEq)]

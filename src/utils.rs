@@ -39,6 +39,24 @@ pub fn get_id_field_size<'a>(id: &'a [u8], field: &Field, offset: usize, schema:
   }
 }
 
+/// Возвращает slice для следующего элемента в ID
+pub fn get_next_id_value<'a>(field: &Field, id: &'a[u8], schema: &Schema, offset: usize) -> &'a[u8] {
+  let size = get_id_field_size(id, field, offset, &schema);
+  return &id[offset..offset+size];
+}
+
+pub fn get_body_data<'a>(entity: &Entity, field: &Field, body: &'a[u8], offset_pos: usize) -> Option<&'a[u8]> {
+  let offset = get_offset(body, offset_pos);
+  if offset == 0 {
+    return None;
+  }
+  let offset_end = field.get_size()
+    .map(|f| offset + f)
+    .unwrap_or_else(|| get_end(body, offset_pos, entity.payload_offset));
+
+  return Some(&body[offset..offset_end]);
+}
+
 pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], schema: &Schema) -> Option<&'a[u8]> {
   match field.location {
     FieldLocation::Key { index: field_location_index } => {
@@ -46,14 +64,14 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
       for another_field in entity.fields.iter() {
         match another_field.location {
             FieldLocation::Key { index: another_field_location_index } => {
-              let size = get_id_field_size(id, field, offset, &schema);
+              let data = get_next_id_value(field, id, schema, offset);
               if another_field_location_index == field_location_index {
-                return Some(&id[offset..offset+size]);
+                return Some(data);
               }
               if another_field_location_index > field_location_index {
                 break;
               }
-              offset += size;
+              offset += data.len();
             }
             _ => { return None }
         }
@@ -61,15 +79,7 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
       return None;
     },
     FieldLocation::Body { offset: offset_pos } => {
-      let offset = get_offset(body, offset_pos);
-      if offset == 0 {
-        return None;
-      }
-      let offset_end = field.get_size()
-        .map(|f| offset + f)
-        .unwrap_or_else(|| get_end(body, offset_pos, entity.payload_offset));
-
-      return Some(&body[offset..offset_end]);
+      return get_body_data(entity, field, body, offset_pos);
     },
     FieldLocation::Virtual => { panic!("Trying to get value from virtual field") }
   }

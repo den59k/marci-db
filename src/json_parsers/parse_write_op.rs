@@ -2,7 +2,7 @@ use bitvec::{bitvec};
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::{encode_data, encode_index_number}, json_parsers::parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::{encode_index_data, encode_index_number}, json_parsers::parsers::{EncodeError, encode_enum, encode_id, encode_id_value, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -98,7 +98,7 @@ fn from_json_internal<'a>(
                 encode_id_value(&mut id, field, schema, value)?;
 
                 // Добавляем нуль-терминатор в id, если размер неизвестен (для разделения)
-                if field.get_size().is_none() {
+                if matches!(field.ty, FieldType::Primitive(ty) if ty.get_size().is_none()) {
                     id.push(b'\0');
                     value_data = &id[start_offset..id.len()-1];
                 } else {
@@ -195,7 +195,7 @@ fn from_json_internal<'a>(
         for index in field.indexes.iter() {
             match index {
                 FieldIndex::Value { tree_name, .. } => {
-                    write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_data(field, value_data)));
+                    write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_index_data(field, value_data)));
                 }
                 FieldIndex::Number { tree_name, ty, .. } => {
                     write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_index_number(ty, value_data) ));
@@ -208,29 +208,6 @@ fn from_json_internal<'a>(
    Ok(WriteOp { id, data, refs, mask, entity, defaults, write_indexes })
 }
 
-// Метод, который кодирует только ID (и ругается, если пропущено какое-либо поле)
-pub fn encode_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<Vec<u8>, EncodeError> {
-   let obj = json_val
-      .as_object()
-      .ok_or(EncodeError::NotAnObject)?;
-
-   let mut id = vec![];
-   for field in entity.fields.iter() {
-      let FieldLocation::Key { index: _ } = field.location else {
-         continue;
-      };
-      let Some(value) = obj.get(&field.name) else {
-         return Err(EncodeError::MissingIdField(field.full_name.clone()));
-      };
-      if value.is_null() {
-         return Err(EncodeError::IdFieldIsNull(field.full_name.clone()));
-      }
-      
-      encode_id_value(&mut id, field, schema, value)?;
-   }
-
-   Ok(id)
-}
 
 // Записывает значение по умолчанию. Если значение вычисляется во время записи - возвращает offset
 fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
@@ -263,22 +240,6 @@ fn encode_empty(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
         }
         _ => {
             return Err(EncodeError::FieldHasDynamicSize(field.full_name.clone()))
-        }
-    }
-    Ok(())
-}
-
-fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value: &Value) -> Result<(), EncodeError> {
-    match &field.ty {
-        FieldType::Primitive(primitive_type) => {
-            encode_primitive_value( dst, field, &primitive_type, value)?;
-        }
-        FieldType::Ref (ref_info) => {
-            let connect_id = encode_id(schema, &schema.models[ref_info.model_index], value)?;
-            dst.extend(connect_id);
-        }
-        _ => {
-            return Err(EncodeError::UnavailableKeyFieldId(field.full_name.clone()))
         }
     }
     Ok(())

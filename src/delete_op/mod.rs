@@ -1,0 +1,50 @@
+mod process_delete;
+
+pub use process_delete::delete_data;
+
+use crate::{Field, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
+
+#[derive(Debug)]
+pub struct DeleteOp<'a> {
+  pub id: Vec<u8>,
+  pub entity: &'a Entity,
+  pub action: DeleteAction<'a>
+}
+
+#[derive(Debug)]
+pub struct DeleteAction<'a> {
+  pub indexes_to_delete: Vec<DeleteIndex<'a>>,
+  pub dependencies: Vec<DependencyAction<'a>>,
+  pub refs_to_delete: Vec<String>
+}
+
+#[derive(Debug)]
+pub enum DeleteIndex<'a> {
+  Value { index: &'a FieldIndex, key: Vec<u8> },
+  BodyValue { index: &'a FieldIndex, field: &'a Field, offset_pos: usize },
+  KeyValue { index: &'a FieldIndex, field: &'a Field, id_idx: usize },
+}
+
+#[derive(Debug)]
+pub struct DependencyAction<'a> {
+  pub rev_entity: &'a Entity,
+  pub rev_field: &'a Field,
+  pub rev_binding: &'a RefBinding,
+  pub binding: Option<(&'a Field, &'a RefBinding)>,
+  pub action_type: DependencyActionType<'a>
+  // Value { tree_name: String, key: Vec<u8> },
+}
+
+#[derive(Debug)]
+pub enum DependencyActionType<'a> {
+  Delete (DeleteAction<'a>),
+  SetNull { offset_pos: usize },
+  Restrict
+}
+
+#[derive(Debug)]
+pub enum DeleteError {
+  ItemNotFound,
+  RestrictConstraints(String,Vec<Vec<u8>>),
+  EncodeError(EncodeError)
+}

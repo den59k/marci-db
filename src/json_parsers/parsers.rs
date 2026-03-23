@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::{Field, schema::{EnumInfo, PrimitiveFieldType}};
+use crate::{Field, schema::{Entity, EnumInfo, FieldLocation, FieldType, PrimitiveFieldType, Schema}};
 
 /// Кодирует одно значение и дописывает в конец `dst`
 pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFieldType, v: &Value) -> Result<(), EncodeError> {
@@ -138,6 +138,49 @@ pub fn as_datetime(v: &Value, field: &Field) -> Result<i64, EncodeError> {
     };
     Ok(epoch)
 }
+
+
+pub fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value: &Value) -> Result<(), EncodeError> {
+    match &field.ty {
+        FieldType::Primitive(primitive_type) => {
+            encode_primitive_value( dst, field, &primitive_type, value)?;
+        }
+        FieldType::Ref (ref_info) => {
+            let connect_id = encode_id(schema, &schema.models[ref_info.model_index], value)?;
+            dst.extend(connect_id);
+        }
+        _ => {
+            return Err(EncodeError::UnavailableKeyFieldId(field.full_name.clone()))
+        }
+    }
+    Ok(())
+}
+
+// Метод, который кодирует только ID (и ругается, если пропущено какое-либо поле)
+pub fn encode_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<Vec<u8>, EncodeError> {
+
+    let Some(obj) = json_val.as_object() else {
+        return Err(EncodeError::NotAnObject);
+    };
+    
+    let mut id = vec![];
+    for field in entity.fields.iter() {
+        let FieldLocation::Key { index: _ } = field.location else {
+            continue;
+        };
+        let Some(value) = obj.get(&field.name) else {
+            return Err(EncodeError::MissingIdField(field.full_name.clone()));
+        };
+        if value.is_null() {
+            return Err(EncodeError::IdFieldIsNull(field.full_name.clone()));
+        }
+        
+        encode_id_value(&mut id, field, schema, value)?;
+    }
+
+   Ok(id)
+}
+
 
 #[derive(Debug)]
 pub enum EncodeError {

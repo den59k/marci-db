@@ -2,7 +2,6 @@ use std::{collections::HashMap, fmt};
 
 use crate::schema::{schema_attributes::{Attribute, parse_attribute}, schema_default_value::FieldDefault};
 
-
 #[derive(Debug,Clone)]
 pub enum FieldLocation {
     Key { index: usize },
@@ -15,6 +14,16 @@ pub enum FieldIndex {
     Value { tree_name: String, unique: bool },
     Number { tree_name: String, unique: bool, ty: FieldIndexNum },
     Custom { tree_name: String, index_idx: usize }
+}
+
+impl FieldIndex {
+    pub fn tree_name(&self) -> &[u8] {
+        return match self {
+            FieldIndex::Value { tree_name, .. } => tree_name.as_bytes(),
+            FieldIndex::Number { tree_name, .. } => tree_name.as_bytes(),
+            FieldIndex::Custom { tree_name, .. } => tree_name.as_bytes(),
+        }
+    }
 }
 
 #[derive(Debug,Clone)]
@@ -159,7 +168,12 @@ pub struct RefInfo {
 
 impl RefInfo {
     pub fn new(model_index: usize) -> Self {
-        return RefInfo { model_index, rev_field_idx: None, parent_index: None, binding: RefBinding::CurrentId }
+        return RefInfo { 
+            model_index, 
+            rev_field_idx: None, 
+            parent_index: None, 
+            binding: RefBinding::CurrentId
+        }
     }
 }
 

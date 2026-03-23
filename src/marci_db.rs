@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldIndex, FieldType, RefBinding, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
+use crate::{delete_op::{DeleteError, DeleteOp, delete_data}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, write_op::{InsertError, WriteOp, write_data}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -32,11 +32,7 @@ impl MarciDB {
         }
 
         for index in field.indexes.iter() {
-          match index {
-            FieldIndex::Value { tree_name, .. } | FieldIndex::Number { tree_name, .. } | FieldIndex::Custom { tree_name, .. } => {
-              tx.get_or_create_tree(tree_name.as_bytes()).unwrap();
-            }
-          }
+          tx.get_or_create_tree(index.tree_name()).unwrap();
         }
       }
     }
@@ -74,21 +70,26 @@ impl MarciDB {
     return tree.len();
   }
 
-  pub fn insert_data(&self, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
+  pub fn count_dev(&self, tree_name: &str) -> u64 { 
+    let rx = self.db.begin_read().unwrap();
+    let tree = rx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+    return tree.len();
+  }
+
+  pub fn insert_item(&self, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
     let tx = self.db.begin_write().unwrap();
     let item_id = write_data(insert, &tx, &self, None)?;
     tx.commit().unwrap();
     Ok(item_id)
   }
 
-
+  pub fn delete_item(&self, item: &DeleteOp) -> Result<(), DeleteError> {
+    let tx = self.db.begin_write().unwrap();
+    delete_data(&tx, &item.id, item.entity, &item.action, &self.schema)?;
+    tx.commit().unwrap();
+    Ok(())
+  }
 }
-
-// #[derive(Debug)]
-// pub enum DeleteError {
-//   ItemNotFound,
-//   RestrictConstraints(String,Vec<u64>)
-// }
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {
   let mut counters = Vec::with_capacity(schema.models.len());

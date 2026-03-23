@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::{FieldRef, schema::{Entity, FieldIndex, RefInfo, Schema, schema_attributes::Attribute, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
+use crate::{FieldRef, schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}}};
 
 pub fn parse_schema(input: &str) -> Schema {
     let mut models = Vec::new();
@@ -73,6 +73,8 @@ pub fn parse_schema(input: &str) -> Schema {
 
     resolve_ref_bindings(&mut models);
 
+    resolve_ref_constraints(&mut models);
+
     Schema { models }
 }
 
@@ -81,13 +83,14 @@ pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str:
     let fields = parse_fields(lines);
     // update_key_fields(&mut fields);
 
-    return Entity { name, fields, payload_offset: 0, autoinsert: false };
+    return Entity::new(name, fields);
 }
 
 pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Entity {
     let fields = parse_fields(lines);
-
-    return Entity { name: String::new(), fields: fields, payload_offset: 0, autoinsert: true }
+    let mut entity = Entity::new(String::new(), fields);
+    entity.autoinsert = true;
+    return entity;
 }
 
 pub fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Vec<Field> {
@@ -226,18 +229,16 @@ fn resolve_refs(entity: &mut Entity, model_by_name: &HashMap<String, usize>) {
     for field in entity.fields.iter_mut(){
         match &field.ty {
             FieldType::RefUnresolved(name) => {
-              if let Some(model_index) = model_by_name.get(name) {
+                let Some(model_index) = model_by_name.get(name) else {
+                    panic!("Unknown type {}", name);
+                };
                 field.ty = FieldType::Ref(RefInfo::new(*model_index));
-              } else {
-                panic!("Unknown type {}", name)
-              }
             }
             FieldType::RefListUnresolved(name) => {
-              if let Some(model_index) = model_by_name.get(name) {
+                let Some(model_index) = model_by_name.get(name) else {
+                    panic!("Unknown type {}", name)
+                };
                 field.ty = FieldType::RefList(RefInfo::new(*model_index));
-              } else {
-                panic!("Unknown type {}", name)
-              }
             }
             _ => {}
         }
@@ -287,7 +288,7 @@ pub fn split_by_last_dot(value: &str) -> (Option<&str>,&str) {
     return (Some(&value[..last_index]),&value[last_index+1..]);
 }
 
-// Связывает между собой derived поля
+/// Связывает между собой derived поля
 fn resolve_derived_refs(models: &mut [Entity]) {
 
     let mut field_bindings = vec![];
@@ -327,26 +328,26 @@ fn resolve_derived_refs(models: &mut [Entity]) {
     // TODO: можно добавить @inject поля здесь
     for (field_a_ref, field_b_ref) in field_bindings.iter() {
         let field_a = &mut models[field_a_ref.model_index].fields[field_a_ref.field_index];
-        if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &mut field_a.ty {
-            ref_info.rev_field_idx = Some(field_b_ref.field_index);
-            if let Some(st_ref) = st_refs.get(field_a_ref) {
-                ref_info.parent_index = Some(ref_info.model_index);
-                ref_info.model_index = *st_ref;
-            }
-        }
+        update_rev_index(field_a, field_a_ref, field_b_ref, &st_refs);
         
         let field_b = &mut models[field_b_ref.model_index].fields[field_b_ref.field_index];
-        if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &mut field_b.ty {
-            ref_info.rev_field_idx = Some(field_a_ref.field_index);
-            if let Some(st_ref) = st_refs.get(field_b_ref) {
-                ref_info.parent_index = Some(ref_info.model_index);
-                ref_info.model_index = *st_ref;
-            }
-        }
+        update_rev_index(field_b, field_b_ref, field_a_ref, &st_refs);
     }
 }
 
-// Проставляет RefBinding для Ref и RefList
+/// Проставляет rev_field_idx для ref_info. Также корректирует model_index, если ссылка была на структуру
+fn update_rev_index(field: &mut Field, field_ref: &FieldRef, rev_field_ref: &FieldRef, st_refs: &HashMap<FieldRef, usize>) {
+    let (FieldType::Ref(ref_info) | FieldType::RefList(ref_info)) = &mut field.ty else {
+        panic!("Wrong field ty. Expected: Ref or RefList {}", field.full_name);
+    };
+    ref_info.rev_field_idx = Some(rev_field_ref.field_index);
+    if let Some(st_ref) = st_refs.get(field_ref) {
+        ref_info.parent_index = Some(ref_info.model_index);
+        ref_info.model_index = *st_ref;
+    }
+}
+
+/// Проставляет RefBinding для Ref и RefList
 fn resolve_ref_bindings(models: &mut [Entity]) {
     let model_names: Vec<String> = models.iter().map(|f| f.name.clone()).collect();
     for model in models.iter_mut() {
@@ -368,11 +369,61 @@ fn resolve_ref_bindings(models: &mut [Entity]) {
 
                 let tree_name = format!("{}->{}", &field.full_name, &model_names[ref_info.model_index]);
                 ref_info.binding = RefBinding::IndexTree(tree_name);
-
                 // indexes.push((FieldRef::new(model_index, field_index), ref_info.model_index, ref_info.rev_field_idx));
             }
         }
     }
+}
+
+/// Проставляет RefConstraints для Ref и RefList
+fn resolve_ref_constraints(models: &mut [Entity]) {
+    let mut refs: Vec<Vec<EntityDependency>> = vec![Vec::new(); models.len()];
+
+    for (model_index, entity) in models.iter_mut().enumerate() {
+        for (field_index, field) in entity.fields.iter_mut().enumerate() {
+            match &mut field.ty {
+                FieldType::Ref(ref_info) => {
+                    let constraint: DeleteConstraint;
+
+                    if let Some(delete_constraint) = get_delete_constraint(&field.attributes) {
+                        constraint = delete_constraint.clone();
+                    } else {
+                        constraint = match &ref_info.binding {
+                            RefBinding::CurrentId => {
+                                continue;
+                            },
+                            RefBinding::FieldValue => DeleteConstraint::SetNull,
+                            RefBinding::IndexTree(_) => { continue; }
+                       };
+                    }
+
+                    refs[ref_info.model_index].push(EntityDependency { 
+                        model_index: model_index, 
+                        field_index: field_index, 
+                        constraint
+                    });
+                }
+                FieldType::RefList(ref_info) => {
+                    // refs[ref_info.model_index].push(EntityDependency { 
+                    //     model_index: model_index, 
+                    //     field_index: field_index, 
+                    //     constraint: DeleteConstraint::RemoveItem
+                    // });
+                },
+                _ => {}
+            }
+        }
+    }
+
+    for (model_index, deps) in refs.into_iter().enumerate() { 
+        models[model_index].rev_dependencies = deps;
+    }
+}
+
+fn get_delete_constraint(attributes: &[Attribute]) -> Option<&DeleteConstraint> {
+    attributes.iter().find_map(|attr| {
+        if let Attribute::OnDelete(dc) = attr { Some(dc) } else { None }
+    })
 }
 
 fn resolve_indexes(model: &mut Entity) {

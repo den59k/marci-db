@@ -6,6 +6,7 @@ mod schema_attributes;
 mod schema_enum;
 mod schema_default_value;
 
+pub use crate::schema::schema_attributes::DeleteConstraint;
 pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition,FieldIndex,FieldIndexNum};
 pub use crate::schema::{schema_parse::parse_schema};
 pub use crate::schema::schema_default_value::FieldDefault;
@@ -20,19 +21,25 @@ pub struct Entity {
     pub name: String,
     pub fields: Vec<Field>,
     pub payload_offset: usize,
-    pub autoinsert: bool
+    pub autoinsert: bool,
+    pub rev_dependencies: Vec<EntityDependency>
+}
+
+impl Entity {
+    pub fn new(name: String, fields: Vec<Field>) -> Self {
+        Entity { name, fields, payload_offset: 0, autoinsert: false, rev_dependencies: vec![] }
+    }
 }
 
 #[derive(Debug,Clone,PartialEq,Eq,Hash,PartialOrd)]
 pub struct FieldRef {
     pub model_index: usize,
-    pub field_index: usize,
-    pub enum_variant_index: Option<(usize, usize)>
+    pub field_index: usize
 }
 
 impl FieldRef {
     pub fn new(model_index: usize, field_index: usize) -> FieldRef {
-        return FieldRef { model_index, field_index, enum_variant_index: None };
+        return FieldRef { model_index, field_index };
     }
 }
 
@@ -54,4 +61,11 @@ impl Schema {
         }
         return self.models[ref_info.model_index].name == entity.name;
     }
+}
+
+#[derive(Debug,Clone)]
+pub struct EntityDependency {
+    pub model_index: usize,
+    pub field_index: usize,
+    pub constraint: DeleteConstraint
 }

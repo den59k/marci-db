@@ -159,3 +159,59 @@ fn nested_query_test() {
     ]))
   }
 }
+
+
+
+#[test]
+fn many_to_many_query_test() {
+
+  let schema_str = "
+    model User {
+      name        String
+      chats       Chat[]
+    }
+
+    model Chat {
+      name        String
+      users       User[]    @derived(User.chats)
+    }
+  ";
+
+  let dir = tempdir().unwrap();
+  let db: MarciDB = MarciDB::new(schema_str, dir.path().to_str().unwrap());  
+
+  let user_a = insert_data(&db, "User", json!({ "name": "Alice" }));
+  let user_b = insert_data(&db, "User", json!({ "name": "Bob" }));
+  let user_c = insert_data(&db, "User", json!({ "name": "Charlie" }));
+  
+  insert_data(&db, "Chat", json!({ "name": "Empty chat", "users": [] }));
+  insert_data(&db, "Chat", json!({ "name": "Second chat", "users": [ user_a, user_b ] }));
+  insert_data(&db, "Chat", json!({ "name": "All chat", "users": [ user_a, user_b, user_c ] }));
+
+  {
+    let resp = get_data(&db, "Chat", json!({
+      "name": true,
+      "users": { "name": true }
+    }));
+    assert_eq!(resp, json!([
+      { "name": "Empty chat", "users": [] },
+      { "name": "Second chat", "users": [{ "name": "Alice" }, { "name": "Bob" }] },
+      { "name": "All chat", "users": [{ "name": "Alice" }, { "name": "Bob" }, { "name": "Charlie" }] },
+    ]))
+  }
+
+  {
+    let resp = get_data(&db, "User", json!({
+      "name": true,
+      "chats": { "name": true },
+      "$where": { "name": "Alice" }
+    }));
+    assert_eq!(resp, json!([
+      { "name": "Alice", "chats": [
+        { "name": "Second chat" },
+        { "name": "All chat" },
+      ] },
+    ]))
+  }
+
+}
