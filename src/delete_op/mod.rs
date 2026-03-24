@@ -1,27 +1,25 @@
 mod process_delete;
+mod prepare_delete_op;
 
 pub use process_delete::delete_data;
+pub use prepare_delete_op::prepare_delete;
 
 use crate::{Field, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
 
 #[derive(Debug)]
 pub struct DeleteOp<'a> {
-  pub id: Vec<u8>,
-  pub entity: &'a Entity,
-  pub action: DeleteAction<'a>
-}
-
-#[derive(Debug)]
-pub struct DeleteAction<'a> {
   pub indexes_to_delete: Vec<DeleteIndex<'a>>,
   pub dependencies: Vec<DependencyAction<'a>>,
   pub refs_to_delete: Vec<RefToDelete<'a>>
 }
 
-impl DeleteAction<'_> {
+impl DeleteOp<'_> {
   pub fn is_body_need(&self) -> bool {
     return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. })) ||
       self.dependencies.iter().any(|f| matches!(f.binding, Some((_, RefBinding::FieldValue))))
+  }
+  pub fn is_empty(&self) -> bool {
+    return self.indexes_to_delete.is_empty() && self.dependencies.is_empty() && self.refs_to_delete.is_empty()
   }
 }
 
@@ -29,13 +27,13 @@ impl DeleteAction<'_> {
 pub enum DeleteIndex<'a> {
   Value { index: &'a FieldIndex, key: Vec<u8> },
   BodyValue { index: &'a FieldIndex, field: &'a Field, offset_pos: usize },
-  KeyValue { index: &'a FieldIndex, field: &'a Field, id_idx: usize },
+  KeyValue { index: &'a FieldIndex, field: &'a Field },
 }
 
 #[derive(Debug)]
 pub enum RefToDelete<'a> {
   Index { tree_name: String },
-  ChildEntity { entity: &'a Entity, action: DeleteAction<'a> }
+  ChildEntity { entity: &'a Entity, delete_op: DeleteOp<'a> }
 }
 
 #[derive(Debug)]
@@ -50,7 +48,7 @@ pub struct DependencyAction<'a> {
 
 #[derive(Debug)]
 pub enum DependencyActionType<'a> {
-  Delete (DeleteAction<'a>),
+  Delete (DeleteOp<'a>),
   SetNull { offset_pos: usize },
   Restrict,
   RemoveIndex { tree_name: String }

@@ -146,7 +146,7 @@ pub fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value:
             encode_primitive_value( dst, field, &primitive_type, value)?;
         }
         FieldType::Ref (ref_info) => {
-            let connect_id = encode_id(schema, &schema.models[ref_info.model_index], value)?;
+            let connect_id = parse_id(schema, &schema.models[ref_info.model_index], value)?;
             dst.extend(connect_id);
         }
         _ => {
@@ -157,7 +157,7 @@ pub fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value:
 }
 
 // Метод, который кодирует только ID (и ругается, если пропущено какое-либо поле)
-pub fn encode_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<Vec<u8>, EncodeError> {
+pub fn parse_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<Vec<u8>, EncodeError> {
 
     let Some(obj) = json_val.as_object() else {
         return Err(EncodeError::NotAnObject);

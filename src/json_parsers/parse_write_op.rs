@@ -2,7 +2,7 @@ use bitvec::{bitvec};
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::{encode_index_data, encode_index_number}, json_parsers::parsers::{EncodeError, encode_enum, encode_id, encode_id_value, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::{encode_index_data, encode_index_number}, json_parsers::parsers::{EncodeError, encode_enum, parse_id, encode_id_value, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -122,11 +122,11 @@ fn from_json_internal<'a>(
                     },
                     FieldType::Ref (ref_info) => {
                         let ref_entity = &schema.models[ref_info.model_index];
-                        let connect_id = encode_id(schema, ref_entity, value)?;
+                        let connect_id = parse_id(schema, ref_entity, value)?;
                         write_header(&mut data, offset);
                         data.extend(connect_id);
                         
-                        let ref_id = encode_id(schema, ref_entity, value)?;
+                        let ref_id = parse_id(schema, ref_entity, value)?;
                         refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ] });
                     },
                     FieldType::Enum(enum_def) => {
@@ -152,7 +152,7 @@ fn from_json_internal<'a>(
                             let op = from_json_internal(schema, ref_entity, value, true, Some(entity))?;
                             refs.push(WriteRelation::Create { field, op });
                         } else {
-                            let ref_id = encode_id(schema, ref_entity, value)?;
+                            let ref_id = parse_id(schema, ref_entity, value)?;
                             refs.push(WriteRelation::Connect { field, ids: vec![ref_id] });
                         }
                     },
@@ -179,7 +179,7 @@ fn from_json_internal<'a>(
                         } else {
                             let mut ids = Vec::with_capacity(value.len());
                             for obj in value.iter() {
-                                let id = encode_id(schema, ref_entity, obj)?;
+                                let id = parse_id(schema, ref_entity, obj)?;
                                 ids.push(id);
                             }
                             refs.push(WriteRelation::Connect { field, ids });

@@ -1,12 +1,12 @@
 use canopydb::{Bytes, Transaction, Tree, WriteTransaction};
 
-use crate::{Field, delete_op::{DeleteAction, DeleteError, DeleteIndex, DependencyAction, DependencyActionType, RefToDelete}, index_utils::increase_bit, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end, get_offset}};
+use crate::{Field, delete_op::{DeleteOp, DeleteError, DeleteIndex, DependencyAction, DependencyActionType, RefToDelete}, index_utils::increase_bit, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end, get_offset}};
 
 pub fn delete_data(
   tx: &WriteTransaction, 
-  id: &[u8], 
+  id: &[u8],
   entity: &Entity, 
-  action: &DeleteAction,
+  action: &DeleteOp,
   schema: &Schema
 ) -> Result<(), DeleteError> {
   let mut body_value: Option<Bytes> = None;
@@ -83,9 +83,13 @@ pub fn delete_data(
           let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
           delete_by_prefix(&mut tree, id);
         }
-        RefToDelete::ChildEntity { entity, .. } => {
+        RefToDelete::ChildEntity { entity, delete_op: action } => {
           let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-          delete_by_prefix(&mut tree, id);
+          if action.is_empty() {
+            delete_by_prefix(&mut tree, id);
+          } else {
+            todo!()
+          }
         }
     }
   }

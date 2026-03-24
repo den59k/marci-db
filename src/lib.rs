@@ -8,7 +8,7 @@ mod json_parsers;
 mod index_utils;
 
 pub use crate::schema::{parse_schema, FieldRef, Field};
-pub use crate::json_parsers::{parse_insert,parse_update,parse_query,decode_document,decode_id,array_to_json,parse_delete};
+pub use crate::json_parsers::{parse_insert,parse_update,parse_query,decode_document,decode_id,array_to_json,parse_id};
 pub use crate::marci_db::MarciDB;
 
 #[cfg(test)]

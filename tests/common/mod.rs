@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use marcidb::{MarciDB, array_to_json, decode_document, decode_id, parse_delete, parse_insert, parse_query};
+use marcidb::{MarciDB, array_to_json, decode_document, decode_id, parse_id, parse_insert, parse_query};
 use serde_json::Value;
 
 
@@ -25,6 +25,6 @@ pub fn get_data(db: &MarciDB, model: &str, json_query: Value) -> Value {
 
 pub fn delete_data(db: &MarciDB, model: &str, data: Value) {
   let entity = db.get_model(model).unwrap();
-  let to_delete = parse_delete(&db.schema, entity, &data).unwrap();
-  db.delete_item(&to_delete).unwrap();
+  let id = parse_id(&db.schema, entity, &data).unwrap();
+  db.delete_item(entity, &id).unwrap();
 }
