@@ -11,7 +11,6 @@ pub struct WriteOp<'a> {
   pub data: Vec<u8>,
   pub refs: Vec<WriteRelation<'a>>,
   pub mask: BitVec,
-  pub entity: &'a Entity,
   pub defaults: Vec<WriteDefault<'a>>,
   pub write_indexes: Vec<WriteIndex>
 }
@@ -43,22 +42,27 @@ pub enum WriteRelation<'a> {
     },
     Create {
         field: &'a Field,
-        op: WriteOp<'a>
+        op: WriteOp<'a>,
+        st: &'a Entity,
     },
     CreateMany {
         field: &'a Field,
         ops: Vec<WriteOp<'a>>,
+        st: &'a Entity,
     },
     Connect {
         field: &'a Field,
-        ids: Vec<Vec<u8>>
+        ids: Vec<Vec<u8>>,
+        st: &'a Entity,
     },
     Update {
         field: &'a Field,
-        op: WriteOp<'a>
+        op: WriteOp<'a>,
+        st: &'a Entity,
     },
     Push {
         field: &'a Field,
-        op: WriteOp<'a>
+        op: WriteOp<'a>,
+        st: &'a Entity,
     },
 }

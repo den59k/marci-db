@@ -477,19 +477,19 @@ mod tests {
             entity: &schema.models[0], 
             mask: &bitvec!(1;  schema.models[1].fields.len()), 
             includes: encoded.refs.iter().map(|f| {
-                let WriteRelation::CreateMany { field, ops } = f else {
+                let WriteRelation::CreateMany { field, ops, st } = f else {
                     panic!("Wrong WriteRelation type")
                 };
                 assert_eq!(ops[0].defaults.len(), 1);
                 let resp = ops.iter().map(|op| { 
                     let id: Vec<u8> = [ &vec![0;8], op.id.as_slice() ].concat();
-                    let mut mask = bitvec!(1; op.entity.fields.len());
+                    let mut mask = bitvec!(1; st.fields.len());
                     mask.set(0, false);
 
                     decode_document(DecodeCtx { 
                         id: &id, 
                         data: &op.data, 
-                        entity: &op.entity, 
+                        entity: &st, 
                         mask: &mask,
                         includes: vec![], 
                         schema: &schema

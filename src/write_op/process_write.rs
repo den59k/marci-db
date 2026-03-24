@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{MarciDB, schema::{FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{MarciDB, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -14,7 +14,7 @@ pub enum InsertError {
   ParentIdRequired
 }
 
-pub fn write_data(insert: &WriteOp, tx: &WriteTransaction, db: &MarciDB, parent_id: Option<&[u8]>) -> Result<Vec<u8>, InsertError> {
+pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: &MarciDB, parent_id: Option<&[u8]>) -> Result<Vec<u8>, InsertError> {
 
   let mut write_id = insert.id.clone();
   let mut temp_data: Option<Vec<u8>> = None;
@@ -43,7 +43,7 @@ pub fn write_data(insert: &WriteOp, tx: &WriteTransaction, db: &MarciDB, parent_
   let data = temp_data.as_deref().unwrap_or(&insert.data);
 
   { 
-    let mut tree = tx.get_tree(insert.entity.name.as_bytes()).unwrap().unwrap();
+    let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
     tree.insert(&write_id, data).unwrap();
   }
   
@@ -59,15 +59,15 @@ pub fn write_data(insert: &WriteOp, tx: &WriteTransaction, db: &MarciDB, parent_
   
   for st in insert.refs.iter() {
     match st {
-      WriteRelation::Create { op, .. } => {
-        write_data(op, tx, db, Some(&write_id))?;
+      WriteRelation::Create { op, st, .. } => {
+        write_data(tx, st, op, db, Some(&write_id))?;
       }
-      WriteRelation::CreateMany { ops, .. } => {
+      WriteRelation::CreateMany { ops, st, .. } => {
         for op in ops {
-          write_data(op, tx, db, Some(&write_id))?;
+          write_data(tx, st, op, db, Some(&write_id))?;
         }
       }
-      WriteRelation::Connect { field, ids } => {
+      WriteRelation::Connect { field, ids, .. } => {
         match &field.ty {
           FieldType::Ref(ref_info) => {
             write_index(tx, ref_info, &db.schema, &write_id, &ids);

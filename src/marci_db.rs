@@ -76,11 +76,15 @@ impl MarciDB {
     return tree.len();
   }
 
-  pub fn insert_item(&self, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
+  pub fn insert_item(&self, entity: &Entity, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
     let tx = self.db.begin_write().unwrap();
-    let item_id = write_data(insert, &tx, &self, None)?;
+    let item_id = write_data(&tx, entity, insert,  &self, None)?;
     tx.commit().unwrap();
     Ok(item_id)
+  }
+
+  pub fn update_item(&self, entity: &Entity, id: &[u8], ) {
+    
   }
 
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<(), DeleteError> {

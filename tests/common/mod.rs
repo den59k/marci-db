@@ -9,7 +9,7 @@ use serde_json::Value;
 pub fn insert_data(db: &MarciDB, model: &str, data: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let to_insert = parse_insert(&db.schema, entity, &data).unwrap();
-  let item_id = db.insert_item(&to_insert).unwrap();
+  let item_id = db.insert_item(entity, &to_insert).unwrap();
   Value::from_str(&decode_id(&item_id, entity, &db.schema)).unwrap()
 }
 

@@ -127,7 +127,7 @@ fn from_json_internal<'a>(
                         data.extend(connect_id);
                         
                         let ref_id = parse_id(schema, ref_entity, value)?;
-                        refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ] });
+                        refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ], st: &schema.models[ref_info.model_index] });
                     },
                     FieldType::Enum(enum_def) => {
                         write_header(&mut data, offset);
@@ -150,10 +150,10 @@ fn from_json_internal<'a>(
                                 return Err(EncodeError::type_mismatch(field, "{ }"))
                             };
                             let op = from_json_internal(schema, ref_entity, value, true, Some(entity))?;
-                            refs.push(WriteRelation::Create { field, op });
+                            refs.push(WriteRelation::Create { field, op, st: ref_entity });
                         } else {
                             let ref_id = parse_id(schema, ref_entity, value)?;
-                            refs.push(WriteRelation::Connect { field, ids: vec![ref_id] });
+                            refs.push(WriteRelation::Connect { field, ids: vec![ref_id], st: ref_entity });
                         }
                     },
                     FieldType::RefList (ref_info) => {
@@ -175,14 +175,14 @@ fn from_json_internal<'a>(
                                 let op = from_json_internal(schema, ref_entity, item, true, Some(entity))?;
                                 ops.push(op);
                             }
-                            refs.push(WriteRelation::CreateMany { field, ops });
+                            refs.push(WriteRelation::CreateMany { field, ops, st: ref_entity });
                         } else {
                             let mut ids = Vec::with_capacity(value.len());
                             for obj in value.iter() {
                                 let id = parse_id(schema, ref_entity, obj)?;
                                 ids.push(id);
                             }
-                            refs.push(WriteRelation::Connect { field, ids });
+                            refs.push(WriteRelation::Connect { field, ids, st: ref_entity });
                         }
                     },
                     _ => { 
@@ -205,7 +205,7 @@ fn from_json_internal<'a>(
         }
    }
 
-   Ok(WriteOp { id, data, refs, mask, entity, defaults, write_indexes })
+   Ok(WriteOp { id, data, refs, mask, defaults, write_indexes })
 }
 
 
@@ -349,14 +349,14 @@ mod tests {
         assert_eq!(get_offsets(&encoded.data, model), vec![ model.payload_offset ]); // 3 bytes + 4 byte offset
         assert_eq!(encoded.refs.len(), 1);
 
-        let WriteRelation::CreateMany { ops, .. } = &encoded.refs[0] else {
+        let WriteRelation::CreateMany { ops, st, .. } = &encoded.refs[0] else {
             panic!("Expected WriteRelation::CreateMany, found {:?}", encoded.refs[0]);
         };
 
         assert_eq!(ops.len(), 1);
         assert!(matches!(ops[0].defaults[0], WriteDefault::ParentId(0)));
         assert_eq!(&ops[0].id, &[ 0, 0, 0, 0, 0, 0, 0, 1]);
-        assert_eq!(get_offsets(&ops[0].data, ops[0].entity), vec![ model.payload_offset ]);
+        assert_eq!(get_offsets(&ops[0].data, st), vec![ model.payload_offset ]);
         
         // assert_eq!()
 
@@ -427,21 +427,21 @@ mod tests {
             let encoded = parse_insert(&schema, project_model, &input).unwrap();
             assert_eq!(encoded.refs.len(), 1);
                 
-            let WriteRelation::CreateMany { ops, .. } = &encoded.refs[0] else {
+            let WriteRelation::CreateMany { ops, st, .. } = &encoded.refs[0] else {
                 panic!("Wrong encoded ref type {:?}", encoded.refs[0]);
             };
 
-            let enum_field = ops[0].entity.fields.iter().find(|i| i.name == "role").unwrap();
-            assert_eq!(get_data(ops[0].entity, enum_field, &ops[0].id, &ops[0].data, &schema).unwrap(), &[ 0, 1 ]);
+            let enum_field = st.fields.iter().find(|i| i.name == "role").unwrap();
+            assert_eq!(get_data(st, enum_field, &ops[0].id, &ops[0].data, &schema).unwrap(), &[ 0, 1 ]);
             
-            let features_field = ops[0].entity.fields.iter().find(|i| i.name == "features").unwrap();
+            let features_field = st.fields.iter().find(|i| i.name == "features").unwrap();
 
             let mut buf = vec![];
             
             let features_arr = json!([ "root", "tester" ]);
             encode_list(&mut buf, &features_arr, features_field, &crate::schema::PrimitiveFieldType::String, None).unwrap();
 
-            assert_eq!(get_data(ops[0].entity, features_field, &ops[0].id, &ops[0].data, &schema).unwrap(), buf);
+            assert_eq!(get_data(st, features_field, &ops[0].id, &ops[0].data, &schema).unwrap(), buf);
         }
 
         // Проверяем, что field из другого option не записывается в данные
@@ -458,15 +458,15 @@ mod tests {
             let encoded = parse_insert(&schema, project_model, &input).unwrap();
             assert_eq!(encoded.refs.len(), 1);
 
-            let WriteRelation::CreateMany { ops, .. } = &encoded.refs[0] else {
+            let WriteRelation::CreateMany { ops, st, .. } = &encoded.refs[0] else {
                 panic!("Wrong encoded ref type {:?}", encoded.refs[0]);
             };
 
-            let enum_field = ops[0].entity.fields.iter().find(|i| i.name == "role").unwrap();
-            assert_eq!(get_data(ops[0].entity, enum_field, &ops[0].id, &ops[0].data, &schema).unwrap(), &[ 0, 0 ]);
+            let enum_field = st.fields.iter().find(|i| i.name == "role").unwrap();
+            assert_eq!(get_data(st, enum_field, &ops[0].id, &ops[0].data, &schema).unwrap(), &[ 0, 0 ]);
 
-            let features_field = ops[0].entity.fields.iter().find(|i| i.name == "features").unwrap();
-            assert_eq!(get_data(ops[0].entity, features_field, &ops[0].id, &ops[0].data, &schema), None);
+            let features_field = st.fields.iter().find(|i| i.name == "features").unwrap();
+            assert_eq!(get_data(st, features_field, &ops[0].id, &ops[0].data, &schema), None);
         }
     }
 }
