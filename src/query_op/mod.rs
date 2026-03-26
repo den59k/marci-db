@@ -6,7 +6,7 @@ mod process_where;
 use crate::{Field, schema::{Entity, FieldLocation, FieldType}};
 
 pub use process_query::{process_query_many,process_query_one,DecodeCtx,TransationContext,IncludeResult};
-pub use r#where::{Where,FieldCompare,FieldCompareRef,WhereNumValue};
+pub use r#where::{Where,FieldCompare,FieldCompareRef};
 
 #[derive(Debug)]
 pub struct QueryOp<'a> {

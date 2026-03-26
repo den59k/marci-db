@@ -1,6 +1,6 @@
 use canopydb::{Bytes, Transaction, Tree, WriteTransaction};
 
-use crate::{Field, delete_op::{DeleteOp, DeleteError, DeleteIndex, DependencyAction, DependencyActionType, RefToDelete}, index_utils::increase_bit, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end, get_offset}};
+use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::increase_bit, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
 
 pub fn delete_data(
   tx: &WriteTransaction, 
@@ -148,14 +148,12 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
 }
 
 fn set_null(entity: &Entity, field: &Field, body: &mut Vec<u8>, offset_pos: usize) {
-  let offset_start = get_offset(&body, offset_pos);
+  let offset_start = get_offset(body, offset_pos);
   if offset_start == 0 {
     return
   }
 
-  let offset_end = field.get_size()
-    .map(|f| offset_start + f)
-    .unwrap_or_else(|| get_end(&body, offset_pos, entity.payload_offset));
+  let offset_end = get_end_optimized(body, field, offset_start, offset_pos, entity.payload_offset);
 
   body[offset_pos..offset_pos + 4].copy_from_slice(&0u32.to_be_bytes());
   body.drain(offset_start..offset_end);

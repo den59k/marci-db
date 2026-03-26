@@ -33,12 +33,12 @@ pub fn collect_indexes_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, id:
           }
         }
       },
-      FieldLocation::Body { offset } => {
+      FieldLocation::Body { offset_pos } => {
         if field.indexes.is_empty() {
           continue;
         }
         for index in field.indexes.iter() {
-          indexes_to_delete.push(DeleteIndex::BodyValue { index, field, offset_pos: offset });
+          indexes_to_delete.push(DeleteIndex::BodyValue { index, field, offset_pos });
         }
       },
       FieldLocation::Virtual => {},
@@ -95,7 +95,7 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity, ig
     let action_type = match dep.constraint {
       DeleteConstraint::SetNull => {
         match &rev_field.location {
-          FieldLocation::Body { offset: offset_pos } => DependencyActionType::SetNull { offset_pos: *offset_pos },
+          FieldLocation::Body { offset_pos } => DependencyActionType::SetNull { offset_pos: *offset_pos },
           _ => panic!("Cannot set null on non-body values")
         }
       },

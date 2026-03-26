@@ -1,5 +1,3 @@
-use bitvec::vec::BitVec;
-
 mod process_write;
 use crate::{Field, schema::{Entity, FieldDefault}};
 
@@ -10,7 +8,6 @@ pub struct WriteOp<'a> {
   pub id: Vec<u8>,
   pub data: Vec<u8>,
   pub refs: Vec<WriteRelation<'a>>,
-  pub mask: BitVec,
   pub defaults: Vec<WriteDefault<'a>>,
   pub write_indexes: Vec<WriteIndex>
 }

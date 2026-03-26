@@ -250,7 +250,7 @@ fn resolve_field_offsets(entity: &mut Entity) {
   let mut offset_index: usize = 0;
   let mut key_index: usize = 0;
 
-  let pre_header_size = 3;
+  let pre_header_size = 4;
 
   for field in entity.fields.iter_mut(){
     match &mut field.location {
@@ -258,8 +258,8 @@ fn resolve_field_offsets(entity: &mut Entity) {
           *index = key_index;
           key_index += 1;
         },
-        FieldLocation::Body { offset } => {
-          *offset = pre_header_size + offset_index * 4;
+        FieldLocation::Body { offset_pos } => {
+          *offset_pos = pre_header_size + offset_index * 4;
           offset_index += 1;
         },
         FieldLocation::Virtual => {}

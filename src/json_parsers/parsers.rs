@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::{Field, schema::{Entity, EnumInfo, FieldLocation, FieldType, PrimitiveFieldType, Schema}};
+use crate::{Field, num_utils::NumberValue, schema::{Entity, EnumInfo, FieldLocation, FieldType, PrimitiveFieldType, Schema}};
 
 /// Кодирует одно значение и дописывает в конец `dst`
 pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFieldType, v: &Value) -> Result<(), EncodeError> {
@@ -181,6 +181,26 @@ pub fn parse_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) ->
    Ok(id)
 }
 
+pub fn parse_field_value_num<'a>(field: &'a Field, v: &Value) -> Result<NumberValue,EncodeError> {
+  match &field.ty {
+    FieldType::Primitive(primitive_field_type) => {
+      match primitive_field_type {
+        PrimitiveFieldType::DateTime => as_datetime(v, field)
+          .map(|val| NumberValue::DateTime(val)),
+        PrimitiveFieldType::Int64 => as_i64(v, field)
+          .map(|val| NumberValue::Int64(val)),
+        PrimitiveFieldType::UInt64 => as_u64(v, field)
+          .map(|val| NumberValue::UInt64(val)),
+        PrimitiveFieldType::Float => as_f32(v, field)
+          .map(|val| NumberValue::Float(val)),
+        PrimitiveFieldType::Double => as_f64(v, field)
+          .map(|val| NumberValue::Double(val)),
+        _ => Err(EncodeError::NotNumber(field.full_name.clone()))
+      }
+    },
+    _ => Err(EncodeError::NotNumber(field.full_name.clone()))
+  }
+}
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -194,7 +214,12 @@ pub enum EncodeError {
     FieldHasDynamicSize(String),
     UnavailableKeyFieldId(String),
     EmptyObject,
-    DerivedFieldNotWritable(String)
+    DerivedFieldNotWritable(String),
+    NotNumber(String),
+    OnlyOneKeyExpected(String,String),
+    UnsupportedOperation(String),
+    NotAnArray,
+    OnlyBodyKeyAvailableToEdit(String)
 }
 
 

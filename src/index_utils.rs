@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::{Field, query_op::{FieldCompare, PrefixKey, Where, WhereNumValue}, schema::{FieldIndex, FieldIndexNum}};
+use crate::{Field, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum}};
 
 /// Увеличивает буффер на один бит
 pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
@@ -71,12 +71,12 @@ pub fn encode_index_data(field: &Field, val: &[u8]) -> Vec<u8> {
 }
 
 /// Кодирует число для лексиграфического сравнения
-fn encode_num_wh(value: &WhereNumValue) -> Vec<u8> {
+fn encode_num_wh(value: &NumberValue) -> Vec<u8> {
   match value {
-    WhereNumValue::DateTime(val) | WhereNumValue::Int64(val) => encode_i64(&val.to_be_bytes()),
-    WhereNumValue::UInt64(val) => val.to_be_bytes().to_vec(),
-    WhereNumValue::Float(val) => encode_f32(&val.to_be_bytes()),
-    WhereNumValue::Double(val) => encode_f64(&val.to_be_bytes())
+    NumberValue::DateTime(val) | NumberValue::Int64(val) => encode_i64(&val.to_be_bytes()),
+    NumberValue::UInt64(val) => val.to_be_bytes().to_vec(),
+    NumberValue::Float(val) => encode_f32(&val.to_be_bytes()),
+    NumberValue::Double(val) => encode_f64(&val.to_be_bytes())
   }
 }
 

@@ -24,11 +24,8 @@ pub fn resolve_default_value(field: &mut Field) {
             FieldType::Primitive(ty) => {
                 field.default_value = Some(parse_default_value(ty, default_str, field));
             },
-            FieldType::PrimitiveList(ty) => {
-                field.default_value = Some(parse_default_value_list(&ty, default_str, None, field))
-            },
-            FieldType::PrimitiveFixedList(ty, size) => {
-                field.default_value = Some(parse_default_value_list(&ty, default_str, Some(*size), field))
+            FieldType::PrimitiveList(ty, fixed_size) => {
+                field.default_value = Some(parse_default_value_list(&ty, default_str, *fixed_size, field))
             },
             _ => panic!("Default value for field {} is not supported", field.full_name)
         }

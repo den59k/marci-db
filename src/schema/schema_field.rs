@@ -5,7 +5,7 @@ use crate::schema::{schema_attributes::{Attribute, parse_attribute}, schema_defa
 #[derive(Debug,Clone)]
 pub enum FieldLocation {
     Key { index: usize },
-    Body { offset: usize },
+    Body { offset_pos: usize },
     Virtual,
 }
 
@@ -136,8 +136,7 @@ pub enum FieldType {
     Ref(RefInfo),
     // RefList - это всегда Virtual поле, то есть он хранит инфо только в индексе
     RefList(RefInfo),
-    PrimitiveList(PrimitiveFieldType),
-    PrimitiveFixedList(PrimitiveFieldType,usize),
+    PrimitiveList(PrimitiveFieldType, Option<usize>),
     Enum(EnumInfo)
 }
 
@@ -225,7 +224,7 @@ pub fn parse_field_raw(line: &str) -> Field {
     let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
     let _is_unique = attributes.iter().any(|attr| matches!(attr, Attribute::Unique));
 
-    let mut location = FieldLocation::Body { offset: 0 };
+    let mut location = FieldLocation::Body { offset_pos: 0 };
     if is_id {
         location = FieldLocation::Key { index: 0 };
     } else if matches!(ty, FieldType::RefListUnresolved(_)) {
@@ -250,14 +249,14 @@ fn parse_type(s: &str) -> FieldType {
         let bracket = bracket.trim();
         if bracket.is_empty() {
             if let Some(prim) = get_primitive_type(ty) {
-                return FieldType::PrimitiveList(prim);
+                return FieldType::PrimitiveList(prim, None);
             }
             return FieldType::RefListUnresolved(ty.to_string());
         }
 
         if let Ok(len) = bracket.parse::<usize>() {
             if let Some(prim) = get_primitive_type(ty) {
-                return FieldType::PrimitiveFixedList(prim, len);
+                return FieldType::PrimitiveList(prim, Some(len));
             }
             panic!("Fixed list is allowed only for primitive types: {}", s);
         }

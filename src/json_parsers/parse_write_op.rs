@@ -1,4 +1,3 @@
-use bitvec::{bitvec};
 use chrono::Local;
 use serde_json::{Map, Value};
 
@@ -11,25 +10,24 @@ pub fn parse_insert<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value
         .as_object()
         .ok_or(EncodeError::NotAnObject)?;
 
-    return from_json_internal(schema, entity, obj, true, None);
-}    
+    return parse_write_op(schema, entity, obj, None);
+}
 
-pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<WriteOp<'a>, EncodeError> {
-    let obj = json_val
-        .as_object()
-        .ok_or(EncodeError::NotAnObject)?;
+// pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<WriteOp<'a>, EncodeError> {
+//     let obj = json_val
+//         .as_object()
+//         .ok_or(EncodeError::NotAnObject)?;
 
-    return from_json_internal(schema, entity, obj, false, None);
-}    
+//     return from_json_internal(schema, entity, obj, false, None);
+// }    
 
-fn from_json_internal<'a>(
+fn parse_write_op<'a>(
     schema: &'a Schema, 
     entity: &'a Entity, 
     obj: &Map<String, Value>,
-    is_create: bool,
     parent: Option<&Entity>
 ) -> Result<WriteOp<'a>, EncodeError> {
-    let mut mask = bitvec![0; entity.fields.len()];
+    // let mut mask = bitvec![0; entity.fields.len()];
     let mut refs: Vec<WriteRelation<'_>> = vec![];
     let mut defaults: Vec<WriteDefault> = vec![];
     let mut write_indexes = vec![];
@@ -38,32 +36,14 @@ fn from_json_internal<'a>(
     let mut id = vec![];
     // version
     data.push(VERSION);
+    // Reserved byte for align
+    data.push(0);
     // payload_offset
     data.extend_from_slice(&(entity.payload_offset as u16).to_be_bytes());
     // offsets (плейсхолдеры)
     data.resize(entity.payload_offset, 0);
 
-    for (field_index, field) in entity.fields.iter().enumerate() {
-        if is_create {
-            if let Some(default_value) = &field.default_value {
-                match field.location {
-                    FieldLocation::Key { index: _ } => {
-                        if let Some(offset) = parse_default_value(&mut id, field, default_value)? {
-                            defaults.push(WriteDefault::Key(offset, default_value));
-                        }
-                    }
-                    FieldLocation::Body { offset } => {
-                        write_header(&mut data, offset);
-                        if let Some(offset) = parse_default_value(&mut data, field, default_value)? {
-                            defaults.push(WriteDefault::Body(offset, default_value));
-                        }
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-        }
-
+    for field in entity.fields.iter() {
         // Если ключ является родительским, то мы сразу его заполняем значением
         if let Some(parent) = parent && schema.is_parent_key(field, parent) {
             defaults.push(WriteDefault::ParentId(id.len()));
@@ -76,6 +56,25 @@ fn from_json_internal<'a>(
         }
 
         let Some(value) = obj.get(&field.name) else {
+            // Проверяем, есть ли значение по умолчанию
+            if let Some(default_value) = &field.default_value {
+                match field.location {
+                    FieldLocation::Key { index: _ } => {
+                        if let Some(offset) = parse_default_value(&mut id, field, default_value)? {
+                            defaults.push(WriteDefault::Key(offset, default_value));
+                        }
+                    }
+                    FieldLocation::Body { offset_pos } => {
+                        write_header(&mut data, offset_pos);
+                        if let Some(offset) = parse_default_value(&mut data, field, default_value)? {
+                            defaults.push(WriteDefault::Body(offset, default_value));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             if matches!(field.location, FieldLocation::Key { .. }) {
                 return Err(EncodeError::MissingIdField(field.full_name.clone()));
             }
@@ -83,7 +82,7 @@ fn from_json_internal<'a>(
             continue;
         };
 
-        mask.set(field_index, true);
+        // mask.set(field_index, true);
 
         if value.is_null() {
             // TODO: add check not-null here
@@ -105,32 +104,28 @@ fn from_json_internal<'a>(
                     value_data = &id[start_offset..];
                 }
             },
-            FieldLocation::Body { offset } => {
+            FieldLocation::Body { offset_pos } => {
                 let start_offset = data.len();
                 match &field.ty {
                     FieldType::Primitive(primitive_type) => {
-                        write_header(&mut data, offset);
+                        write_header(&mut data, offset_pos);
                         encode_primitive_value(&mut data, field, &primitive_type, value)?;
                     }
-                    FieldType::PrimitiveList(primitive_type) => {
-                        write_header(&mut data, offset);
-                        encode_list(&mut data, value, field, &primitive_type, None)?;
-                    },
-                    FieldType::PrimitiveFixedList(primitive_type, fixed_size) => {
-                        write_header(&mut data, offset);
-                        encode_list(&mut data, value, field, &primitive_type, Some(*fixed_size))?;
+                    FieldType::PrimitiveList(primitive_type, fixed_size) => {
+                        write_header(&mut data, offset_pos);
+                        encode_list(&mut data, value, field, &primitive_type, *fixed_size)?;
                     },
                     FieldType::Ref (ref_info) => {
                         let ref_entity = &schema.models[ref_info.model_index];
                         let connect_id = parse_id(schema, ref_entity, value)?;
-                        write_header(&mut data, offset);
+                        write_header(&mut data, offset_pos);
                         data.extend(connect_id);
                         
                         let ref_id = parse_id(schema, ref_entity, value)?;
                         refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ], st: &schema.models[ref_info.model_index] });
                     },
                     FieldType::Enum(enum_def) => {
-                        write_header(&mut data, offset);
+                        write_header(&mut data, offset_pos);
                         encode_enum(&mut data, field, enum_def, value)?;
                     }
                     _ => { 
@@ -149,7 +144,7 @@ fn from_json_internal<'a>(
                             let Some(value) = value.as_object() else {
                                 return Err(EncodeError::type_mismatch(field, "{ }"))
                             };
-                            let op = from_json_internal(schema, ref_entity, value, true, Some(entity))?;
+                            let op = parse_write_op(schema, ref_entity, value, Some(entity))?;
                             refs.push(WriteRelation::Create { field, op, st: ref_entity });
                         } else {
                             let ref_id = parse_id(schema, ref_entity, value)?;
@@ -172,7 +167,7 @@ fn from_json_internal<'a>(
                                 let Some(item) = item.as_object() else {
                                 return Err(EncodeError::type_mismatch(field, "{ }"))
                                 };
-                                let op = from_json_internal(schema, ref_entity, item, true, Some(entity))?;
+                                let op = parse_write_op(schema, ref_entity, item, Some(entity))?;
                                 ops.push(op);
                             }
                             refs.push(WriteRelation::CreateMany { field, ops, st: ref_entity });
@@ -205,7 +200,7 @@ fn from_json_internal<'a>(
         }
    }
 
-   Ok(WriteOp { id, data, refs, mask, defaults, write_indexes })
+   Ok(WriteOp { id, data, refs, defaults, write_indexes })
 }
 
 
@@ -287,19 +282,19 @@ mod tests {
         }
 
         // Читаем field_count
-        let field_count = u16::from_be_bytes(encoded.data[1..3].try_into().unwrap());
+        let field_count = u16::from_be_bytes(encoded.data[2..4].try_into().unwrap());
         assert_eq!(field_count, model.payload_offset as u16);
 
         // Читаем смещения
-        let offset_name = u32::from_be_bytes(encoded.data[3..7].try_into().unwrap()) as usize;
-        let offset_age  = u32::from_be_bytes(encoded.data[7..11].try_into().unwrap()) as usize;
-        let _offset_profile  = u32::from_be_bytes(encoded.data[11..15].try_into().unwrap()) as usize;
+        let offset_name = u32::from_be_bytes(encoded.data[4..8].try_into().unwrap()) as usize;
+        let offset_age  = u32::from_be_bytes(encoded.data[8..12].try_into().unwrap()) as usize;
+        let _offset_profile  = u32::from_be_bytes(encoded.data[12..16].try_into().unwrap()) as usize;
 
         assert_eq!(offset_name, model.payload_offset);
 
         // Проверяем, что смещения действительно указывают на данные
         // name: [len=5][bytes]
-        let name_end = get_end(&encoded.data, 3, model.payload_offset);
+        let name_end = get_end(&encoded.data, 4, model.payload_offset);
 
         let name_value = &encoded.data[offset_name .. name_end];
         assert_eq!(name_value, b"Alice");

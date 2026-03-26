@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::parse_where::{ParseWhereError, parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Where}, schema::{Entity, FieldExistsCondition, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Where}, schema::{Entity, FieldExistsCondition, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -86,7 +86,7 @@ pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKe
 pub enum ParseError {
   NotAnObject,
   MissingIdField(String),
-  WhereError(ParseWhereError),
+  WhereError(EncodeError),
   TypeMismatch { field: String, expected: String },
 }
 
