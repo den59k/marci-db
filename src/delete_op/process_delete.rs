@@ -1,6 +1,6 @@
 use canopydb::{Bytes, Transaction, Tree, WriteTransaction};
 
-use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::increase_bit, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
+use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
 
 pub fn delete_data(
   tx: &WriteTransaction, 
@@ -24,8 +24,8 @@ pub fn delete_data(
     }
   }
 
-  for index in action.indexes_to_delete.iter() {
-    match index {
+  for delete_index in action.indexes_to_delete.iter() {
+    match delete_index {
       DeleteIndex::Value { index, key } => {
         let mut tree = tx.get_tree(index.tree_name()).unwrap().unwrap();
         tree.delete(key).unwrap();
@@ -35,14 +35,14 @@ pub fn delete_data(
           continue; 
         };
         let mut tree = tx.get_tree(index.tree_name()).unwrap().unwrap();
-        tree.delete(&[ value, &id ].concat()).unwrap();
+        tree.delete(&encode_full_index(field, index, id, value)).unwrap();
       },
       DeleteIndex::KeyValue { index, field, .. } => {
         let Some(value) = get_data(entity, field, &id, &[], schema) else { 
           continue;
         };
         let mut tree = tx.get_tree(index.tree_name()).unwrap().unwrap();
-        tree.delete(&[ value, &id ].concat()).unwrap();
+        tree.delete(&encode_full_index(field, index, id, value)).unwrap();
       }
     }
   }

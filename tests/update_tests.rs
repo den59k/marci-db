@@ -12,7 +12,7 @@ fn base_update_test() {
     model User {
       name        String
       age         UInt?
-      email       String?
+      email       String?     @unique
       active      Boolean     @default(true)
     }
   ";

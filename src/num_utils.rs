@@ -31,36 +31,36 @@ impl NumberValue {
         }
     }
 
-    pub fn increment_in_place(&self, data: &mut [u8]) {
+    pub fn increment_bytes(&self, data: &[u8]) -> Vec<u8> {
         match self {
             NumberValue::Int64(v) => {
                 let mut val = i64::from_be_bytes(data.try_into().unwrap());
                 val += v;
-                data.copy_from_slice(&val.to_be_bytes());
+                val.to_be_bytes().to_vec()
             }
 
             NumberValue::UInt64(v) => {
                 let mut val = u64::from_be_bytes(data.try_into().unwrap());
                 val += v;
-                data.copy_from_slice(&val.to_be_bytes());
+                val.to_be_bytes().to_vec()
             }
 
             NumberValue::Float(v) => {
                 let mut val = f32::from_be_bytes(data.try_into().unwrap());
                 val += v;
-                data.copy_from_slice(&val.to_be_bytes());
+                val.to_be_bytes().to_vec()
             }
 
             NumberValue::Double(v) => {
                 let mut val = f64::from_be_bytes(data.try_into().unwrap());
                 val += v;
-                data.copy_from_slice(&val.to_be_bytes());
+                val.to_be_bytes().to_vec()
             }
 
             NumberValue::DateTime(v) => {
                 let mut val = i64::from_be_bytes(data.try_into().unwrap());
                 val += v;
-                data.copy_from_slice(&val.to_be_bytes());
+                val.to_be_bytes().to_vec()
             }
         }
 

@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::{encode_index_data, encode_index_number}, json_parsers::parsers::{EncodeError, encode_enum, parse_id, encode_id_value, encode_list, encode_primitive_value}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::{encode_index}, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -188,15 +188,7 @@ fn parse_write_op<'a>(
         }
 
         for index in field.indexes.iter() {
-            match index {
-                FieldIndex::Value { tree_name, .. } => {
-                    write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_index_data(field, value_data)));
-                }
-                FieldIndex::Number { tree_name, ty, .. } => {
-                    write_indexes.push(WriteIndex::Value(tree_name.clone(), encode_index_number(ty, value_data) ));
-                }
-                _ => {}
-            }
+            write_indexes.push(WriteIndex::Value(index, encode_index(field, index, value_data)));
         }
    }
 

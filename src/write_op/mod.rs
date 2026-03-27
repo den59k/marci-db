@@ -1,5 +1,5 @@
 mod process_write;
-use crate::{Field, schema::{Entity, FieldDefault}};
+use crate::{Field, schema::{Entity, FieldDefault, FieldIndex}};
 
 pub use process_write::{write_data,InsertError};
 
@@ -9,7 +9,7 @@ pub struct WriteOp<'a> {
   pub data: Vec<u8>,
   pub refs: Vec<WriteRelation<'a>>,
   pub defaults: Vec<WriteDefault<'a>>,
-  pub write_indexes: Vec<WriteIndex>
+  pub write_indexes: Vec<WriteIndex<'a>>
 }
 
 #[derive(Debug)]
@@ -23,8 +23,8 @@ pub enum WriteDefault<'a> {
 }
 
 #[derive(Debug)]
-pub enum WriteIndex {
-    Value(String,Vec<u8>)
+pub enum WriteIndex<'a> {
+    Value(&'a FieldIndex,Vec<u8>)
 }
 
 #[derive(Debug)]

@@ -37,6 +37,11 @@ fn generate_prefix<'a>(val: Vec<u8>, tree_name: &String) -> Option<PrefixKey<'a>
   Some(PrefixKey::IndexRange { start: Some(val), end, tree_name: tree_name.clone(), fixed_size })
 }
 
+pub fn encode_full_index(field: &Field, index: &FieldIndex, id: &[u8], value: &[u8]) -> Vec<u8> {
+  let value = encode_index(field, index, value);
+  [ value.as_slice(), &id ].concat()
+}
+
 pub fn encode_index(field: &Field, index: &FieldIndex, value: &[u8]) -> Vec<u8> {
   match index {
     FieldIndex::Value { .. } => {

@@ -1,6 +1,6 @@
 use canopydb::WriteTransaction;
 
-use crate::{Field, schema::{Entity, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateValue}, utils::{get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}};
+use crate::{Field, index_utils::encode_full_index, schema::{Entity, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateValue}, utils::{get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, schema: &Schema) -> Result<(), UpdateError> { 
 
@@ -11,7 +11,19 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
       return Err(UpdateError::ItemNotFound)
     };
 
-    if let Some(new_data) = update_fields(&update.fields, &data, entity) {
+    let resp = update_fields(&update.fields, &data, entity, | field, old_value, new_value | {
+      for index in field.field.indexes.iter() {
+        let mut tree = tx.get_tree(index.tree_name()).unwrap().unwrap();
+        if let Some(old_value) = old_value {
+          tree.delete(&encode_full_index(field.field, index, id, old_value)).unwrap();
+        }
+        if let Some(new_value) = new_value {
+          tree.insert(&encode_full_index(field.field, index, id, new_value), &[]).unwrap();
+        }
+      }
+    });
+    
+    if let Some(new_data) = resp {
       tree.insert(id, &new_data).unwrap();
     }
   }
@@ -19,40 +31,52 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
   Ok(())
 }
 
-fn update_fields(fields: &[UpdateField], source_data: &[u8], entity: &Entity) -> Option<Vec<u8>> {
+fn update_fields<F>(fields: &[UpdateField], source_data: &[u8], entity: &Entity, on_change: F) -> Option<Vec<u8>>
+  where F: Fn(&UpdateField, Option<&[u8]>, Option<&[u8]>) {
+
   let mut cloned_data: Option<Vec<u8>> = None;
 
   for update_field in fields.iter() {
-    // Получаем актуальные данные
     let data = cloned_data.as_deref().unwrap_or(source_data);
-    
     let offset_start = get_offset(data, update_field.offset_pos);
+
     match &update_field.value {
       UpdateValue::Null => {
-        // Если значение уже null - пропускаем
         if offset_start == 0 { continue; }
+        let offset_end = get_end_optimized(data, update_field.field, offset_start, update_field.offset_pos, entity.payload_offset);
+        let old_value = &data[offset_start..offset_end];
+        on_change(update_field, Some(old_value), None); // <-- перед изменением
+
         let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
         set_null(buf, entity, update_field.field, update_field.offset_pos, offset_start);
       },
       UpdateValue::Value(item_data) => {
         if offset_start == 0 {
+          on_change(update_field, None, Some(item_data.as_slice())); // <-- insert
+
           let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
           insert_data(buf, item_data, entity, update_field.offset_pos);
-          continue; 
-        }
-        let offset_end = get_end_optimized(data, update_field.field, offset_start, update_field.offset_pos, entity.payload_offset);
-        if &data[offset_start..offset_end] == item_data.as_slice() {
           continue;
         }
+        let offset_end = get_end_optimized(data, update_field.field, offset_start, update_field.offset_pos, entity.payload_offset);
+        let old_slice = &data[offset_start..offset_end];
+        if old_slice == item_data.as_slice() { continue; }
+        on_change(update_field, Some(old_slice), Some(item_data.as_slice())); // <-- update
+
         let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
         update_data(buf, item_data, entity, update_field.offset_pos, offset_start, offset_end);
       },
       UpdateValue::Increment(number_value) => {
-        // Пропускаем null значения, их не увеличиваем
         if offset_start == 0 { continue; }
         let offset_end = get_end_optimized(data, update_field.field, offset_start, update_field.offset_pos, entity.payload_offset);
+
+        let old_value = &data[offset_start..offset_end];
+        let new_value = number_value.increment_bytes(old_value);
+
+        on_change(update_field, Some(old_value), Some(new_value.as_slice())); // <-- update
+
         let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
-        number_value.increment_in_place(&mut buf[offset_start..offset_end]);
+        update_data(buf, &new_value, entity, update_field.offset_pos, offset_start, offset_end);
       },
     }
   }
@@ -127,7 +151,7 @@ fn test_update_op() {
       "name": null
     })).unwrap();
   
-    let updated = update_fields(&update_op.fields, &encoded.data, user_model);
+    let updated = update_fields(&update_op.fields, &encoded.data, user_model, |_, _, _| {});
        
     let encoded_resp = parse_insert(&schema, user_model, &json!({
       "name": null,
@@ -143,7 +167,7 @@ fn test_update_op() {
       "age": { "$increment": 10 }
     })).unwrap();
   
-    let updated = update_fields(&update_op.fields, &encoded.data, user_model);
+    let updated = update_fields(&update_op.fields, &encoded.data, user_model, |_, _, _| {});
        
     let encoded_resp = parse_insert(&schema, user_model, &json!({
       "name": "Alice New",

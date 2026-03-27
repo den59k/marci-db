@@ -49,8 +49,8 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
   
   for write_index in insert.write_indexes.iter() {
     match write_index {
-      WriteIndex::Value(tree_name, data) => {
-        let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+      WriteIndex::Value(field_index, data) => {
+        let mut tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
         let val = [ data.as_slice(), write_id.as_slice() ].concat();
         tree.insert(&val, &[]).unwrap();
       }
