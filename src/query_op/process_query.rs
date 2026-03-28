@@ -3,76 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{ReadTransaction, Tree};
 
-use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
-type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
-
-pub fn process_query_many<'a, U, F>
-  (query: &'a QueryOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>) -> Vec<U>
-  where F: Fn(DecodeCtx<U>) -> U {
-
-  match &query.prefix_key {
-    Some(PrefixKey::ParentIndexTree(index_tree_name)) => {
-      let index_tree = ctx.get_tree(index_tree_name);
-      let ids = get_ids_by_prefix(&index_tree, parent.unwrap().1);
-      if ids.is_empty() {
-        return vec![];
-      }
-      let tree = ctx.get_tree(&query.entity.name);
-
-      return ids.into_iter().filter_map(|id| {
-        let value = tree.get(&id).unwrap().unwrap();
-        process_data(&id, &value, ctx, query)
-      }).collect()
-    },
-    Some(PrefixKey::IndexRange { start, end, tree_name, fixed_size }) => {
-      let index_tree = ctx.get_tree(tree_name);
-      let ids = get_ids_by_range(&index_tree, start, end, *fixed_size);
-
-      let tree = ctx.get_tree(&query.entity.name);
-
-      return ids.into_iter().filter_map(|id| {
-        let value = tree.get(&id).unwrap().unwrap();
-        process_data(&id, &value, ctx, query)
-      }).collect()
-    },
-    Some(prefix_key) => {
-      let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
-        return vec![];
-      };
-      let tree = ctx.get_tree(&query.entity.name);
-      return tree.prefix(&prefix).unwrap().filter_map(|item| {
-        let (id, value) = item.unwrap();
-        process_data(&id, &value, ctx, query)
-      }).collect();
-    },
-    _ => {}
-  }
-  
-  let tree = ctx.get_tree(&query.entity.name);
-  return tree.iter().unwrap().filter_map(|item| {
-    let (id, value) = item.unwrap();
-    process_data(&id, &value, ctx, query)
-  }).collect()
-}
-
-pub fn process_query_one<'a, U,F>
-  (query: &'a QueryOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>) -> Option<U>
-  where F: Fn(DecodeCtx<U>) -> U {
-
-  let Some(prefix_key) = &query.prefix_key else {
-    panic!("QueryOne without prefix is not supported");
-  };
-  
-  let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
-    return None;
-  };
-    
-  let tree = ctx.get_tree(&query.entity.name);
-  return tree.get(prefix).unwrap().and_then(|value| {
-    process_data(prefix, &value, ctx, query)
-  });
-}
+pub type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
 pub fn get_prefix<'a>(prefix_key: &'a PrefixKey, parent: Option<ParentData<'a>>, schema: &'a Schema) -> Option<&'a [u8]> {
   match prefix_key {
@@ -97,6 +30,15 @@ pub fn get_ids_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Vec<Vec<u8>> {
     .unwrap()
     .map(|e| e.unwrap()[item_id_len..].to_vec())
     .collect()
+}
+
+pub fn get_first_id(index_tree: &Tree, item_id: &[u8]) -> Option<Vec<u8>> {
+  let item_id_len = item_id.len();
+  index_tree
+    .prefix_keys(&item_id)
+    .unwrap()
+    .map(|e| e.unwrap()[item_id_len..].to_vec())
+    .next()
 }
 
 pub fn get_ids_by_range(

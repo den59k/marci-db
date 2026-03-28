@@ -3,9 +3,13 @@ use bitvec::{bitvec, vec::BitVec};
 mod r#where;
 mod process_query;
 mod process_where;
+mod process_query_one;
+mod process_query_many;
 use crate::{Field, schema::{Entity, FieldLocation, FieldType}};
 
-pub use process_query::{process_query_many,process_query_one,DecodeCtx,TransationContext,IncludeResult};
+pub use process_query::{DecodeCtx,TransationContext,IncludeResult};
+pub use process_query_one::process_query_one;
+pub use process_query_many::process_query_many;
 pub use r#where::{Where,FieldCompare,FieldCompareRef};
 
 #[derive(Debug)]

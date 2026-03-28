@@ -176,6 +176,9 @@ pub fn parse_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) ->
         }
         
         encode_id_value(&mut id, field, schema, value)?;
+        if matches!(field.ty, FieldType::Primitive(ty) if ty.get_size().is_none()) {
+            id.push(b'\0');
+        }
     }
 
    Ok(id)

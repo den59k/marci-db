@@ -122,7 +122,7 @@ fn parse_write_op<'a>(
                         data.extend(connect_id);
                         
                         let ref_id = parse_id(schema, ref_entity, value)?;
-                        refs.push(WriteRelation::Connect { field, ids: vec![ ref_id ], st: &schema.models[ref_info.model_index] });
+                        refs.push(WriteRelation::Connect { field, ref_info, ids: vec![ ref_id ], st: &schema.models[ref_info.model_index] });
                     },
                     FieldType::Enum(enum_def) => {
                         write_header(&mut data, offset_pos);
@@ -145,10 +145,10 @@ fn parse_write_op<'a>(
                                 return Err(EncodeError::type_mismatch(field, "{ }"))
                             };
                             let op = parse_write_op(schema, ref_entity, value, Some(entity))?;
-                            refs.push(WriteRelation::Create { field, op, st: ref_entity });
+                            refs.push(WriteRelation::Create { field, ref_info, op, st: ref_entity });
                         } else {
                             let ref_id = parse_id(schema, ref_entity, value)?;
-                            refs.push(WriteRelation::Connect { field, ids: vec![ref_id], st: ref_entity });
+                            refs.push(WriteRelation::Connect { field, ref_info, ids: vec![ref_id], st: ref_entity });
                         }
                     },
                     FieldType::RefList (ref_info) => {
@@ -169,14 +169,14 @@ fn parse_write_op<'a>(
                                 let op = parse_write_op(schema, ref_entity, item, Some(entity))?;
                                 ops.push(op);
                             }
-                            refs.push(WriteRelation::CreateMany { field, ops, st: ref_entity });
+                            refs.push(WriteRelation::CreateMany { field, ref_info, ops, st: ref_entity });
                         } else {
                             let mut ids = Vec::with_capacity(value.len());
                             for obj in value.iter() {
                                 let id = parse_id(schema, ref_entity, obj)?;
                                 ids.push(id);
                             }
-                            refs.push(WriteRelation::Connect { field, ids, st: ref_entity });
+                            refs.push(WriteRelation::Connect { field, ref_info, ids, st: ref_entity });
                         }
                     },
                     _ => { 

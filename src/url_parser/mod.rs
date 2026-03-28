@@ -11,6 +11,9 @@ pub fn parse_id_from_url(schema: &Schema, entity: &Entity, url: &str) -> Result<
       FieldType::Primitive(primitive_type) => {
         let mut dst = vec![];
         encode_primitive_value(&mut dst, field, &primitive_type, url)?;
+        if primitive_type.get_size().is_none() {
+          dst.push(b'\0');
+        }
         Ok(dst)
       },
       FieldType::Ref (ref_info) => {
@@ -52,6 +55,9 @@ fn encode_entity_id(dst: &mut Vec<u8>, map: &HashMap<&str,&str>, entity: &Entity
           return Err(UrlParseError::MissingIdField(key.to_string()))
         };
         encode_primitive_value(dst, field, primitive_type, value)?;
+        if primitive_type.get_size().is_none() {
+          dst.push(b'\0');
+        }
       },
       FieldType::Ref (ref_info) => {
         encode_entity_id(dst, map, &schema.models[ref_info.model_index], schema, Some(&key))?;

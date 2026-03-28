@@ -1,5 +1,5 @@
 mod process_write;
-use crate::{Field, schema::{Entity, FieldDefault, FieldIndex}};
+use crate::{Field, schema::{Entity, FieldDefault, FieldIndex, RefInfo}};
 
 pub use process_write::{write_data,InsertError};
 
@@ -31,16 +31,19 @@ pub enum WriteIndex<'a> {
 pub enum WriteRelation<'a> {
     Create {
         field: &'a Field,
+        ref_info: &'a RefInfo,
         op: WriteOp<'a>,
         st: &'a Entity,
     },
     CreateMany {
         field: &'a Field,
+        ref_info: &'a RefInfo,
         ops: Vec<WriteOp<'a>>,
         st: &'a Entity,
     },
     Connect {
         field: &'a Field,
+        ref_info: &'a RefInfo,
         ids: Vec<Vec<u8>>,
         st: &'a Entity,
     }

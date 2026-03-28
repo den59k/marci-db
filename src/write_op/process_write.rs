@@ -1,13 +1,14 @@
-use std::sync::atomic::Ordering;
+use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{MarciDB, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
   ForeignKeyViolation(String, u64),
   ItemNotFound,
+  IdViolation(String, Vec<u8>),
   UniqueViolation(String, Vec<u8>),
   DuplicateKey(Vec<u8>),
   CannotChangePrimaryKey(String),
@@ -44,6 +45,9 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
 
   { 
     let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+    if tree.get(&write_id).unwrap().is_some() {
+      return Err(InsertError::IdViolation(entity.name.clone(), write_id.clone()));
+    }
     tree.insert(&write_id, data).unwrap();
   }
   
@@ -73,16 +77,8 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
           write_data(tx, st, op, db, Some(&write_id))?;
         }
       }
-      WriteRelation::Connect { field, ids, .. } => {
-        match &field.ty {
-          FieldType::Ref(ref_info) => {
-            write_index(tx, ref_info, &db.schema, &write_id, &ids);
-          },
-          FieldType::RefList(ref_info) => {
-            write_index(tx, ref_info, &db.schema, &write_id, &ids);
-          },
-          _ => panic!("Trying to connect to non-Ref field")
-        }
+      WriteRelation::Connect { ref_info, ids, field, .. } => {
+        write_ref_indexes(tx, ref_info, &db.schema, &write_id, &ids).map_err(|e| e.to_insert_error(field))?;
       }
     }
   }
@@ -90,41 +86,62 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
   Ok(write_id)
 }
 
+
+
 #[inline(always)]
 fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) {
-  let mut key = Vec::with_capacity(left.len() + right.len());
-  key.extend_from_slice(left);
-  key.extend_from_slice(right);
-  tree.insert(&key, &[1]).unwrap();
+  tree.insert(&[ left, right ].concat(), &[]).unwrap();
 }
 
-fn write_index(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) {
-  
+fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
     let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
     for item_id in ids {
       insert_index(&mut tree, id, item_id);
     }
   }
-
+  
+  let is_unique = ref_info.is_unique;
   if let Some(ref_field_idx) = ref_info.rev_field_idx {
     match &schema.models[ref_info.model_index].fields[ref_field_idx].ty {
       FieldType::Ref(ref_info) => {
-        write_index_opposite(tx, ref_info, id, ids);
+        write_ref_index_opposite(tx, ref_info, id, ids, is_unique)?;
       },
       FieldType::RefList(ref_info) => {
-        write_index_opposite(tx, ref_info, id, ids);
+        write_ref_index_opposite(tx, ref_info, id, ids, is_unique)?;
       },
       _ => panic!("Trying to connect to non-Ref field")
     }
   }
+
+  Ok(())
 }
 
-fn write_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>) {
+fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>, check_unique: bool) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
     let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
     for item_id in ids {
+      if check_unique {
+        if let Some(exists) = tree.prefix_keys(&item_id).unwrap().next() {
+          let exists_id = exists.unwrap()[item_id.len()..].to_vec();
+          return Err(WriteIndexesError::UniqueViolation(exists_id))
+        }
+      }
       insert_index(&mut tree, item_id, id);
+    }
+  }
+
+  Ok(())
+}
+
+enum WriteIndexesError {
+  UniqueViolation(Vec<u8>)
+}
+
+impl WriteIndexesError {
+  fn to_insert_error(self, field: &Field) -> InsertError {
+    match self {
+        WriteIndexesError::UniqueViolation(exists_id) => InsertError::UniqueViolation(field.full_name.clone(), exists_id),
     }
   }
 }

@@ -473,7 +473,7 @@ mod tests {
             entity: &schema.models[0], 
             mask: &bitvec!(1;  schema.models[1].fields.len()), 
             includes: encoded.refs.iter().map(|f| {
-                let WriteRelation::CreateMany { field, ops, st } = f else {
+                let WriteRelation::CreateMany { field, ops, st, .. } = f else {
                     panic!("Wrong WriteRelation type")
                 };
                 assert_eq!(ops[0].defaults.len(), 1);
