@@ -85,7 +85,7 @@ impl MarciDB {
 
   pub fn update_item(&self, entity: &Entity, id: &[u8], update_op: &UpdateOp) -> Result<(), UpdateError> {
     let tx = self.db.begin_write().unwrap();
-    process_update(&tx, entity, id, update_op, &self.schema)?;
+    process_update(&tx, entity, id, update_op)?;
     tx.commit().unwrap();
     Ok(())
   }

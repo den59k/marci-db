@@ -13,7 +13,7 @@ fn base_insert_test() {
     model User {
         name        String
         info        UserInfo?
-        posts       Post[]  @derived(Post.author)
+        posts       Post[]  @bind(Post.author)
     }
     
     struct UserInfo {

@@ -17,6 +17,7 @@ fn parse_update_op<'a>(
 ) -> Result<UpdateOp<'a>, EncodeError> {
 
     let mut update_fields = vec![];
+    let mut update_refs = vec![];
 
     for field in entity.fields.iter() {
         let Some(value) = obj.get(&field.name) else {
@@ -26,7 +27,7 @@ fn parse_update_op<'a>(
         match &field.ty {
             FieldType::Ref(ref_info) => {
                 if value.is_null() {
-                    todo!();
+                    
                 }
                 let Some(obj) = value.as_object() else {
                     return Err(EncodeError::type_mismatch(field, "object"));
@@ -36,6 +37,7 @@ fn parse_update_op<'a>(
                         "$update" => todo!(),
                         "$create" => todo!(),
                         "$replace" => todo!(),
+                        "$connect" => todo!(),
                         _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
                     }
                 }
@@ -47,7 +49,11 @@ fn parse_update_op<'a>(
                 };
                 for (key, value) in obj {
                     match key.as_str() {
-                        
+                        "$push" => todo!(),
+                        "$remove" => todo!(),
+                        "$update" => todo!(),
+                        "$updateAll" => todo!(),
+                        "$replaceAll" => todo!(),
                         _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
                     }
                 }
@@ -70,6 +76,7 @@ fn parse_update_op<'a>(
 
     Ok(UpdateOp {
         fields: update_fields,
+        refs: update_refs
     })
 }
 

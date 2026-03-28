@@ -157,7 +157,6 @@ fn parse_write_op<'a>(
                             return Err(EncodeError::type_mismatch(field, "Array"))
                         };
                         if value.is_empty() {
-                            refs.push(WriteRelation::Empty { field, st: ref_entity });
                             continue;
                         }
 
@@ -181,14 +180,14 @@ fn parse_write_op<'a>(
                         }
                     },
                     _ => { 
-                        return Err(EncodeError::DerivedFieldNotWritable(field.full_name.clone()));
+                        return Err(EncodeError::VirtualFieldNotWritable(field.full_name.clone()));
                     }
                 }
             }
         }
 
         for index in field.indexes.iter() {
-            write_indexes.push(WriteIndex::Value(index, encode_index(field, index, value_data)));
+            write_indexes.push(WriteIndex::Value(field, index, encode_index(field, index, value_data)));
         }
    }
 
@@ -354,7 +353,7 @@ mod tests {
         let schema = parse_schema("
             model User {
                 name        String
-                posts       Post[]  @derived(Post.author)
+                posts       Post[]  @bind(Post.author)
             }
 
             model Post {

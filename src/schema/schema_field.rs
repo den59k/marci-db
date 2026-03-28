@@ -24,6 +24,14 @@ impl FieldIndex {
             FieldIndex::Custom { tree_name, .. } => tree_name.as_bytes(),
         }
     }
+
+    pub fn is_unique(&self) -> bool {
+        return match self {
+            FieldIndex::Value { unique, .. } => *unique,
+            FieldIndex::Number { unique, .. } => *unique,
+            FieldIndex::Custom { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug,Clone)]
@@ -162,7 +170,8 @@ pub struct RefInfo {
     pub model_index: usize, 
     pub rev_field_idx: Option<usize>, 
     pub parent_index: Option<usize>, 
-    pub binding: RefBinding
+    pub binding: RefBinding,
+    pub is_unique: bool
 }
 
 impl RefInfo {
@@ -171,7 +180,8 @@ impl RefInfo {
             model_index, 
             rev_field_idx: None, 
             parent_index: None, 
-            binding: RefBinding::CurrentId
+            binding: RefBinding::CurrentId,
+            is_unique: false
         }
     }
 }
@@ -222,7 +232,6 @@ pub fn parse_field_raw(line: &str) -> Field {
         .collect();
 
     let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
-    let _is_unique = attributes.iter().any(|attr| matches!(attr, Attribute::Unique));
 
     let mut location = FieldLocation::Body { offset_pos: 0 };
     if is_id {

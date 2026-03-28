@@ -12,7 +12,7 @@ fn delete_cascade_test() {
         model User {
             name        String
             info        UserInfo?
-            posts       Post[]  @derived(Post.author)
+            posts       Post[]  @bind(Post.author)
         }
         
         struct UserInfo {
@@ -102,8 +102,8 @@ fn delete_many_to_many() {
 
         model Chat {
             name        String
-            users       User[]      @derived(User.chats)
-            messages    Message[]   @derived(Message.chat)
+            users       User[]      @bind(User.chats)
+            messages    Message[]   @bind(Message.chat)
         }
 
         model Message {

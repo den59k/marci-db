@@ -66,7 +66,7 @@ fn nested_query_test() {
     model User {
         name        String
         info        UserInfo?
-        posts       Post[]  @derived(Post.author)
+        posts       Post[]        @bind(Post.author)
     }
     
     struct UserInfo {
@@ -173,7 +173,7 @@ fn many_to_many_query_test() {
 
     model Chat {
       name        String
-      users       User[]    @derived(User.chats)
+      users       User[]    @bind(User.chats)
     }
   ";
 

@@ -24,19 +24,11 @@ pub enum WriteDefault<'a> {
 
 #[derive(Debug)]
 pub enum WriteIndex<'a> {
-    Value(&'a FieldIndex,Vec<u8>)
+    Value(&'a Field, &'a FieldIndex,Vec<u8>)
 }
 
 #[derive(Debug)]
 pub enum WriteRelation<'a> {
-    None {
-        field: &'a Field,
-        st: &'a Entity,
-    },
-    Empty {
-        field: &'a Field,
-        st: &'a Entity,
-    },
     Create {
         field: &'a Field,
         op: WriteOp<'a>,
@@ -51,15 +43,5 @@ pub enum WriteRelation<'a> {
         field: &'a Field,
         ids: Vec<Vec<u8>>,
         st: &'a Entity,
-    },
-    Update {
-        field: &'a Field,
-        op: WriteOp<'a>,
-        st: &'a Entity,
-    },
-    Push {
-        field: &'a Field,
-        op: WriteOp<'a>,
-        st: &'a Entity,
-    },
+    }
 }

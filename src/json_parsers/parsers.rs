@@ -214,7 +214,7 @@ pub enum EncodeError {
     FieldHasDynamicSize(String),
     UnavailableKeyFieldId(String),
     EmptyObject,
-    DerivedFieldNotWritable(String),
+    VirtualFieldNotWritable(String),
     NotNumber(String),
     OnlyOneKeyExpected(String,String),
     UnsupportedOperation(String),

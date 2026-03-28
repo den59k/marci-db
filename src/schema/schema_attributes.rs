@@ -2,7 +2,7 @@
 #[derive(Debug,Clone)]
 pub enum Attribute {
     Index,
-    DerivedUnresolved (String),
+    BindUnresolved (String),
     Id,
     Default(String),
     Unique,
@@ -50,8 +50,8 @@ pub fn parse_attribute(s: &str) -> Attribute {
         }
     }
 
-    if let Some(inside) = s.strip_prefix("derived(").and_then(|x| x.strip_suffix(')')) {
-        return Attribute::DerivedUnresolved(inside.to_string())
+    if let Some(inside) = s.strip_prefix("bind(").and_then(|x| x.strip_suffix(')')) {
+        return Attribute::BindUnresolved(inside.to_string())
     }
 
     if let Some(inside) = s.strip_prefix("inject(").and_then(|x| x.strip_suffix(')')) {

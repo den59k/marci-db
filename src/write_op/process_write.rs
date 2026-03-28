@@ -4,7 +4,7 @@ use canopydb::{Tree, WriteTransaction};
 
 use crate::{MarciDB, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 pub enum InsertError {
   ForeignKeyViolation(String, u64),
   ItemNotFound,
@@ -49,8 +49,14 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
   
   for write_index in insert.write_indexes.iter() {
     match write_index {
-      WriteIndex::Value(field_index, data) => {
+      WriteIndex::Value(field, field_index, data) => {
         let mut tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
+        if field_index.is_unique() {
+          if let Some(exists) = tree.prefix_keys(&data.as_slice()).unwrap().next() {
+            let exists_id = exists.unwrap()[data.len()..].to_vec();
+            return Err(InsertError::UniqueViolation(field.full_name.clone(), exists_id))
+          }
+        }
         let val = [ data.as_slice(), write_id.as_slice() ].concat();
         tree.insert(&val, &[]).unwrap();
       }
@@ -78,7 +84,6 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
           _ => panic!("Trying to connect to non-Ref field")
         }
       }
-      _ => {}
     }
   }
 

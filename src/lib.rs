@@ -15,5 +15,8 @@ pub use crate::json_parsers::{parse_insert,parse_update,parse_query,decode_docum
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::MarciDB;
 
+pub use crate::update_op::UpdateError;
+pub use crate::write_op::InsertError;
+
 #[cfg(test)]
 pub(crate) use crate::write_op::WriteRelation;

@@ -13,7 +13,7 @@ fn query_indexes_test() {
     model User {
         email       String  @unique
         name        String
-        posts       Post[]  @derived(Post.author)
+        posts       Post[]  @bind(Post.author)
     }
     
     model Post {
