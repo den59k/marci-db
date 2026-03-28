@@ -1,10 +1,8 @@
-mod common;
-
 use marcidb::{InsertError, MarciDB, UpdateError, parse_id, parse_insert, parse_update};
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::common::{get_data, insert_data};
+use crate::db::{get_data, insert_data};
 
 #[test]
 fn write_unique_test() {

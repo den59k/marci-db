@@ -1,10 +1,8 @@
-mod common;
-
 use marcidb::{MarciDB};
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::common::{delete_data, get_data, insert_data};
+use crate::db::{delete_data, get_data, insert_data};
 
 #[test]
 fn delete_cascade_test() {

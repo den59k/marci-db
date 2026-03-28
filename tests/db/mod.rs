@@ -1,5 +1,12 @@
 #![allow(dead_code)]
 
+pub mod delete_tests;
+pub mod indexes_tests;
+pub mod insert_tests;
+pub mod query_tests;
+pub mod unique_tests;
+pub mod update_tests;
+
 use std::str::FromStr;
 
 use marcidb::{MarciDB, array_to_json, decode_document, decode_id, parse_id, parse_insert, parse_query, parse_update};

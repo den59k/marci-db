@@ -2,9 +2,8 @@ use marcidb::MarciDB;
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::common::{get_data, insert_data, update_data};
+use crate::db::{get_data, insert_data,update_data};
 
-mod common;
 
 #[test]
 fn base_update_test() {
