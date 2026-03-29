@@ -205,7 +205,7 @@ pub fn parse_field_value_num<'a>(field: &'a Field, v: &Value) -> Result<NumberVa
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 pub enum EncodeError {
     NotAnObject,
     MissingIdField(String),
@@ -222,7 +222,8 @@ pub enum EncodeError {
     OnlyOneKeyExpected(String,String),
     UnsupportedOperation(String),
     NotAnArray,
-    OnlyBodyKeyAvailableToEdit(String)
+    OnlyBodyKeyAvailableToEdit(String),
+    RevFieldRequired(String)
 }
 
 

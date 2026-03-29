@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{delete_op::{DeleteError, delete_data, prepare_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, write_data}};
+use crate::{delete_op::{DeleteError, process_delete, prepare_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -78,24 +78,24 @@ impl MarciDB {
 
   pub fn insert_item(&self, entity: &Entity, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
     let tx = self.db.begin_write().unwrap();
-    let item_id = write_data(&tx, entity, insert,  &self, None)?;
+    let item_id = process_write(&tx, entity, insert,  &self, None)?;
     tx.commit().unwrap();
     Ok(item_id)
   }
 
   pub fn update_item(&self, entity: &Entity, id: &[u8], update_op: &UpdateOp) -> Result<(), UpdateError> {
     let tx = self.db.begin_write().unwrap();
-    process_update(&tx, entity, id, update_op)?;
+    process_update(&tx, entity, id, update_op, &self)?;
     tx.commit().unwrap();
     Ok(())
   }
 
-  pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<(), DeleteError> {
+  pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
     let action = prepare_delete(&self.schema, entity, Some(id), None);
     let tx = self.db.begin_write().unwrap();
-    delete_data(&tx, &id, entity, &action, &self.schema)?;
+    let is_delete = process_delete(&tx, &id, entity, &action, &self.schema, None)?;
     tx.commit().unwrap();
-    Ok(())
+    Ok(is_delete)
   }
 }
 

@@ -1,26 +1,35 @@
-use canopydb::{Bytes, Transaction, Tree, WriteTransaction};
+use canopydb::{Transaction, Tree, WriteTransaction};
 
 use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
 
-pub fn delete_data(
-  tx: &WriteTransaction, 
+pub fn process_delete<'a>(
+  tx: &'a WriteTransaction, 
   id: &[u8],
   entity: &Entity, 
   action: &DeleteOp,
-  schema: &Schema
-) -> Result<(), DeleteError> {
-  let mut body_value: Option<Bytes> = None;
+  schema: &Schema,
+  tree: Option<&mut Tree<'a>>
+) -> Result<bool, DeleteError> {
+  let mut body_value: Option<Vec<u8>> = None;
   {
-    let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+    let mut owned;
+    let tree: &mut Tree<'a> = match tree {
+        Some(t) => t,
+        None => {
+          owned = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+          &mut owned
+        }
+    };
+
     if action.is_body_need() {
       let Some(body) = tree.get(id).unwrap() else {
-        return Err(DeleteError::ItemNotFound);
+        return Ok(false)
       };
-      body_value = Some(body);
+      body_value = Some(body.to_vec());
     }
 
-    if !tree.delete(&id).unwrap() {
-      return Err(DeleteError::ItemNotFound);
+    if !tree.delete(id).unwrap() {
+      return Ok(false)
     }
   }
 
@@ -54,7 +63,7 @@ pub fn delete_data(
     match &dep.action_type {
       DependencyActionType::Delete (action) => {
         for item_id in item_ids.iter() {
-          delete_data(tx, &item_id, dep.rev_entity, action, schema)?;
+          process_delete(tx, &item_id, dep.rev_entity, action, schema, None)?;
         }
       },
       DependencyActionType::SetNull { offset_pos } => {
@@ -78,26 +87,30 @@ pub fn delete_data(
   }
 
   for ref_to_delete in &action.refs_to_delete {
-    match ref_to_delete {
-        RefToDelete::Index { tree_name } => {
-          let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
-          delete_by_prefix(&mut tree, id);
-        }
-        RefToDelete::ChildEntity { entity, delete_op: action } => {
-          let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-          if action.is_empty() {
-            delete_by_prefix(&mut tree, id);
-          } else {
-            todo!()
-          }
-        }
-    }
+    delete_ref_data(tx, ref_to_delete, id);
   }
   
-  Ok(())
+  Ok(true)
 }
 
-fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema: &Schema, id: &[u8], body: &Option<Bytes>) -> Vec<Vec<u8>> { 
+pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id: &[u8]) {
+  match ref_to_delete {
+    RefToDelete::Index { tree_name } => {
+      let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+      delete_by_prefix(&mut tree, parent_id);
+    }
+    RefToDelete::ChildEntity { entity, delete_op: action } => {
+      let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+      if action.is_empty() {
+        delete_by_prefix(&mut tree, parent_id);
+      } else {
+        todo!()
+      }
+    }
+  }
+}
+
+fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema: &Schema, id: &[u8], body: &Option<Vec<u8>>) -> Vec<Vec<u8>> { 
   return match dep.binding {
     Some((_, RefBinding::CurrentId)) => {
       let tree = tx.get_tree(dep.rev_entity.name.as_bytes()).unwrap().unwrap();

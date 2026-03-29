@@ -28,14 +28,14 @@ fn base_update_test() {
   }
   
   {
-    update_data(&db, "User", user_b, json!({ "active": true }));
+    update_data(&db, "User", &user_b, json!({ "active": true }));
 
     let resp = get_data(&db, "User", json!({ "name": true, "$where": { "active": true } }));
     assert_eq!(resp, json!([ { "name": "Alice" }, { "name": "Bob" } ]))
   }
 
   {
-    update_data(&db, "User", user_a, json!({ "email": "alice-new@test.com", "age": { "$increment": 5 } }));
+    update_data(&db, "User", &user_a, json!({ "email": "alice-new@test.com", "age": { "$increment": 5 } }));
 
     let resp = get_data(&db, "User", json!({ 
       "name": true, "age": true, "active": true, "$where": { "email": "alice-new@test.com" }

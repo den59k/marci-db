@@ -1,43 +1,80 @@
-use canopydb::WriteTransaction;
+use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, index_utils::{encode_full_index, encode_index}, schema::Entity, update_op::{UpdateError, UpdateField, UpdateOp, UpdateValue}, utils::{get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}};
+use crate::{Field, MarciDB, delete_op::process_delete, index_utils::{encode_full_index, encode_index}, schema::{Entity, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
 
-pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp) -> Result<(), UpdateError> { 
+pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
-  if !update.fields.is_empty() {
-    let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-    
-    let Some(data) = tree.get(id).unwrap() else {
-      return Err(UpdateError::ItemNotFound)
-    };
+  let mut tree = tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
+  
+  let Some(data) = tree.get(id).unwrap() else {
+    return Ok(false)
+  };
 
-    let resp = update_fields(&update.fields, &data, entity, | field, old_value, new_value | {
-      for field_index in field.indexes.iter() {
-        let mut tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
+  let resp = update_fields(&update.update_fields, &data, entity, | field, old_value, new_value | {
+    for field_index in field.indexes.iter() {
+      let mut tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
 
-        if let Some(old_value) = old_value {
-          tree.delete(&encode_full_index(field, field_index, id, old_value)).unwrap();
-        }
-        if let Some(new_value) = new_value {
-          let index_data = encode_index(field, field_index, new_value);
-          if field_index.is_unique() {
-            if let Some(exists) = tree.prefix_keys(&index_data).unwrap().next() {
-              let exists_id = exists.unwrap()[index_data.len()..].to_vec();
-              return Err(UpdateError::UniqueViolation(field.full_name.clone(), exists_id))
-            }
-          }
-          tree.insert(&[ index_data.as_slice(), &id ].concat(), &[]).unwrap();
-        }
+      if let Some(old_value) = old_value {
+        tree.delete(&encode_full_index(field, field_index, id, old_value)).unwrap();
       }
-      Ok(())
-    })?;
-    
-    if let Some(new_data) = resp {
-      tree.insert(id, &new_data).unwrap();
+      if let Some(new_value) = new_value {
+        let index_data = encode_index(field, field_index, new_value);
+        if field_index.is_unique() {
+          if let Some(exists) = tree.prefix_keys(&index_data).unwrap().next() {
+            let exists_id = exists.unwrap()[index_data.len()..].to_vec();
+            return Err(UpdateError::UniqueViolation(field.full_name.clone(), exists_id))
+          }
+        }
+        tree.insert(&[ index_data.as_slice(), &id ].concat(), &[]).unwrap();
+      }
+    }
+    Ok(())
+  })?;
+  
+  if let Some(new_data) = resp {
+    tree.insert(id, &new_data).unwrap();
+  }
+
+  for update_ref in update.update_refs.iter() {
+    match &update_ref.op {
+        UpdateRelationOp::Remove(delete_op) => {
+          if let Some(item_id) = get_id_from_ref_info(entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
+            process_delete(tx, item_id, update_ref.st, delete_op, &db.schema, None).map_err(|e| UpdateError::DeleteError(e))?;
+          }
+        },
+        UpdateRelationOp::DisconnectAll => {
+          todo!();
+        },
+        UpdateRelationOp::Create(write_op) => {
+          process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
+        },
+        UpdateRelationOp::Update(update_op) => {
+          if let Some(item_id) = get_id_from_ref_info(entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
+            process_update(tx, update_ref.st, item_id, update_op, db)?;
+          }
+        },
+        UpdateRelationOp::RemoveAll(delete_op) => {
+          let mut tree = tx.get_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes()).unwrap().unwrap();
+          for item_id in get_ids_from_ref_info(tx, &tree, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
+            // println!("ready to delete {} {:#?}", update_ref.field.name, delete_op);
+            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
+          }
+        },
+        UpdateRelationOp::Push(write_ops) => {
+          for write_op in write_ops {
+            process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
+          }
+        },
+        UpdateRelationOp::RemoveItems(items, delete_op) => todo!(),
+        UpdateRelationOp::Connect(item_ids) => {
+          write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?
+        },
+        UpdateRelationOp::Disconnect(items) => todo!(),
     }
   }
 
-  Ok(())
+
+  Ok(true)
 }
 
 fn update_fields<F>(fields: &[UpdateField], source_data: &[u8], entity: &Entity, on_change: F) -> Result<Option<Vec<u8>>,UpdateError>
@@ -130,6 +167,28 @@ fn update_data(dst: &mut Vec<u8>, item_data: &[u8], entity: &Entity, offset_pos:
   }
 }
 
+fn get_id_from_ref_info<'a>(entity: &Entity, field: &Field, ref_info: &RefInfo, id: &'a [u8], body: &'a [u8], schema: &Schema) -> Option<&'a [u8]> {
+  match ref_info.binding {
+    RefBinding::CurrentId => {
+      return Some(id)
+    },
+    RefBinding::FieldValue => {
+      return get_data(entity, field, id, body, &schema);
+    },
+    RefBinding::IndexTree(_) => todo!(),
+  };
+}
+
+fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &[u8], body: &[u8], schema: &Schema) -> Vec<Vec<u8>> {
+  match ref_info.binding {
+    RefBinding::CurrentId => {
+      obj_tree.prefix_keys(&id).unwrap().map(|key| key.unwrap().to_vec()).collect()
+    },
+    RefBinding::FieldValue => panic!("RefList cannot be in FieldValue"),
+    RefBinding::IndexTree(_) => todo!(),
+  }
+}
+
 #[cfg(test)]
 mod tests {
 use serde_json::json;
@@ -160,7 +219,7 @@ fn test_update_op() {
       "name": null
     })).unwrap();
   
-    let updated = update_fields(&update_op.fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
+    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
        
     let encoded_resp = parse_insert(&schema, user_model, &json!({
       "name": null,
@@ -176,7 +235,7 @@ fn test_update_op() {
       "age": { "$increment": 10 }
     })).unwrap();
   
-    let updated = update_fields(&update_op.fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
+    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
        
     let encoded_resp = parse_insert(&schema, user_model, &json!({
       "name": "Alice New",

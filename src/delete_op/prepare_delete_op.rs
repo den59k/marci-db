@@ -9,7 +9,7 @@ pub fn prepare_delete<'a>(schema: &'a Schema, entity: &'a Entity, id: Option<&[u
   DeleteOp {
     indexes_to_delete: collect_indexes_to_delete(schema, entity, id),
     dependencies: collect_dependency_actions(schema, entity, ignore_ref),
-    refs_to_delete: collect_refs_to_delete(schema, entity)
+    refs_to_delete: collect_refs_to_delete(schema, entity, ignore_ref)
   }
 }
 
@@ -48,21 +48,22 @@ pub fn collect_indexes_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, id:
   return indexes_to_delete;
 }
 
-pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity) -> Vec<RefToDelete<'a>> {
+pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity, ignore_ref: Option<&Field>) -> Vec<RefToDelete<'a>> {
   let mut resp = vec![];
 
   for field in entity.fields.iter() {
     let (FieldType::Ref(ref_info) | FieldType::RefList(ref_info)) = &field.ty else {
       continue;
     };
+    if let Some(ignore_ref) = ignore_ref && std::ptr::eq(field, ignore_ref) {
+      continue;
+    }
 
     match &ref_info.binding {
       RefBinding::CurrentId => {
-        if field.name == "@parent_id" {
-          continue;
-        }
         let ref_entity = &schema.models[ref_info.model_index];
-        let action = prepare_delete(schema, ref_entity, None, Some(field));
+        let ignore_ref = ref_info.rev_field_idx.map(|i| &ref_entity.fields[i]);
+        let action = prepare_delete(schema, ref_entity, None, ignore_ref);
         resp.push(RefToDelete::ChildEntity { entity: &ref_entity, delete_op: action });
       },
       RefBinding::FieldValue => continue,

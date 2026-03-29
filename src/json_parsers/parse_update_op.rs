@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{Field, json_parsers::{EncodeError, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, schema::{Entity, FieldLocation, FieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateValue}};
+use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, parse_id, schema::{Entity, FieldLocation, FieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
 
 pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<UpdateOp<'a>, EncodeError> {
     let obj = json_val
@@ -26,20 +26,68 @@ fn parse_update_op<'a>(
 
         match &field.ty {
             FieldType::Ref(ref_info) => {
+                let ref_entity = &schema.models[ref_info.model_index];
+                let rev_field = ref_info.rev_field_idx.map(|i| &ref_entity.fields[i]);
+                let rev_ref_info = rev_field.and_then(|f| {
+                    match &f.ty {
+                        FieldType::Ref(ref_info) | FieldType::RefList(ref_info) => Some(ref_info),
+                        _ => None
+                    }
+                });
+
                 if value.is_null() {
-                    
+                    match field.location {
+                        FieldLocation::Key { .. } => return Err(EncodeError::OnlyBodyKeyAvailableToEdit(field.full_name.clone())),
+                        FieldLocation::Body { offset_pos } => {
+                            update_fields.push(UpdateField { field, value: UpdateValue::Null, offset_pos });
+                        }
+                        FieldLocation::Virtual => {}
+                    }
+                    if ref_entity.autoinsert {
+                        let delete_op: crate::delete_op::DeleteOp<'_> = prepare_delete(schema, entity, None, rev_field);
+                        update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::Remove(delete_op), ref_info, rev_ref_info });
+                    } else {
+                        update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::DisconnectAll, ref_info, rev_ref_info });
+                    }
+                    continue;
                 }
                 let Some(obj) = value.as_object() else {
                     return Err(EncodeError::type_mismatch(field, "object"));
                 };
                 for (key, value) in obj {
-                    match key.as_str() {
-                        "$update" => todo!(),
-                        "$create" => todo!(),
-                        "$replace" => todo!(),
-                        "$connect" => todo!(),
+                    let op = match key.as_str() {
+                        "$update" => {
+                            UpdateRelationOp::Update(parse_update(schema, ref_entity, value)?)
+                        }
+                        "$ensure" => {
+                            if matches!(field.location, FieldLocation::Body { .. } | FieldLocation::Key { .. }) {
+                                todo!();
+                            }
+                            UpdateRelationOp::Create(parse_insert_nested(schema, ref_info, value)?)
+                        },
+                        "$set" => {
+                            if matches!(field.location, FieldLocation::Body { .. } | FieldLocation::Key { .. }) {
+                                todo!();
+                            }
+                            let delete_op = prepare_delete(schema, entity, None, rev_field);
+                            update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::Remove(delete_op), ref_info, rev_ref_info });
+                            UpdateRelationOp::Create(parse_insert_nested(schema, ref_info, value)?)
+                        },
+                        "$connect" => {
+                            let item_id = parse_id(schema, ref_entity, value)?;
+                            match field.location {
+                                FieldLocation::Key { .. } => return Err(EncodeError::OnlyBodyKeyAvailableToEdit(field.full_name.clone())),
+                                FieldLocation::Body { offset_pos } => {
+                                    update_fields.push(UpdateField { field, value: UpdateValue::Value(item_id.clone()), offset_pos });
+                                }
+                                FieldLocation::Virtual => {}
+                            }
+                            UpdateRelationOp::Connect(vec![item_id])
+                        }
                         _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
-                    }
+                    };
+
+                    update_refs.push(UpdateRelation { field, st: ref_entity, op, ref_info, rev_ref_info });
                 }
                 continue;
             },
@@ -47,15 +95,51 @@ fn parse_update_op<'a>(
                 let Some(obj) = value.as_object() else {
                     return Err(EncodeError::type_mismatch(field, "object"));
                 };
-                for (key, value) in obj {
-                    match key.as_str() {
-                        "$push" => todo!(),
-                        "$remove" => todo!(),
-                        "$update" => todo!(),
-                        "$updateAll" => todo!(),
-                        "$replaceAll" => todo!(),
-                        _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
+                let ref_entity = &schema.models[ref_info.model_index];
+                let rev_field = ref_info.rev_field_idx.map(|i| &ref_entity.fields[i]);
+                let rev_ref_info = rev_field.and_then(|f| {
+                    match &f.ty {
+                        FieldType::Ref(ref_info) | FieldType::RefList(ref_info) => Some(ref_info),
+                        _ => None
                     }
+                });
+
+                for (key, value) in obj {
+                    let op = match key.as_str() {
+                        "$push" => {
+                            UpdateRelationOp::Push(parse_one_or_many(value, |v| parse_insert_nested(schema, ref_info, v))?)
+                        },
+                        "$remove" => {
+                            if ref_entity.autoinsert {
+                                let delete_op = prepare_delete(schema, entity, None, rev_field);
+                                UpdateRelationOp::RemoveItems(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?, delete_op)
+                            } else {
+                                UpdateRelationOp::Disconnect(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?)
+                            }
+                        },
+                        // "$updateAll" => {
+                        //     UpdateRelationOp::UpdateAll(parse_update(schema, ref_entity, value)?)
+                        // },
+                        "$set" => {
+                            let write_op = parse_many(field, value, |v| parse_insert_nested(schema, ref_info, v))?;
+                            
+                            let delete_op = prepare_delete(schema, ref_entity, None, rev_field);
+                            if write_op.is_empty() {
+                                UpdateRelationOp::RemoveAll(delete_op)
+                            } else {
+                                update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::Remove(delete_op), ref_info, rev_ref_info });
+                                UpdateRelationOp::Push(write_op)
+                            }
+                        },
+                        "$connect" => {
+                            UpdateRelationOp::Connect(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?)
+                        },
+                        // "$disconnect" => {
+                        //     UpdateRelationOp::Disconnect(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?)
+                        // },
+                        _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
+                    };
+                    update_refs.push(UpdateRelation { field, st: ref_entity, op, ref_info, rev_ref_info });
                 }
                 continue;
             },
@@ -75,8 +159,8 @@ fn parse_update_op<'a>(
     }
 
     Ok(UpdateOp {
-        fields: update_fields,
-        refs: update_refs
+        update_fields,
+        update_refs
     })
 }
 
@@ -111,5 +195,23 @@ fn parse_field<'a>(field: &'a Field, value: &Value) -> Result<UpdateValue, Encod
             Ok(UpdateValue::Value(dst))
         },
         _ => Err(EncodeError::UnavailableKeyField(field.full_name.clone()))
+    }
+}
+
+fn parse_one_or_many<T, F>(value: &Value, f: F,) -> Result<Vec<T>, EncodeError>
+where F: Fn(&Value) -> Result<T, EncodeError> {
+    if let Some(arr) = value.as_array() {
+        arr.iter().map(|v| f(v)).collect()
+    } else {
+        Ok(vec![f(value)?])
+    }
+}
+
+fn parse_many<T, F>(field: &Field, value: &Value, f: F,) -> Result<Vec<T>, EncodeError>
+where F: Fn(&Value) -> Result<T, EncodeError> {
+    if let Some(arr) = value.as_array() {
+        arr.iter().map(|v| f(v)).collect()
+    } else {
+        Err(EncodeError::type_mismatch(field, "array"))
     }
 }

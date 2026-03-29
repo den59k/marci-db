@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
@@ -15,7 +15,7 @@ pub enum InsertError {
   ParentIdRequired
 }
 
-pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: &MarciDB, parent_id: Option<&[u8]>) -> Result<Vec<u8>, InsertError> {
+pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: &MarciDB, parent_id: Option<&[u8]>) -> Result<Vec<u8>, InsertError> {
 
   let mut write_id = insert.id.clone();
   let mut temp_data: Option<Vec<u8>> = None;
@@ -31,11 +31,19 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
         let write_body = temp_data.get_or_insert_with(|| { insert.data.clone() });
         write_body[*offset..*offset+8].copy_from_slice(&next_value.to_be_bytes());
       }
-      WriteDefault::ParentId(offset) => {
+      WriteDefault::KeyInsert(offset, WriteDefaultInsert::ParentId) => {
         let Some(parent_id) = parent_id else {
           return Err(InsertError::ParentIdRequired)
         };
         write_id.splice(offset..offset, parent_id.iter().copied());
+      },
+      WriteDefault::BodyInsert(offset_pos, offset, WriteDefaultInsert::ParentId) => {
+        let Some(parent_id) = parent_id else {
+          return Err(InsertError::ParentIdRequired)
+        };
+        let write_body = temp_data.get_or_insert_with(|| { insert.data.clone() });
+        write_body.splice(offset..offset, parent_id.iter().copied());
+        move_offsets(write_body, offset_pos+4, entity.payload_offset, parent_id.len() as u32);
       },
       _ => {}
     }
@@ -70,11 +78,11 @@ pub fn write_data(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, db: 
   for st in insert.refs.iter() {
     match st {
       WriteRelation::Create { op, st, .. } => {
-        write_data(tx, st, op, db, Some(&write_id))?;
+        process_write(tx, st, op, db, Some(&write_id))?;
       }
       WriteRelation::CreateMany { ops, st, .. } => {
         for op in ops {
-          write_data(tx, st, op, db, Some(&write_id))?;
+          process_write(tx, st, op, db, Some(&write_id))?;
         }
       }
       WriteRelation::Connect { ref_info, ids, field, .. } => {
@@ -93,7 +101,7 @@ fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) {
   tree.insert(&[ left, right ].concat(), &[]).unwrap();
 }
 
-fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
+pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
     let mut tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
     for item_id in ids {
@@ -134,7 +142,8 @@ fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8]
   Ok(())
 }
 
-enum WriteIndexesError {
+#[derive(Debug,PartialEq)]
+pub enum WriteIndexesError {
   UniqueViolation(Vec<u8>)
 }
 

@@ -1,7 +1,7 @@
 mod process_delete;
 mod prepare_delete_op;
 
-pub use process_delete::delete_data;
+pub use process_delete::{process_delete};
 pub use prepare_delete_op::prepare_delete;
 
 use crate::{Field, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
@@ -54,7 +54,7 @@ pub enum DependencyActionType<'a> {
   RemoveIndex { tree_name: String }
 }
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 pub enum DeleteError {
   ItemNotFound,
   RestrictConstraints(String,Vec<Vec<u8>>),

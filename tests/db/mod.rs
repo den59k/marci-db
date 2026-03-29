@@ -6,6 +6,7 @@ pub mod insert_tests;
 pub mod query_tests;
 pub mod unique_tests;
 pub mod update_tests;
+pub mod update_ref_tests;
 
 use std::str::FromStr;
 
@@ -20,9 +21,9 @@ pub fn insert_data(db: &MarciDB, model: &str, data: Value) -> Value {
   Value::from_str(&decode_id(&item_id, entity, &db.schema)).unwrap()
 }
 
-pub fn update_data(db: &MarciDB, model: &str, r#where: Value, data: Value) {
+pub fn update_data(db: &MarciDB, model: &str, item_id: &Value, data: Value) {
   let entity = db.get_model(model).unwrap();
-  let id = parse_id(&db.schema, entity, &r#where).unwrap();
+  let id = parse_id(&db.schema, entity, item_id).unwrap();
   let to_update = parse_update(&db.schema, entity, &data).unwrap();
   db.update_item(entity, &id, &to_update).unwrap();
 }

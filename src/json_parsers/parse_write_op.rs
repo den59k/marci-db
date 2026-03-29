@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::{encode_index}, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldLocation, FieldType, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -11,6 +11,19 @@ pub fn parse_insert<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value
         .ok_or(EncodeError::NotAnObject)?;
 
     return parse_write_op(schema, entity, obj, None);
+}
+
+pub fn parse_insert_nested<'a>(schema: &'a Schema, ref_info: &RefInfo, json_val: &Value, ) -> Result<WriteOp<'a>, EncodeError> {
+    let obj = json_val
+        .as_object()
+        .ok_or(EncodeError::NotAnObject)?;
+
+    let entity = &schema.models[ref_info.model_index];
+    let Some(rev_field_idx) = ref_info.rev_field_idx else {
+        return Err(EncodeError::RevFieldRequired(entity.name.clone()));
+    };
+
+    return parse_write_op(schema, entity, obj, Some(&entity.fields[rev_field_idx]));
 }
 
 // pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<WriteOp<'a>, EncodeError> {
@@ -25,7 +38,7 @@ fn parse_write_op<'a>(
     schema: &'a Schema, 
     entity: &'a Entity, 
     obj: &Map<String, Value>,
-    parent: Option<&Entity>
+    parent_field: Option<&'a Field>
 ) -> Result<WriteOp<'a>, EncodeError> {
     // let mut mask = bitvec![0; entity.fields.len()];
     let mut refs: Vec<WriteRelation<'_>> = vec![];
@@ -45,8 +58,17 @@ fn parse_write_op<'a>(
 
     for field in entity.fields.iter() {
         // Если ключ является родительским, то мы сразу его заполняем значением
-        if let Some(parent) = parent && schema.is_parent_key(field, parent) {
-            defaults.push(WriteDefault::ParentId(id.len()));
+        if let Some(parent_field) = parent_field && std::ptr::eq(field, parent_field) {
+            match field.location {
+                FieldLocation::Key { index: _ } => {
+                    defaults.push(WriteDefault::KeyInsert(id.len(), WriteDefaultInsert::ParentId));
+                }
+                FieldLocation::Body { offset_pos } => {
+                    write_header(&mut data, offset_pos);
+                    defaults.push(WriteDefault::BodyInsert(offset_pos, data.len(), WriteDefaultInsert::ParentId));
+                }
+                _ => {}
+            }
             continue;
         }
 
@@ -141,10 +163,7 @@ fn parse_write_op<'a>(
                         // Здесь может быть как структура, так и модель. Если структура, используем insert
                         let ref_entity = &schema.models[ref_info.model_index];
                         if ref_entity.autoinsert {
-                            let Some(value) = value.as_object() else {
-                                return Err(EncodeError::type_mismatch(field, "{ }"))
-                            };
-                            let op = parse_write_op(schema, ref_entity, value, Some(entity))?;
+                            let op = parse_insert_nested(schema, ref_info, value)?;
                             refs.push(WriteRelation::Create { field, ref_info, op, st: ref_entity });
                         } else {
                             let ref_id = parse_id(schema, ref_entity, value)?;
@@ -163,10 +182,7 @@ fn parse_write_op<'a>(
                         if ref_entity.autoinsert {
                             let mut ops = Vec::with_capacity(value.len());
                             for item in value {
-                                let Some(item) = item.as_object() else {
-                                return Err(EncodeError::type_mismatch(field, "{ }"))
-                                };
-                                let op = parse_write_op(schema, ref_entity, item, Some(entity))?;
+                                let op = parse_insert_nested(schema, ref_info, item)?;
                                 ops.push(op);
                             }
                             refs.push(WriteRelation::CreateMany { field, ref_info, ops, st: ref_entity });
@@ -195,7 +211,7 @@ fn parse_write_op<'a>(
 }
 
 
-// Записывает значение по умолчанию. Если значение вычисляется во время записи - возвращает offset
+/// Записывает значение по умолчанию. Если значение вычисляется во время записи - возвращает offset
 fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
     match default_value {
         FieldDefault::Value(val) => {
@@ -240,7 +256,7 @@ fn write_header(dst: &mut [u8], offset_pos: usize) {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use crate::{json_parsers::{parse_insert, parsers::encode_list}, parse_schema, utils::{get_data, get_end, get_offsets}, write_op::{WriteDefault, WriteRelation}};
+    use crate::{json_parsers::{parse_insert, parsers::encode_list}, parse_schema, utils::{get_data, get_end, get_offsets}, write_op::{WriteDefault, WriteDefaultInsert, WriteRelation}};
 
     #[test]
     fn encode_test() {
@@ -340,7 +356,7 @@ mod tests {
         };
 
         assert_eq!(ops.len(), 1);
-        assert!(matches!(ops[0].defaults[0], WriteDefault::ParentId(0)));
+        assert!(matches!(ops[0].defaults[0], WriteDefault::KeyInsert(0, WriteDefaultInsert::ParentId)));
         assert_eq!(&ops[0].id, &[ 0, 0, 0, 0, 0, 0, 0, 1]);
         assert_eq!(get_offsets(&ops[0].data, st), vec![ model.payload_offset ]);
         

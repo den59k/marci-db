@@ -52,16 +52,6 @@ impl Schema {
             .enumerate()
             .map(|(i, model)| (model.name.clone(), i)).collect()
     }
-
-    pub(crate) fn is_parent_key(&self, field: &Field, entity: &Entity) -> bool {
-        let FieldType::Ref (ref_info) = &field.ty else {
-            return false;
-        };
-        if !matches!(field.location, FieldLocation::Key { .. }) {
-            return false;
-        }
-        return self.models[ref_info.model_index].name == entity.name;
-    }
 }
 
 #[derive(Debug,Clone)]

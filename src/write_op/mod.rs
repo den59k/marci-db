@@ -1,7 +1,7 @@
 mod process_write;
 use crate::{Field, schema::{Entity, FieldDefault, FieldIndex, RefInfo}};
 
-pub use process_write::{write_data,InsertError};
+pub use process_write::{process_write,InsertError,write_ref_indexes,WriteIndexesError};
 
 #[derive(Debug)]
 pub struct WriteOp<'a> {
@@ -18,8 +18,14 @@ pub enum WriteDefault<'a> {
     Key(usize, &'a FieldDefault),
     // Записать значение в Body в заданный offset
     Body(usize, &'a FieldDefault),
-    // Записать значение parentId в Key в заданный offset
-    ParentId(usize)
+
+    KeyInsert(usize, WriteDefaultInsert),
+    BodyInsert(usize,usize, WriteDefaultInsert),
+}
+
+#[derive(Debug)]
+pub enum WriteDefaultInsert {
+    ParentId
 }
 
 #[derive(Debug)]
