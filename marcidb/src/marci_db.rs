@@ -52,6 +52,14 @@ impl MarciDB {
     self.model_by_name.get(name).and_then(|idx| { Some(&self.schema.models[*idx]) })
   }
   
+  pub fn get_model_index(&self, name: &str) -> Option<usize> {
+    self.model_by_name.get(name).copied()
+  }
+
+  pub fn get_model_by_index<'a>(&'a self, index: usize) -> &'a Entity {
+    return &self.schema.models[index]
+  }
+
   pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where F: Fn(DecodeCtx<U>) -> U { 
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);

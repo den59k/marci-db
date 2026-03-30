@@ -1,0 +1,9 @@
+model User {
+  name        String
+  info        UserInfo?
+}
+
+struct UserInfo {
+  bio         String
+  age         Int?
+}
