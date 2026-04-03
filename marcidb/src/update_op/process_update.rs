@@ -38,8 +38,8 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
   for update_ref in update.update_refs.iter() {
     match &update_ref.op {
         UpdateRelationOp::Remove(delete_op) => {
-          if let Some(item_id) = get_id_from_ref_info(entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
-            process_delete(tx, item_id, update_ref.st, delete_op, &db.schema, None).map_err(|e| UpdateError::DeleteError(e))?;
+          if let Some(item_id) = get_id_from_ref_info(tx, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
+            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, None).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::DisconnectAll => {
@@ -49,13 +49,13 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
         },
         UpdateRelationOp::Update(update_op) => {
-          if let Some(item_id) = get_id_from_ref_info(entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
-            process_update(tx, update_ref.st, item_id, update_op, db)?;
+          if let Some(item_id) = get_id_from_ref_info(tx, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
+            process_update(tx, update_ref.st, &item_id, update_op, db)?;
           }
         },
         UpdateRelationOp::RemoveAll(delete_op) => {
           let mut tree = tx.get_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes()).unwrap().unwrap();
-          for item_id in get_ids_from_ref_info(tx, &tree, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema) {
+          for item_id in get_ids_from_ref_info(tx, &tree, update_ref.ref_info, id) {
             // println!("ready to delete {} {:#?}", update_ref.field.name, delete_op);
             process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
           }
@@ -65,11 +65,11 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
             process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
           }
         },
-        UpdateRelationOp::RemoveItems(items, delete_op) => todo!(),
+        UpdateRelationOp::RemoveItems(_items, _delete_op) => todo!(),
         UpdateRelationOp::Connect(item_ids) => {
           write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?
         },
-        UpdateRelationOp::Disconnect(items) => todo!(),
+        UpdateRelationOp::Disconnect(_items) => todo!(),
     }
   }
 
@@ -167,25 +167,44 @@ fn update_data(dst: &mut Vec<u8>, item_data: &[u8], entity: &Entity, offset_pos:
   }
 }
 
-fn get_id_from_ref_info<'a>(entity: &Entity, field: &Field, ref_info: &RefInfo, id: &'a [u8], body: &'a [u8], schema: &Schema) -> Option<&'a [u8]> {
-  match ref_info.binding {
+fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &'a [u8], body: &'a [u8], schema: &Schema) -> Option<Vec<u8>> {
+  match &ref_info.binding {
     RefBinding::CurrentId => {
-      return Some(id)
+      return Some(id.to_vec())
     },
     RefBinding::FieldValue => {
-      return get_data(entity, field, id, body, &schema);
+      return get_data(entity, field, id, body, &schema).map(|i| i.to_vec());
     },
-    RefBinding::IndexTree(_) => todo!(),
+    RefBinding::IndexTree(tree_name) => {
+      let item_id_len = id.len();
+      let index_tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+      let item_id = index_tree
+        .prefix_keys(&id)
+        .unwrap()
+        .map(|e| e.unwrap()[item_id_len..].to_vec())
+        .next();
+      return item_id
+    },
   };
 }
 
-fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &[u8], body: &[u8], schema: &Schema) -> Vec<Vec<u8>> {
-  match ref_info.binding {
+/// Получает id связанных объектов
+fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, ref_info: &RefInfo, id: &[u8]) -> Vec<Vec<u8>> {
+  match &ref_info.binding {
     RefBinding::CurrentId => {
       obj_tree.prefix_keys(&id).unwrap().map(|key| key.unwrap().to_vec()).collect()
     },
     RefBinding::FieldValue => panic!("RefList cannot be in FieldValue"),
-    RefBinding::IndexTree(_) => todo!(),
+    RefBinding::IndexTree(tree_name) => {
+      let item_id_len = id.len();
+      let index_tree = tx.get_tree(tree_name.as_bytes()).unwrap().unwrap();
+      let item_ids: Vec<Vec<u8>> = index_tree
+        .prefix_keys(&id)
+        .unwrap()
+        .map(|e| e.unwrap()[item_id_len..].to_vec())
+        .collect();
+      item_ids
+    },
   }
 }
 

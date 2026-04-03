@@ -158,7 +158,7 @@ fn update_ref_connect_test() {
   let user_c = insert_data(&db, "User", json!({ "name": "Charlie" }));
   
   let post_a = insert_data(&db, "Post", json!({ "title": "About Alice's life", "author": user_a }));
-  let post_b = insert_data(&db, "Post", json!({ "title": "Bob's Post", "author": user_b }));
+  let _post_b = insert_data(&db, "Post", json!({ "title": "Bob's Post", "author": user_b }));
 
   {
     update_data(&db, "Post", &post_a, json!({

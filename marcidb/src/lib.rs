@@ -10,7 +10,7 @@ mod url_parser;
 mod update_op;
 mod num_utils;
 
-pub use crate::schema::{parse_schema, FieldRef, Field,Entity};
+pub use crate::schema::{parse_schema, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType};
 pub use crate::json_parsers::{parse_insert,parse_update,parse_query,decode_document,decode_id,array_to_json,parse_id,EncodeError};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::MarciDB;

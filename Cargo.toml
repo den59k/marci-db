@@ -1,9 +1,11 @@
+
 [workspace]
 resolver = "3"
 members = [
     "marcidb",
     # "marci-vector",
-    "marcidb-server"
+    "marcidb-server",
+    "marcidb-ts"
 ]
 
 default-members = [

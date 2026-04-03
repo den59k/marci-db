@@ -218,9 +218,10 @@ pub fn parse_field_raw(line: &str) -> Field {
 
     let type_str = parts.next().expect("expected field type");
 
-    let nullable = type_str.ends_with('?');
     let ty = parse_type(type_str.strip_suffix("?").unwrap_or(type_str));
 
+    let nullable = type_str.ends_with('?') || matches!(ty, FieldType::RefListUnresolved(_));
+    
     // атрибуты: всё, что осталось в строке, интерпретируем как атрибуты
     // Каждое слово, начинающееся с '@', — отдельный атрибут
     let attributes: Vec<Attribute> = line

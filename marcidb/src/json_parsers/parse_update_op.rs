@@ -82,6 +82,8 @@ fn parse_update_op<'a>(
                                 }
                                 FieldLocation::Virtual => {}
                             }
+
+                            update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::DisconnectAll, ref_info, rev_ref_info });
                             UpdateRelationOp::Connect(vec![item_id])
                         }
                         _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
@@ -107,14 +109,14 @@ fn parse_update_op<'a>(
                 for (key, value) in obj {
                     let op = match key.as_str() {
                         "$push" => {
-                            UpdateRelationOp::Push(parse_one_or_many(value, |v| parse_insert_nested(schema, ref_info, v))?)
+                            UpdateRelationOp::Push(unfold_array(value, |v| parse_insert_nested(schema, ref_info, v))?)
                         },
                         "$remove" => {
                             if ref_entity.autoinsert {
                                 let delete_op = prepare_delete(schema, entity, None, rev_field);
-                                UpdateRelationOp::RemoveItems(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?, delete_op)
+                                UpdateRelationOp::RemoveItems(unfold_array(value, |v| parse_id(schema, ref_entity, v))?, delete_op)
                             } else {
-                                UpdateRelationOp::Disconnect(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?)
+                                UpdateRelationOp::Disconnect(unfold_array(value, |v| parse_id(schema, ref_entity, v))?)
                             }
                         },
                         // "$updateAll" => {
@@ -132,7 +134,7 @@ fn parse_update_op<'a>(
                             }
                         },
                         "$connect" => {
-                            UpdateRelationOp::Connect(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?)
+                            UpdateRelationOp::Connect(unfold_array(value, |v| parse_id(schema, ref_entity, v))?)
                         },
                         // "$disconnect" => {
                         //     UpdateRelationOp::Disconnect(parse_one_or_many(value, |v| parse_id(schema, ref_entity, v))?)
@@ -198,7 +200,7 @@ fn parse_field<'a>(field: &'a Field, value: &Value) -> Result<UpdateValue, Encod
     }
 }
 
-fn parse_one_or_many<T, F>(value: &Value, f: F,) -> Result<Vec<T>, EncodeError>
+fn unfold_array<T, F>(value: &Value, f: F,) -> Result<Vec<T>, EncodeError>
 where F: Fn(&Value) -> Result<T, EncodeError> {
     if let Some(arr) = value.as_array() {
         arr.iter().map(|v| f(v)).collect()

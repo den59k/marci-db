@@ -1,9 +1,32 @@
 model User {
-  name        String
-  info        UserInfo?
+    name        String
+    info        UserInfo?
+    posts       Post[]        @bind(Post.author)
 }
 
 struct UserInfo {
-  bio         String
-  age         Int?
+    bio         String
+    age         Int
+}
+
+model Post {
+    title       String
+    author      User?
+}
+
+model Project {
+    name        String
+    users       UserRole[]
+}
+
+enum Role {
+    creator
+    admin {
+    sign      String
+    }
+}
+
+struct UserRole {
+    user        User          @id
+    role        Role
 }
