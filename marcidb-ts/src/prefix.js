@@ -1,4 +1,4 @@
-import { request, encodeId } from 'marcidb/runtime'
+import { request, encodeId } from 'marcidb-client/runtime'
 
 export function marci(url) {
 

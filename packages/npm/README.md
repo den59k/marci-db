@@ -37,7 +37,7 @@ marci generate schema.marci node_modules/.marci/client
 3. Start your MarciDB server and connect:
 
 ```typescript
-import { marci } from "marci-db";
+import { marci } from "marcidb-client";
 
 const db = marci("http://localhost:3000");
 ```
@@ -45,7 +45,7 @@ const db = marci("http://localhost:3000");
 ## Usage
 
 ```typescript
-import { marci } from "marci-db";
+import { marci } from "marcidb-client";
 
 const db = marci("http://localhost:3000");
 
