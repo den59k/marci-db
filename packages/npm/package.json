@@ -1,0 +1,38 @@
+{
+  "name": "marcidb-client",
+  "type": "module",
+  "version": "0.0.1",
+  "license": "MIT",
+  "author": {
+    "name": "den59k"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/den59k/marci-db.git"
+  },
+  "scripts": {
+    "build": "bunup src/index.ts --external .marci/client --out-dir runtime"
+  },
+  "bin": {
+    "marci": "bin.js"
+  },
+  "files": [
+    "bin/",
+    "client/",
+    "runtime/",
+    "bin.js"
+  ],
+  "devDependencies": {
+    "bunup": "^0.16.31"
+  },
+  "exports": {
+    ".": {
+      "import": "./client/index.js",
+      "types": "./client/index.d.ts"
+    },
+    "./runtime": {
+      "import": "./runtime/index.js",
+      "types": "./runtime/index.d.ts"
+    }
+  }
+}

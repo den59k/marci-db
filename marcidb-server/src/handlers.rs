@@ -15,9 +15,9 @@ pub async fn handle_insert(req: Request<hyper::body::Incoming>, ctx: Arc<ServerC
         let entity = ctx.db.get_model_by_index(model_index);
         let write_op = parse_insert(&ctx.db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
-        ctx.db.insert_item(entity, &write_op)
+        let writed_id = ctx.db.insert_item(entity, &write_op)
             .map_err(|e| ApiError::BadRequest(format!("Failed to insert: {:?}", e)))?;
-        Ok(decode_id(&write_op.id, entity, &ctx.db.schema).to_string())
+        Ok(decode_id(&writed_id, entity, &ctx.db.schema).to_string())
     }).await?;
 
     Ok(ok_response(id))

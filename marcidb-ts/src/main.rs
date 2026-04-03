@@ -1,4 +1,4 @@
-use std::{fs};
+use std::{env, fs, path::Path};
 
 use marcidb::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
 
@@ -20,6 +20,10 @@ fn get_model_insert_name(model: &Entity) -> String {
 
 fn get_model_update_name(model: &Entity) -> String {
   format!("{}ModelUpdate", model.name.replace('.', "_"))
+}
+
+fn get_model_small_name(model: &Entity) -> String {
+  [ &model.name[0..1].to_lowercase(), &model.name[1..] ].concat()
 }
 
 fn get_primitive_str(ty: &PrimitiveFieldType) -> &str {
@@ -131,8 +135,14 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
 }
 
 fn main() {
-  
-  let schema_str = &fs::read_to_string("schema.marci").expect("schema.marci file not found");
+
+  let args: Vec<String> = env::args().collect();
+
+  let input = args.get(1).map(String::as_str).unwrap_or("schema.marci");
+  let output_dir = args.get(2).map(String::as_str).unwrap_or(".");
+
+  let schema_str = &fs::read_to_string(input)
+      .unwrap_or_else(|_| panic!("File not found: {}", input));
 
   let schema = parse_schema(schema_str);
 
@@ -190,7 +200,7 @@ fn main() {
   lines.push(format!("export interface MarciDB {{"));
   for model in schema.models.iter() {
     if model.name.contains(".") { continue; };
-    lines.push(format!("  {}{}: {{", &model.name[0..1].to_lowercase(), &model.name[1..]));
+    lines.push(format!("  {}: {{", get_model_small_name(model)));
     lines.push(format!("    findMany<T extends {}>(select: T): Promise<GetResult<{}, T>[]>", get_model_select_name(model), get_model_name(model)));
     lines.push(format!("    insert(data: {}): Promise<{}>", get_model_insert_name(model), get_model_id_name(model)));
     lines.push(format!("    update(id: {}, data: {}): Promise<void>", get_model_id_name(model), get_model_update_name(model)));
@@ -201,9 +211,30 @@ fn main() {
 
   let prefix = include_str!("prefix.ts").to_string();
   lines.insert(0, prefix);
-  let out = lines.join("\n");
+  let types_out = lines.join("\n");
+  
+  // Создаем index.js файл
+  let mut lines: Vec<String> = vec![];
+  for model in schema.models.iter() { 
+    if model.name.contains(".") { continue; };
+    lines.push(format!("{}: {{", get_model_small_name(model)));
+    lines.push(format!("  findMany: (select) => findMany(\"{}\", select),", model.name));
+    lines.push(format!("  insert: (data) => insert(\"{}\", data),", model.name));
+    lines.push(format!("  update: (id,data) => update(\"{}\", id, data),", model.name));
+    lines.push(format!("  delete: (id) => runDelete(\"{}\", id)", model.name));
+    lines.push("},".to_string());
+  }
 
-  fs::write("out.d.ts", out).unwrap();
+  let index_out = include_str!("prefix.js").replace("/* generated_data */", &lines.join("\n    "));
 
-  println!("File out.d.ts created")
+  let out_path = Path::new(output_dir);
+  fs::create_dir_all(out_path).unwrap();
+
+  let dts_path = out_path.join("index.d.ts");
+  fs::write(&dts_path, types_out).unwrap();
+  println!("File {} created", dts_path.display());
+
+  let js_path = out_path.join("index.js");
+  fs::write(&js_path, index_out).unwrap();
+  println!("File {} created", js_path.display());
 }

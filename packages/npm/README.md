@@ -1,0 +1,85 @@
+# marci-db
+
+TypeScript client for [MarciDB](https://github.com/den59k/marci-db.git) — a NoSQL database with a schema-first approach.
+
+## Installation
+
+```bash
+npm install marcidb-client
+# or
+bun add marcidb-client
+```
+
+## Setup
+
+1. Create a `schema.marci` file in your project root:
+
+```
+model User {
+    name    String
+    posts   Post[]  @bind(Post.author)
+}
+
+model Post {
+    title   String
+    author  User?
+}
+```
+
+2. Generate the client:
+
+```bash
+marci generate
+# or with custom paths
+marci generate schema.marci node_modules/.marci/client
+```
+
+3. Start your MarciDB server and connect:
+
+```typescript
+import { marci } from "marci-db";
+
+const db = marci("http://localhost:3000");
+```
+
+## Usage
+
+```typescript
+import { marci } from "marci-db";
+
+const db = marci("http://localhost:3000");
+
+// Find
+const users = await db.user.findMany({
+  id: true,
+  name: true,
+});
+
+// Insert
+const id = await db.user.insert({
+  name: "Alice",
+});
+
+// Update
+await db.user.update({ id: 1 }, {
+  name: "Bob",
+});
+
+// Delete
+await db.user.delete({ id: 1 });
+```
+
+## Requirements
+
+- Node.js 18+ or Bun
+- MarciDB server running
+
+## Re-generating types
+
+After every change to `schema.marci`, re-run:
+
+```bash
+marci generate
+```
+
+If types don't update in VSCode, run **TypeScript: Restart TS Server** (`Ctrl+Shift+P`).

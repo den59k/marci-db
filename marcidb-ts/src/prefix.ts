@@ -29,3 +29,5 @@ type RefListUpdateStruct<I,U> = {
   "$remove": I | I[],
   "$set": I[]
 }
+
+export declare function marci(url: string): MarciDB;
