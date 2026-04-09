@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{ReadTransaction, Tree};
 
-use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
 pub type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
@@ -32,7 +32,7 @@ pub fn get_ids_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Vec<Vec<u8>> {
     .collect()
 }
 
-pub fn get_first_id(index_tree: &Tree, item_id: &[u8]) -> Option<Vec<u8>> {
+pub fn get_first_id_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Option<Vec<u8>> {
   let item_id_len = item_id.len();
   index_tree
     .prefix_keys(&item_id)
@@ -46,28 +46,27 @@ pub fn get_ids_by_range(
     start: &Option<Vec<u8>>,
     end: &Option<Vec<u8>>,
     fixed_size: Option<usize>,
+    limit: Option<usize>
 ) -> Vec<Vec<u8>> {
-    match (start.as_deref(), end.as_deref()) {
-        (Some(s), Some(e)) => {
-          index_tree.range_keys(s..e)
-            .unwrap()
-            .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
-            .collect()
-        },
-        (Some(s), None) => {
-          index_tree.range_keys(s..)
-            .unwrap()
-            .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
-            .collect()
-        },
-        (None,    Some(e)) => {
-          index_tree.range_keys(..e)
-            .unwrap()
-            .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
-            .collect()
-        },
-        (None,    None) => panic!("Start or end of range must be defined"),
-    }
+  let iter = match (start.as_deref(), end.as_deref()) {
+      (Some(s), Some(e)) => index_tree.range_keys(s..e),
+      (Some(s), None) => index_tree.range_keys(s..),
+      (None, Some(e)) => index_tree.range_keys(..e),
+      (None, None) => panic!("Start or end of range must be defined"),
+  };
+
+  if let Some(limit) = limit {
+    iter
+      .unwrap()
+      .take(limit)
+      .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
+      .collect()
+  } else {
+    iter
+      .unwrap()
+      .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
+      .collect()
+  }
 }
 
 #[inline]

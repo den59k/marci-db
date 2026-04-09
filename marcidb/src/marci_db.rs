@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{delete_op::{DeleteError, process_delete, prepare_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
+use crate::{delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_one, process_query_many}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -66,11 +66,17 @@ impl MarciDB {
     return process_query_many(query, &mut ctx,None);
   }
 
-  pub fn find_unique<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
+  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
     return process_query_one(query, &mut ctx,None);
   }
+
+  // pub fn find_unique<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
+  //   let rx = self.db.begin_read().unwrap();
+  //   let mut ctx = TransationContext::new(&rx, &self.schema, f);
+  //   return process_query_one(query, &mut ctx,None);
+  // }
 
   pub fn count(&self, entity: &Entity) -> u64 {
     let rx = self.db.begin_read().unwrap();

@@ -36,6 +36,23 @@ pub async fn handle_find_many(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
     Ok(ok_response(result))
 }
 
+pub async fn handle_find_first(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, model_index: usize) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+
+    let result = blocking(move || {
+        let entity = ctx.db.get_model_by_index(model_index);
+        let query_op = parse_query(&ctx.db.schema, entity, &json_val)
+            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+
+        let Some(item) = &ctx.db.find_first(&query_op, |ctx| decode_document(ctx).unwrap()) else {
+            return Ok("null".to_string())
+        };
+        Ok(item.clone())
+    }).await?;
+
+    Ok(ok_response(result))
+}
+
 pub async fn handle_update(req: Request<hyper::body::Incoming>, item_id: String, ctx: Arc<ServerContext>, model_index: usize) -> HandlerResult {
     let json_val = parse_json_body(req).await?;
     let item_id = parse_id_from_url(&ctx.db.schema, ctx.db.get_model_by_index(model_index), &item_id)

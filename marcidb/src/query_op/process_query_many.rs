@@ -20,7 +20,7 @@ pub fn process_query_many<'a, U, F>
     },
     Some(PrefixKey::IndexRange { start, end, tree_name, fixed_size }) => {
       let index_tree = ctx.get_tree(tree_name);
-      let ids = get_ids_by_range(&index_tree, start, end, *fixed_size);
+      let ids = get_ids_by_range(&index_tree, start, end, *fixed_size, None);
 
       let tree = ctx.get_tree(&query.entity.name);
 

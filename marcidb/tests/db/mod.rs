@@ -38,6 +38,21 @@ pub fn get_data(db: &MarciDB, model: &str, json_query: Value) -> Value {
   Value::from_str(&array_to_json(&items)).unwrap()
 }
 
+
+pub fn get_data_one(db: &MarciDB, model: &str, json_query: Value) -> Value {
+  let entity = db.get_model(model).unwrap();
+  let query = parse_query(&db.schema, entity, &json_query).unwrap();
+
+  // println!("{:#?}", query);
+
+  let item = db.find_first(&query, |ctx| decode_document(ctx).unwrap());
+  if let Some(item) = item {
+    Value::from_str(&item).unwrap()
+  } else {
+    Value::Null
+  }
+}
+
 pub fn delete_data(db: &MarciDB, model: &str, data: Value) {
   let entity = db.get_model(model).unwrap();
   let id = parse_id(&db.schema, entity, &data).unwrap();

@@ -2,7 +2,7 @@ use marcidb::MarciDB;
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::db::{get_data, insert_data};
+use crate::db::{get_data, get_data_one, insert_data};
 
 #[test]
 fn query_indexes_test() {
@@ -43,6 +43,14 @@ fn query_indexes_test() {
   }
 
   {
+    let data = get_data_one(&db, "User", json!({
+      "name": true,
+      "$where": { "email": "alice@test.test" }
+    }));
+    assert_eq!(data, json!({ "name": "Alice" }))
+  }
+
+  {
     let data = get_data(&db, "Post", json!({
       "title": true,
       "$where": { "createdAt": { "$gt": "2026-03-01T00:00:00.0Z" } }
@@ -51,6 +59,14 @@ fn query_indexes_test() {
       { "title": "Second Alice post" },
       { "title": "Last Alice post" },
     ]))
+  }
+
+  {
+    let data = get_data_one(&db, "Post", json!({
+      "title": true,
+      "$where": { "createdAt": { "$gt": "2026-03-01T00:00:00.0Z" } }
+    }));
+    assert_eq!(data, json!({ "title": "Second Alice post" }))
   }
 
 }
