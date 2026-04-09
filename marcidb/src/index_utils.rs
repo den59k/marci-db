@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::{Field, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum}};
+use crate::{Entity, Field, FieldLocation, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum}};
 
 /// Увеличивает буффер на один бит
 pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
@@ -125,13 +125,34 @@ pub fn encode_f64(bytes: &[u8]) -> Vec<u8> {
 }
 
 // Генеририрует индекс для Where
-pub fn generate_prefix_from_where<'a>(where_op: &Where) -> Option<PrefixKey<'a>> {
+pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> Option<PrefixKey<'a>> {
   match where_op {
     Where::True => None,
-    Where::And(items) => items.iter().find_map(|f| generate_prefix_from_where(f)),
+    Where::And(items) => {
+
+      // Пробуем собрать prefix для ID
+      let key_fields: Vec<(&Field,&Vec<u8>)> = items.iter().filter_map(|f| {
+        match f {
+          Where::Field(field, FieldCompare::Eq(value)) => Some((*field, value)),
+          _ => None
+        }
+      }).collect();
+      if let Some(prefix) = try_to_generate_id_prefix(entity, key_fields) {
+        return Some(prefix)
+      }
+
+      return items.iter().find_map(|f| generate_prefix_from_where(entity, f))
+    },
     Where::Or(_) => None,
     Where::Not(_) => None,
     Where::Field(field, field_compare) => {
+      // Проверяем, это может быть единственное поле для ID
+      if matches!(field.location, FieldLocation::Key { index } if index == 0) && let FieldCompare::Eq(value) = field_compare {
+        if let Some(prefix) = try_to_generate_id_prefix(entity, vec![( field, value )]) {
+          return Some(prefix)
+        }
+      }
+
       for index in field.indexes.iter() {
         match index {
             FieldIndex::Value { tree_name,  .. } => {
@@ -167,4 +188,24 @@ pub fn generate_prefix_from_where<'a>(where_op: &Where) -> Option<PrefixKey<'a>>
       return None
     },
   }
+}
+
+pub fn try_to_generate_id_prefix<'a>(entity: &Entity, items: Vec<(&Field,&Vec<u8>)>) -> Option<PrefixKey<'a>> {
+  let mut prefix_value = vec![];
+
+  for field in entity.fields.iter() {
+    if !matches!(field.location, FieldLocation::Key { .. }) {
+      return Some(PrefixKey::Id(prefix_value))
+    }
+    let Some(value) = items
+      .iter()
+      .find_map(|i| std::ptr::eq(field, i.0).then_some(i.1))
+      else { break; };
+    prefix_value.extend_from_slice(value); 
+  }
+
+  if prefix_value.is_empty() {
+    return None
+  }
+  return Some(PrefixKey::IdPrefix(prefix_value))
 }

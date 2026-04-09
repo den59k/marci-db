@@ -20,8 +20,9 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   if let Some(where_value) = json_val.get("$where") {
     let where_op = parse_where(schema, entity, where_value)
       .map_err(|err| ParseError::WhereError(err))?;
+    
     if !matches!(where_op, Where::True) {
-      prefix_key = generate_prefix_from_where(&where_op);
+      prefix_key = generate_prefix_from_where(entity, &where_op);
       filter = Some(where_op);
     }
   }
@@ -149,6 +150,20 @@ mod tests {
 
       let encoded = parse_query(&schema, project_model, &input).unwrap();
       assert_eq!(encoded.includes.len(), 1);
+    }
+
+    {
+      let user_model = &schema.models[0];
+      let input = json!({
+          "name": true,
+          "$where": { "id": 1 }
+      });
+
+      let encoded = parse_query(&schema, user_model, &input).unwrap();
+      match encoded.prefix_key {
+        Some(PrefixKey::Id(value)) => { assert_eq!(value, vec![ 0, 0, 0, 0, 0, 0, 0, 1 ]) },
+        _ => panic!("Wrong prefix key value: {:?}", encoded.prefix_key)
+      }
     }
   }
 

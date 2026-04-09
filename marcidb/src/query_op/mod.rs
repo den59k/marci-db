@@ -52,7 +52,9 @@ pub enum PrefixKey<'a> {
   ParentId,
   ParentField(&'a Field),
   ParentIndexTree(String),
-  IndexRange { start: Option<Vec<u8>>, end: Option<Vec<u8>>, tree_name: String, fixed_size: Option<usize> }
+  IndexRange { start: Option<Vec<u8>>, end: Option<Vec<u8>>, tree_name: String, fixed_size: Option<usize> },
+  Id(Vec<u8>),
+  IdPrefix(Vec<u8>),
 }
 
 impl<'a> QueryOp<'a> {
