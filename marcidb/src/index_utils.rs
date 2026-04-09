@@ -202,6 +202,9 @@ pub fn try_to_generate_id_prefix<'a>(entity: &Entity, items: Vec<(&Field,&Vec<u8
       .find_map(|i| std::ptr::eq(field, i.0).then_some(i.1))
       else { break; };
     prefix_value.extend_from_slice(value); 
+    if field.get_size().is_none() {
+      prefix_value.push(b'\0');
+    }
   }
 
   if prefix_value.is_empty() {

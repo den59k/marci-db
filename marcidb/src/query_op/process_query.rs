@@ -17,6 +17,9 @@ pub fn get_prefix<'a>(prefix_key: &'a PrefixKey, parent: Option<ParentData<'a>>,
       let (entity,parent_id,parent_body) = &parent.unwrap();
       return get_data(entity, field, parent_id, parent_body, schema);    
     },
+    PrefixKey::Id(value) | PrefixKey::IdPrefix(value) => {
+      return Some(value)
+    },
     _ => {
       panic!("Cannot get prefix from {:?}", prefix_key)
     }

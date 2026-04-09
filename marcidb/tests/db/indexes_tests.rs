@@ -45,6 +45,14 @@ fn query_indexes_test() {
   {
     let data = get_data_one(&db, "User", json!({
       "name": true,
+      "$where": user_a
+    }));
+    assert_eq!(data, json!({ "name": "Alice" }))
+  }
+
+  {
+    let data = get_data_one(&db, "User", json!({
+      "name": true,
       "$where": { "email": "alice@test.test" }
     }));
     assert_eq!(data, json!({ "name": "Alice" }))
