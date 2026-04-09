@@ -22,6 +22,14 @@ fn get_model_update_name(model: &Entity) -> String {
   format!("{}ModelUpdate", model.name.replace('.', "_"))
 }
 
+fn get_model_where_name(model: &Entity) -> String {
+  format!("{}Model$Where", model.name.replace('.', "_"))
+}
+
+fn get_model_query_name(model: &Entity) -> String {
+  format!("{}ModelQuery", model.name.replace('.', "_"))
+}
+
 fn get_model_small_name(model: &Entity) -> String {
   [ &model.name[0..1].to_lowercase(), &model.name[1..] ].concat()
 }
@@ -67,7 +75,16 @@ fn get_field_ty(ty: &FieldType, schema: &Schema) -> String {
   }
 }
 
+// fn get_field_nullable_ty(field: &Field, schema: &Schema) -> String {
+//   if field.nullable && !matches!(field.ty, FieldType::RefList(_)) {
+//     format!("{} | null", get_field_ty(&field.ty, schema))
+//   } else {
+//     format!("{}", get_field_ty(&field.ty, schema))
+//   }
+// }
+
 fn get_field_str(field: &Field, schema: &Schema) -> String { 
+  // format!("  {}: {}", field.name, get_field_nullable_ty(&field, schema))
   if field.nullable {
     format!("  {}: {} | null", field.name, get_field_ty(&field.ty, schema))
   } else {
@@ -77,10 +94,33 @@ fn get_field_str(field: &Field, schema: &Schema) -> String {
 
 fn get_field_select_str(field: &Field, schema: &Schema) -> String {
   match &field.ty {
-    FieldType::Ref(ref_info) | FieldType::RefList(ref_info) => {
+    FieldType::Ref(ref_info) => {
       format!("  {}?: {} | boolean", field.name, get_model_select_name(&schema.models[ref_info.model_index]))
     },
+    FieldType::RefList(ref_info) => {
+      format!("  {}?: {} | boolean", field.name, get_model_query_name(&schema.models[ref_info.model_index]))
+    },
     _ => format!("  {}?: boolean", field.name)
+  }
+}
+
+fn get_field_where_str(field: &Field, schema: &Schema) -> String {
+  let field_nullable = if field.nullable { " | null" } else { "" };
+  match &field.ty {
+    FieldType::Ref(ref_info) => {
+      format!("  {}?: CompareRefValue<{}{}>", field.name, get_model_where_name(&schema.models[ref_info.model_index]), field_nullable)
+    },
+    FieldType::RefList(ref_info) => {
+      format!("  {}?: CompareRefListValue<{}>", field.name, get_model_where_name(&schema.models[ref_info.model_index]))
+    },
+    FieldType::Primitive(ty) => {
+      if ty.get_num_type().is_some() {
+        format!("  {}?: CompareNumValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
+      } else {
+        format!("  {}?: CompareValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
+      }
+    },
+    _ => format!("  {}?: CompareValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
   }
 }
 
@@ -170,14 +210,6 @@ fn main() {
     }
     lines.push("}".to_string());
 
-    // Заполняем поля для select
-    lines.push(format!("type {} = {{", get_model_select_name(model)));
-    for field in model.fields.iter() {
-      if field.name.starts_with("@") { continue; }
-      lines.push(get_field_select_str(field, &schema));
-    }
-    lines.push("}".to_string());
-
     // Заполняем поля для Insert
     lines.push(format!("type {} = {{", get_model_insert_name(model)));
     for field in model.fields.iter() {
@@ -194,6 +226,28 @@ fn main() {
     }
     lines.push("}".to_string());
 
+    
+    // Заполняем поля для select
+    lines.push(format!("type {} = {{", get_model_select_name(model)));
+    for field in model.fields.iter() {
+      if field.name.starts_with("@") { continue; }
+      lines.push(get_field_select_str(field, &schema));
+    }
+    lines.push("}".to_string());
+
+    // Заполняем поля для Where
+    lines.push(format!("type {} = {{", get_model_where_name(model)));
+    for field in model.fields.iter() {
+      if field.name.starts_with("@") { continue; }
+      lines.push(get_field_where_str(field, &schema));
+    }
+    lines.push("}".to_string());
+
+    // Заполняем поля для Query
+    lines.push(format!("type {} = {} & {{", get_model_query_name(model), get_model_select_name(model)));
+    lines.push(format!("  $where?: {}", get_model_where_name(model)));
+    lines.push("}".to_string());
+
     lines.push("".to_string());
   }
   
@@ -201,7 +255,7 @@ fn main() {
   for model in schema.models.iter() {
     if model.name.contains(".") { continue; };
     lines.push(format!("  {}: {{", get_model_small_name(model)));
-    lines.push(format!("    findMany<T extends {}>(select: T): Promise<GetResult<{}, T>[]>", get_model_select_name(model), get_model_name(model)));
+    lines.push(format!("    findMany<T extends {}>(select: T): Promise<GetResult<{}, T>[]>", get_model_query_name(model), get_model_name(model)));
     lines.push(format!("    insert(data: {}): Promise<{}>", get_model_insert_name(model), get_model_id_name(model)));
     lines.push(format!("    update(id: {}, data: {}): Promise<void>", get_model_id_name(model), get_model_update_name(model)));
     lines.push(format!("    delete(id: {}): Promise<void>", get_model_id_name(model)));

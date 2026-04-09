@@ -20,6 +20,14 @@ type UserSelect = {
   info: boolean | UserInfoSelect 
 }
 
+type UserQuery = UserSelect & {
+  $where: UserWhere
+}
+
+type UserWhere = {
+  name?: string,
+}
+
 type UserUpdate = {
   name?: string
   info?: RefUpdateStruct<UserInfoModelInsert,UserInfoModelUpdate> | null
