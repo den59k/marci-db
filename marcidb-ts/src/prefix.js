@@ -6,6 +6,10 @@ export function marci(url) {
     return request("POST", `${url}/${model}/findMany`, select);
   }
 
+  const findFirst = (model, select) => {
+    return request("POST", `${url}/${model}/findFirst`, select);
+  }
+
   const insert = (model, data) => {
     return request("POST", `${url}/${model}/insert`, data);
   }

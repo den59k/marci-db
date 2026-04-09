@@ -256,6 +256,7 @@ fn main() {
     if model.name.contains(".") { continue; };
     lines.push(format!("  {}: {{", get_model_small_name(model)));
     lines.push(format!("    findMany<T extends {}>(select: T): Promise<GetResult<{}, T>[]>", get_model_query_name(model), get_model_name(model)));
+    lines.push(format!("    findFirst<T extends {}>(select: T): Promise<GetResult<{}, T | null>>", get_model_query_name(model), get_model_name(model)));
     lines.push(format!("    insert(data: {}): Promise<{}>", get_model_insert_name(model), get_model_id_name(model)));
     lines.push(format!("    update(id: {}, data: {}): Promise<void>", get_model_id_name(model), get_model_update_name(model)));
     lines.push(format!("    delete(id: {}): Promise<void>", get_model_id_name(model)));
@@ -273,6 +274,7 @@ fn main() {
     if model.name.contains(".") { continue; };
     lines.push(format!("{}: {{", get_model_small_name(model)));
     lines.push(format!("  findMany: (select) => findMany(\"{}\", select),", model.name));
+    lines.push(format!("  findFirst: (select) => findFirst(\"{}\", select),", model.name));
     lines.push(format!("  insert: (data) => insert(\"{}\", data),", model.name));
     lines.push(format!("  update: (id,data) => update(\"{}\", id, data),", model.name));
     lines.push(format!("  delete: (id) => runDelete(\"{}\", id)", model.name));
