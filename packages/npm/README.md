@@ -31,7 +31,7 @@ model Post {
 ```bash
 marci generate
 # or with custom paths
-marci generate schema.marci node_modules/.marci/client
+marci generate schema.marci node_modules/.marcidb/client
 ```
 
 3. Start your MarciDB server and connect:

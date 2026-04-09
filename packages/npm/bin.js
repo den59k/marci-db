@@ -20,7 +20,7 @@ const COMMANDS = {
 
 function help() {
   console.log(`
-marci <command> [options]
+marcidb <command> [options]
 
 Commands:
   generate [schema] [output]   Generate TypeScript types from schema
@@ -28,15 +28,15 @@ Commands:
                                output  — output directory  (default: node_modules/marci-db/generated)
 
 Examples:
-  marci generate
-  marci generate schema.marci
-  marci generate schema.marci node_modules/.marci/client
+  marcidb generate
+  marcidb generate schema.marci
+  marcidb generate schema.marci node_modules/.marcidb/client
   `);
 }
 
 function cmdGenerate(args) {
   const schema = args[0] ?? "schema.marci";
-  const output = args[1] ?? "node_modules/.marci/client";
+  const output = args[1] ?? "node_modules/.marcidb/client";
 
   const key = `${os.platform()}-${os.arch()}`;
   const name = BINS[key];

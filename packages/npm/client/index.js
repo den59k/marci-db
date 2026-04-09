@@ -1,1 +1,1 @@
-export * from '.marci/client'
+export * from '.marcidb/client'

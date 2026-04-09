@@ -11,10 +11,10 @@
     "url": "git+https://github.com/den59k/marci-db.git"
   },
   "scripts": {
-    "build": "bunup src/index.ts --external .marci/client --out-dir runtime"
+    "build": "bunup src/index.ts --external .marcidb/client --out-dir runtime"
   },
   "bin": {
-    "marci": "bin.js"
+    "marcidb": "bin.js"
   },
   "files": [
     "bin/",
