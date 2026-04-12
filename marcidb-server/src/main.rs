@@ -84,7 +84,7 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.unwrap();
 
-    println!("Server running on http://{}", addr);
+    println!("MarciDB is running on http://{}", addr);
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();

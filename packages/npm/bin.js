@@ -36,7 +36,7 @@ Examples:
 
 function cmdGenerate(args) {
   const schema = args[0] ?? "schema.marci";
-  const output = args[1] ?? "node_modules/.marcidb/client";
+  const output = args[1] ?? `${import.meta.dir ?? __dirname}/../.marcidb/client` ;
 
   const key = `${os.platform()}-${os.arch()}`;
   const name = BINS[key];
@@ -60,7 +60,7 @@ function cmdGenerate(args) {
     execFileSync(bin, [schema, output], { stdio: "inherit" });
 
     fs.writeFileSync(output + "/package.json", `{
-  "name": "maci-client",
+  "name": "marci-client",
   "main": "index.js",
   "types": "index.d.ts"
 }`)
