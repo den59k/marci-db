@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end_optimized, get_id_field_size, get_offset}};
+use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end_optimized, get_id_field_size, get_offset}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -11,7 +11,8 @@ pub enum DecodeError {
     Utf8Error,
     TypeMismatch(String),
     OffsetOutOfRange,
-    WrongEnumValue(u16)
+    WrongEnumValue(u16),
+    InvalidLength { expected: usize, got: usize }
 }
 
 pub trait FieldName {
@@ -240,72 +241,126 @@ pub fn decode_id(id: &[u8], entity: &Entity, schema: &Schema) -> String {
 
 // Декодирует в JSON значение из ID
 fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut String) -> Result<(), DecodeError> {
-  let field_name = field.name.clone();
-  match &field.ty {
-    FieldType::Primitive(primitive) => {
-        let value = decode_primitive_value(&primitive, &data)?;
+    let field_name = field.name.clone();
+    
+    if let Some(format) = &field.format {
+        let value = decode_by_format(&data, format, Some(&field.ty))?;
         insert_value(obj, &field_name, &value);
-        Ok(())
-    },
-    FieldType::Ref (ref_info) => {
-        let ref_entity = &schema.models[ref_info.model_index];
-        let value = &decode_id(data, ref_entity, schema);
-        insert_value(obj, &field_name, value);
-        Ok(())
-    },
-    _ => { panic!("Non primitive types in key is not supported") }
-  }
+        return Ok(())
+    }
+
+    match &field.ty {
+        FieldType::Primitive(primitive) => {
+            let value = decode_primitive_value(&primitive, &data)?;
+            insert_value(obj, &field_name, &value);
+            Ok(())
+        },
+        FieldType::PrimitiveList(ty, Some(fixed_size)) => {
+            let value = decode_array_static(&data, &ty, *fixed_size, 0, ty.get_size().unwrap())?;
+            insert_array_arc(obj, &field_name, &value);
+            Ok(())
+        },
+        FieldType::Ref (ref_info) => {
+            let ref_entity = &schema.models[ref_info.model_index];
+            let value = &decode_id(data, ref_entity, schema);
+            insert_value(obj, &field_name, value);
+            Ok(())
+        },
+        _ => { panic!("Non primitive types in key is not supported") }
+    }
 }
 
 // Декодирует в JSON значение из Body
 fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: &mut String, payload_offset: usize) -> Result<(), DecodeError> {
-  let offset_start = get_offset_checked(data, offset_pos)?;
-  if offset_start == 0 {
-    insert_null(obj, field);
-    return Ok(())
-  }
-
-  let field_name = field.name.clone();
-
-  // let field_name = aliases
-  //     .and_then(|a| a.get(&field.name))
-  //     .map(|i|i.to_string())
-  //     .unwrap_or_else(|| field.name.clone());
-  
-  match &field.ty {
-    FieldType::Primitive(primitive) => {
-      let offset_end = get_end_optimized(data, field, offset_start, offset_pos, payload_offset);
-
-      // Декодируем
-      let value = decode_primitive_value(primitive, &data[offset_start..offset_end])?;
-      insert_value(obj, &field_name, &value);
-      // obj.insert(field_name, value);
+    let offset_start = get_offset_checked(data, offset_pos)?;
+    if offset_start == 0 {
+        insert_null(obj, field);
+        return Ok(())
     }
-    FieldType::PrimitiveList(primitive, fixed_size) => {
-        let size = fixed_size.unwrap_or_else(|| {
-            u32::from_be_bytes(data[offset_start..offset_start+4].try_into().unwrap()) as usize
-        });
 
-        let payload_offset = if fixed_size.is_none() { offset_start + 4 } else { offset_start };
+    let field_name = field.name.clone();
 
-        let vec = match primitive.get_size() {
-            None => decode_array_dynamic(data, primitive, size, offset_start, payload_offset)?,
-            Some(el_size) => decode_array_static(data, primitive, size, payload_offset, el_size)?
-        };
-        
-        insert_array_arc(obj, &field_name, &vec);
-    },
-    FieldType::Enum(en) => {
-        let variant_index = u16::from_be_bytes(data[offset_start..offset_start+2].try_into().unwrap());
-        let Some(variant_value) = &en.variants_names_map.get(&variant_index) else {
-            return Err(DecodeError::WrongEnumValue(variant_index))
-        };
-        insert_string(obj, &field_name, variant_value);
+    if let Some(format) = &field.format {
+        let offset_end = get_end_optimized(data, field, offset_start, offset_pos, payload_offset);
+        let value = decode_by_format(&data[offset_start..offset_end], format, Some(&field.ty))?;
+        insert_value(obj, &field_name, &value);
+        return Ok(())
     }
-    _ => {}
-  };
 
-  Ok(())
+    // let field_name = aliases
+    //     .and_then(|a| a.get(&field.name))
+    //     .map(|i|i.to_string())
+    //     .unwrap_or_else(|| field.name.clone());
+    
+    match &field.ty {
+        FieldType::Primitive(primitive) => {
+        let offset_end = get_end_optimized(data, field, offset_start, offset_pos, payload_offset);
+
+        // Декодируем
+        let value = decode_primitive_value(primitive, &data[offset_start..offset_end])?;
+        insert_value(obj, &field_name, &value);
+        // obj.insert(field_name, value);
+        }
+        FieldType::PrimitiveList(primitive, fixed_size) => {
+            let size = fixed_size.unwrap_or_else(|| {
+                u32::from_be_bytes(data[offset_start..offset_start+4].try_into().unwrap()) as usize
+            });
+
+            let payload_offset = if fixed_size.is_none() { offset_start + 4 } else { offset_start };
+
+            let vec = match primitive.get_size() {
+                None => decode_array_dynamic(data, primitive, size, offset_start, payload_offset)?,
+                Some(el_size) => decode_array_static(data, primitive, size, payload_offset, el_size)?
+            };
+            
+            insert_array_arc(obj, &field_name, &vec);
+        },
+        FieldType::Enum(en) => {
+            let variant_index = u16::from_be_bytes(data[offset_start..offset_start+2].try_into().unwrap());
+            let Some(variant_value) = &en.variants_names_map.get(&variant_index) else {
+                return Err(DecodeError::WrongEnumValue(variant_index))
+            };
+            insert_string(obj, &field_name, variant_value);
+        }
+        _ => {}
+    };
+
+    Ok(())
+}
+
+fn decode_by_format(data: &[u8], format: &FieldCustomFormat, ty: Option<&FieldType>) -> Result<String, DecodeError> {
+    if let Some(FieldType::PrimitiveList(PrimitiveFieldType::Byte, None)) = ty {
+        return decode_by_format(&data[4..], format, None);
+    }
+    match format {
+        FieldCustomFormat::Uuid => {
+            if data.len() != 16 {
+                return Err(DecodeError::InvalidLength {
+                    expected: 16,
+                    got: data.len(),
+                });
+            }
+            Ok(format!(
+                "\"{:08x}-{:04x}-{:04x}-{:04x}-{:012x}\"",
+                u32::from_be_bytes(data[0..4].try_into().unwrap()),
+                u16::from_be_bytes(data[4..6].try_into().unwrap()),
+                u16::from_be_bytes(data[6..8].try_into().unwrap()),
+                u16::from_be_bytes(data[8..10].try_into().unwrap()),
+                // u48 не существует, собираем вручную
+                data[10..16].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64),
+            ))
+        },
+        FieldCustomFormat::Hex => {
+            let mut out = String::with_capacity(data.len() * 2 + 2);
+            out.push('"');
+            for b in data {
+                use std::fmt::Write;
+                write!(out, "{:02x}", b).unwrap();
+            }
+            out.push('"');
+            Ok(out)
+        }
+    }
 }
 
 fn decode_array_dynamic(
@@ -328,10 +383,10 @@ fn decode_array_dynamic(
     return Ok(vec);
 }
 
-fn decode_array_static(data: &[u8], primitive: &PrimitiveFieldType, size: usize, payload_offset: usize, static_size: usize) -> Result<Vec<String>, DecodeError> {
+fn decode_array_static(data: &[u8], primitive: &PrimitiveFieldType, size: usize, offset_start: usize, static_size: usize) -> Result<Vec<String>, DecodeError> {
     let mut vec = Vec::with_capacity(size);
     for i in 0..size {
-        let item_offset = payload_offset + static_size * i;
+        let item_offset = offset_start + static_size * i;
         let item_end = item_offset+primitive.get_size().expect("Expect static primitive type");
         vec.push(decode_primitive_value(primitive, &data[item_offset..item_end])?);
     }
@@ -373,6 +428,11 @@ fn decode_primitive_value(ty: &PrimitiveFieldType, data: &[u8]) -> Result<String
             let n = f64::from_be_bytes(data.try_into().unwrap());
             Ok(n.to_string())
             // Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
+        }
+        PrimitiveFieldType::Byte => {
+            let n = u8::from_be_bytes(data.try_into().unwrap());
+            Ok(n.to_string())
+            // Ok(Value::Bool(data[offset] != 0))
         }
         PrimitiveFieldType::Bool => {
             Ok((data[0] != 0).to_string())
@@ -571,5 +631,42 @@ mod tests {
             }))
         }
 
+    }
+
+    #[test]
+    fn test_decode_bytes() {
+        let schema = parse_schema("
+            model User {
+                uuid        Byte[16]    @id     @format(uuid)
+                name        String
+                password    Byte[]      @format(hex)
+            }
+        ");
+
+        let user_model = &schema.models[0];
+
+        { 
+            let input = json!({
+                "uuid": "559d7a0c-ec2e-4926-99ad-eb6f4a70c789",
+                "name": "Dan",
+                "password": "000000"
+            });
+
+            let encoded = parse_insert(&schema, user_model, &input).unwrap();
+            let resp: String = decode_document(DecodeCtx {
+                id: &encoded.id,
+                data: &encoded.data,
+                entity: user_model,
+                mask: &bitvec!(1; user_model.fields.len()),
+                includes: vec![],
+                schema: &schema,
+            }).unwrap();
+
+            assert_eq!(serde_json::from_str::<Value>(&resp).unwrap(), json!({
+                "uuid": "559d7a0c-ec2e-4926-99ad-eb6f4a70c789",
+                "name": "Dan",
+                "password": "000000"
+            }))
+        }
     }
 }

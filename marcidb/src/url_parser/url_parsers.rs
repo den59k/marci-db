@@ -37,6 +37,12 @@ pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFi
             dst.extend_from_slice(&n.to_be_bytes());
         }
 
+        PrimitiveFieldType::Byte => {
+            let n = value.parse::<u8>()
+                .map_err(|_| UrlParseError::type_mismatch(field, "u8"))?;
+            dst.extend_from_slice(&n.to_be_bytes());
+        }
+
         PrimitiveFieldType::Bool => {
             let b = match value {
                 "true" | "1" => true,

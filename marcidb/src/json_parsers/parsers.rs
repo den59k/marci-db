@@ -30,6 +30,10 @@ pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFi
         PrimitiveFieldType::Double => {
             dst.extend_from_slice(&as_f64(v, field)?.to_be_bytes());
         }
+        
+        PrimitiveFieldType::Byte => {
+            dst.extend_from_slice(&as_u8(v, field)?.to_be_bytes());
+        }
 
         PrimitiveFieldType::Bool => {
             let b = v.as_bool().ok_or_else(|| EncodeError::type_mismatch(field, "bool"))?;
@@ -52,27 +56,49 @@ pub fn encode_enum(dst: &mut Vec<u8>, field: &Field, enum_def: &EnumInfo, v: &Va
     Ok(())
 }
 
+fn insert_list_counter(current_len: usize, dst: &mut Vec<u8>, fixed_size: Option<usize>, field: &Field, ty: &PrimitiveFieldType) -> Result<(), EncodeError>  {
+    if let Some(fixed_size) = fixed_size {
+        if current_len != fixed_size {
+            return Err(EncodeError::type_mismatch(field, format!("{}[{}]", ty.to_string(), fixed_size)))
+        }
+    } else {
+        dst.extend_from_slice(&(current_len as u32).to_be_bytes());
+    }
+    Ok(())
+}
+
 // Кодирует PrimitiveList и PrimitiveFixedList в binary
-pub fn encode_list(buf: &mut Vec<u8>, value: &Value, field: &Field, primitive_type: &PrimitiveFieldType, fixed_size: Option<usize>) -> Result<(), EncodeError> {
-   let Some(arr) = value.as_array() else {
-      return Err(EncodeError::type_mismatch(field, "Array"))
-   };
+pub fn encode_list(dst: &mut Vec<u8>, value: &Value, field: &Field, primitive_type: &PrimitiveFieldType, fixed_size: Option<usize>) -> Result<(), EncodeError> {
+    let Some(arr) = value.as_array() else {
+        if let Some(str) = value.as_str() {
+            return encode_list_str(dst, str, field, primitive_type, fixed_size)
+        }
+        return Err(EncodeError::type_mismatch(field, "Array"))
+    };
 
-   let byte_start = buf.len();
-   if let Some(fixed_size) = fixed_size {
-      if arr.len() != fixed_size {
-         return Err(EncodeError::type_mismatch(field, format!("{}[{}]", primitive_type.to_string(), fixed_size)))
-      }
-   } else {
-      buf.extend_from_slice(&(arr.len() as u32).to_be_bytes());
-   }
-   
-   match primitive_type.get_size() {
-      None => encode_list_dynamic(buf, arr, field, primitive_type, byte_start)?,
-      Some(_) => encode_list_static(buf, arr, field, primitive_type)?
-   };
+    let byte_start = dst.len();
+    insert_list_counter(arr.len(), dst, fixed_size, field, &primitive_type)?;
 
-   Ok(())
+    match primitive_type.get_size() {
+        None => encode_list_dynamic(dst, arr, field, primitive_type, byte_start)?,
+        Some(_) => encode_list_static(dst, arr, field, primitive_type)?
+    };
+
+    Ok(())
+}
+
+fn encode_list_str(dst: &mut Vec<u8>, str: &str, field: &Field, primitive_type: &PrimitiveFieldType, fixed_size: Option<usize>) -> Result<(), EncodeError> {
+    if matches!(primitive_type, PrimitiveFieldType::Byte) {
+        let mut hex = parse_hex(str);
+        // if let Some(fixed_size) = fixed_size && hex.len() < fixed_size {
+        //     hex.resize(fixed_size, 0u8);
+        // }
+        insert_list_counter(hex.len(), dst, fixed_size, field, &primitive_type)?;
+        dst.append(&mut hex);
+        Ok(())
+    } else {
+        Err(EncodeError::type_mismatch(field, "Array"))
+    }
 }
 
 // Записывает в массив значения с переменной длиной (т.е. строки)
@@ -125,6 +151,10 @@ pub fn as_f64(v: &Value, field: &Field) -> Result<f64, EncodeError> {
     v.as_f64().ok_or_else(|| EncodeError::type_mismatch(field, "double"))
 }
 
+pub fn as_u8(v: &Value, field: &Field) -> Result<u8, EncodeError> {
+    v.as_u64().map(|i| i as u8).ok_or_else(|| EncodeError::type_mismatch(field, "u8"))
+}
+
 pub fn as_datetime(v: &Value, field: &Field) -> Result<i64, EncodeError> {
     let epoch = match v {
         Value::Number(_) => as_i64(v, field)?,
@@ -143,12 +173,15 @@ pub fn as_datetime(v: &Value, field: &Field) -> Result<i64, EncodeError> {
 pub fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value: &Value) -> Result<(), EncodeError> {
     match &field.ty {
         FieldType::Primitive(primitive_type) => {
-            encode_primitive_value( dst, field, &primitive_type, value)?;
+            encode_primitive_value(dst, field, &primitive_type, value)?;
         }
         FieldType::Ref (ref_info) => {
             let connect_id = parse_id(schema, &schema.models[ref_info.model_index], value)?;
             dst.extend(connect_id);
         }
+        FieldType::PrimitiveList(ty, Some(fixed_size)) => {
+            encode_list(dst, value, field, ty, Some(*fixed_size))?;
+        },
         _ => {
             return Err(EncodeError::UnavailableKeyFieldId(field.full_name.clone()))
         }
@@ -182,6 +215,19 @@ pub fn parse_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) ->
     }
 
    Ok(id)
+}
+
+fn parse_hex(input: &str) -> Vec<u8> {
+    let hex_chars: Vec<u8> = input
+        .chars()
+        .filter_map(|c| c.to_digit(16).map(|d| d as u8))
+        .collect();
+
+    hex_chars
+        .chunks(2)
+        .filter(|chunk| chunk.len() == 2)
+        .map(|chunk| (chunk[0] << 4) | chunk[1])
+        .collect()
 }
 
 pub fn parse_field_value_num<'a>(field: &'a Field, v: &Value) -> Result<NumberValue,EncodeError> {

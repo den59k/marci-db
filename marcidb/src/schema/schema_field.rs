@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt};
 
-use crate::schema::{schema_attributes::{Attribute, parse_attribute}, schema_default_value::FieldDefault};
+use crate::schema::{schema_attributes::{Attribute, FieldCustomFormat, parse_attribute}, schema_default_value::FieldDefault};
 
 #[derive(Debug,Clone)]
 pub enum FieldLocation {
@@ -52,7 +52,8 @@ pub struct Field {
     pub attributes: Vec<Attribute>,
     pub default_value: Option<FieldDefault>,
     pub indexes: Vec<FieldIndex>,
-    pub condition: FieldExistsCondition
+    pub condition: FieldExistsCondition,
+    pub format: Option<FieldCustomFormat>
 }
 
 impl Field {
@@ -66,7 +67,8 @@ impl Field {
             attributes: vec![],
             indexes: vec![],
             default_value: Some(FieldDefault::Counter(0)),
-            condition: FieldExistsCondition::None
+            condition: FieldExistsCondition::None,
+            format: None
         }
     }
 
@@ -78,6 +80,7 @@ impl Field {
         return match self.ty {
             FieldType::Primitive(primitive) => primitive.get_size(),
             FieldType::Enum(_) => Some(2),
+            FieldType::PrimitiveList(ty, Some(size)) => ty.get_size().map(|f| f * size),
             _ => None
         }
     }
@@ -92,12 +95,14 @@ pub enum PrimitiveFieldType {
     Double,
     Bool,
     DateTime,
+    Byte
 }
 
 impl PrimitiveFieldType {
     pub fn get_size(&self) -> Option<usize> {
         return match *self {
             PrimitiveFieldType::Bool => Some(1),
+            PrimitiveFieldType::Byte => Some(1),
             PrimitiveFieldType::Float => Some(4),
             PrimitiveFieldType::Int64 | 
                 PrimitiveFieldType::UInt64 | 
@@ -128,6 +133,7 @@ impl fmt::Display for PrimitiveFieldType {
             PrimitiveFieldType::Float => "float",
             PrimitiveFieldType::Double => "double",
             PrimitiveFieldType::Bool => "bool",
+            PrimitiveFieldType::Byte => "u8",
             PrimitiveFieldType::DateTime => "datetime",
         };
         write!(f, "{}", s)
@@ -241,6 +247,8 @@ pub fn parse_field_raw(line: &str) -> Field {
         location = FieldLocation::Virtual;
     }
 
+    let format = attributes.iter().find_map(|attr| if let Attribute::Format(fmt) = attr { Some(fmt.clone()) } else { None });
+
     Field {
       name,
       full_name: String::new(),
@@ -250,7 +258,8 @@ pub fn parse_field_raw(line: &str) -> Field {
       attributes,
       default_value: None,
       condition: FieldExistsCondition::None,
-      indexes: vec![]
+      indexes: vec![],
+      format
     }
 }
 
@@ -288,6 +297,9 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
         "Bool" => Some(PrimitiveFieldType::Bool),
         "Boolean" => Some(PrimitiveFieldType::Bool),
         "bool" => Some(PrimitiveFieldType::Bool),
+
+        "Byte" => Some(PrimitiveFieldType::Byte),
+        "u8" => Some(PrimitiveFieldType::Byte),
 
         "Int" => Some(PrimitiveFieldType::Int64),
         "i64" => Some(PrimitiveFieldType::Int64),

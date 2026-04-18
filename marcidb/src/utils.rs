@@ -45,11 +45,12 @@ pub fn get_end_optimized(data: &[u8], field: &Field, offset_start: usize, offset
 
 // Вычисляет размер значения из ID
 pub fn get_id_field_size<'a>(id: &'a [u8], field: &Field, offset: usize, schema: &Schema) -> usize {
+  if let Some(size) = field.get_size() {
+    return size
+  }
   match &field.ty {
-    FieldType::Primitive(primitive) => {
-        primitive.get_size().unwrap_or_else(|| {
-            id[offset..].iter().position(|&b| b == b'\0').unwrap_or(id.len()-offset)
-        })
+    FieldType::Primitive(_) => {
+      id[offset..].iter().position(|&b| b == b'\0').unwrap_or(id.len()-offset)
     },
     FieldType::Ref (ref_info) => {
         let ref_entity = &schema.models[ref_info.model_index];

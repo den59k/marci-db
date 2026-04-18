@@ -41,6 +41,7 @@ fn get_primitive_str(ty: &PrimitiveFieldType) -> &str {
     PrimitiveFieldType::UInt64 => "number",
     PrimitiveFieldType::Float => "number",
     PrimitiveFieldType::Double => "number",
+    PrimitiveFieldType::Byte => "number",
     PrimitiveFieldType::Bool => "boolean",
     PrimitiveFieldType::DateTime => "Date | number",
   }

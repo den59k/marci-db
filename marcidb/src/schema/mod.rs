@@ -7,7 +7,7 @@ mod schema_enum;
 mod schema_default_value;
 mod schema_resolve_bindings;
 
-pub use crate::schema::schema_attributes::DeleteConstraint;
+pub use crate::schema::schema_attributes::{DeleteConstraint,FieldCustomFormat};
 pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition,FieldIndex,FieldIndexNum};
 pub use crate::schema::{schema_parse::parse_schema};
 pub use crate::schema::schema_default_value::FieldDefault;

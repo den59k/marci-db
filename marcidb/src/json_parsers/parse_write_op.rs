@@ -119,7 +119,7 @@ fn parse_write_op<'a>(
                 encode_id_value(&mut id, field, schema, value)?;
 
                 // Добавляем нуль-терминатор в id, если размер неизвестен (для разделения)
-                if matches!(field.ty, FieldType::Primitive(ty) if ty.get_size().is_none()) {
+                if !matches!(field.ty, FieldType::Ref(_)) && field.get_size().is_none() {
                     id.push(b'\0');
                     value_data = &id[start_offset..id.len()-1];
                 } else {
@@ -469,6 +469,36 @@ mod tests {
 
             let features_field = st.fields.iter().find(|i| i.name == "features").unwrap();
             assert_eq!(get_data(st, features_field, &ops[0].id, &ops[0].data, &schema), None);
+        }
+    }
+
+    #[test]
+    fn test_encode_bytes() {
+        let schema = parse_schema("
+            model User {
+                uuid        Byte[16]    @id
+                name        String
+                password    Byte[]
+            }
+        ");
+
+        let user_model = &schema.models[0];
+
+        { 
+            let input = json!({
+                "uuid": "559d7a0c-ec2e-4926-99ad-eb6f4a70c789",
+                "name": "Dan",
+                "password": "000000"
+            });
+
+            let encoded = parse_insert(&schema, user_model, &input).unwrap();
+            assert_eq!(encoded.id, vec![ 0x55, 0x9d, 0x7a, 0x0c, 0xec, 0x2e, 0x49, 0x26, 0x99, 0xad, 0xeb, 0x6f, 0x4a, 0x70, 0xc7, 0x89 ]);
+            
+            // Первые 4 байта - размер массива
+            assert_eq!(
+                get_data(user_model, &user_model.fields[2], &encoded.id, &encoded.data, &schema).unwrap(),
+                vec![ 0, 0, 0, 3, 0, 0, 0 ] 
+            );
         }
     }
 }

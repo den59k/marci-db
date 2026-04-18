@@ -8,7 +8,14 @@ pub enum Attribute {
     Unique,
     VectorIndex(VectorIndexType),
     InjectUnresolved(Vec<(String,String)>),
-    OnDelete(DeleteConstraint)
+    OnDelete(DeleteConstraint),
+    Format(FieldCustomFormat)
+}
+
+#[derive(Debug,Clone)]
+pub enum FieldCustomFormat {
+    Uuid,
+    Hex
 }
 
 #[derive(Debug,Clone,PartialEq)]
@@ -56,6 +63,14 @@ pub fn parse_attribute(s: &str) -> Attribute {
 
     if let Some(inside) = s.strip_prefix("inject(").and_then(|x| x.strip_suffix(')')) {
         return Attribute::InjectUnresolved(parse_inject_attrs(inside));
+    }
+
+    if let Some(inside) = s.strip_prefix("format(").and_then(|x| x.strip_suffix(')')) {
+        return Attribute::Format(match inside.to_lowercase().as_str() {
+            "uuid" => FieldCustomFormat::Uuid,
+            "hex" => FieldCustomFormat::Hex,
+            _ => panic!("Unknown onDelete constraint: {}", inside)
+        });
     }
 
     if let Some(inside) = s.strip_prefix("onDelete(").and_then(|x| x.strip_suffix(')')) {

@@ -43,6 +43,7 @@ fn parse_default_value(ty: &PrimitiveFieldType, value: &str, field: &Field) -> F
         PrimitiveFieldType::UInt64 => FieldDefault::Value(value.parse::<u64>().unwrap().to_be_bytes().to_vec()),
         PrimitiveFieldType::Float => FieldDefault::Value(value.parse::<f32>().unwrap().to_be_bytes().to_vec()),
         PrimitiveFieldType::Double => FieldDefault::Value(value.parse::<f64>().unwrap().to_be_bytes().to_vec()),
+        PrimitiveFieldType::Byte => FieldDefault::Value(value.parse::<u8>().unwrap().to_be_bytes().to_vec()),
         PrimitiveFieldType::Bool => {
             match value.to_lowercase().as_str() {
                 "true" => FieldDefault::Value(vec![1]),
