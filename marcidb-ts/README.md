@@ -1,5 +1,9 @@
 # MarciDB JS / TS client generator
 
+## How to run generator from Rust
+
+cargo run -p marcidb-ts
+
 ## How to compile binary
 
 Linux:

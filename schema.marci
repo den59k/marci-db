@@ -1,4 +1,5 @@
 model User {
+    id          Byte[16]      @id   @format(uuid)
     name        String
     info        UserInfo?
     posts       Post[]        @bind(Post.author)

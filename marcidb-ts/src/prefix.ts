@@ -1,5 +1,7 @@
+type ServiceKeys = "$where" | "$order" | "$take" | "$limit";
+
 type GetResult<TModel, TSelect extends Record<string, any>> = {
-  [K in keyof TSelect as TSelect[K] extends false | undefined ? never : K]:
+  [K in keyof Omit<TSelect, ServiceKeys> as TSelect[K] extends false | undefined ? never : K]:
     K extends keyof TModel
       ? TSelect[K] extends true
         ? TModel[K]                          // выбрали поле целиком

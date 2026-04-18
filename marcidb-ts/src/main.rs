@@ -86,11 +86,13 @@ fn get_field_ty(ty: &FieldType, schema: &Schema) -> String {
 
 fn get_field_str(field: &Field, schema: &Schema) -> String { 
   // format!("  {}: {}", field.name, get_field_nullable_ty(&field, schema))
-  if field.nullable {
-    format!("  {}: {} | null", field.name, get_field_ty(&field.ty, schema))
-  } else {
-    format!("  {}: {}", field.name, get_field_ty(&field.ty, schema))
+  let field_nullable = if field.nullable { " | null" } else { "" };
+
+  if field.format.is_some() {
+    return format!("  {}: string{}", field.name, field_nullable)
   }
+
+  format!("  {}: {}{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
 }
 
 fn get_field_select_str(field: &Field, schema: &Schema) -> String {
@@ -144,6 +146,9 @@ fn get_field_insert_str(field: &Field, schema: &Schema) -> String {
         get_model_id_name(&schema.models[ref_info.model_index])
       };
       format!("  {}{}: {}{}", field.name, field_optional, to_insert, field_nullable)
+    },
+    FieldType::PrimitiveList(PrimitiveFieldType::Byte, _) => {
+      format!("  {}{}: {} | string{}", field.name, field_optional, get_field_ty(&field.ty, schema), field_nullable)
     },
     _ => format!("  {}{}: {}{}", field.name, field_optional, get_field_ty(&field.ty, schema), field_nullable)
   }
