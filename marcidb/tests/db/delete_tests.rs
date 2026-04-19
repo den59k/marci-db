@@ -151,7 +151,6 @@ fn delete_many_to_many() {
         ]));        
     }
 
-    println!("Step 2");
     {
         delete_data(&db, "Chat", chat_c);
         assert_eq!(db.count_dev("User.chats->Chat"), 1);

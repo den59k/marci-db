@@ -501,4 +501,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_encode_companion_id() {
+        let schema = parse_schema("
+            model User {
+                name        String
+                chats         ChatUser[]    @bind(ChatUser.user)
+            }
+
+            model Chat {
+                name        String
+                users         ChatUser[]    @bind(ChatUser.chat)
+            }
+
+            model ChatUser {
+                chat          Chat          @id
+                user          User          @id
+            }
+        ");
+        let chat_user_model = &schema.models[2];
+
+        { 
+            let input = json!({
+                "chat": { "id": 1 },
+                "user": { "id": 2 }
+            });
+
+            let encoded = parse_insert(&schema, chat_user_model, &input).unwrap();
+            assert_eq!(encoded.id, vec![ 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2 ]);
+        }
+    }
 }

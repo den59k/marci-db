@@ -10,22 +10,22 @@ pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Transati
     Where::Or(items) => items.iter().any(|f| process_where(id, body, ctx, entity, f)),
     Where::Not(where_op) => !process_where(id, body, ctx, entity, where_op),
     Where::Field(field, field_compare) => {
-      if let FieldCompare::Ref(entity, prefix_key, field_compare_ref) = field_compare {
+      if let FieldCompare::Ref(ref_entity, prefix_key, field_compare_ref) = field_compare {
         match field_compare_ref {
           FieldCompareRef::Every(where_op) => {
-            return has_items(ctx,  *entity, where_op, prefix_key, entity, id, body, true)
+            return has_items(ctx,  *ref_entity, where_op, prefix_key, entity, id, body, true)
           },
           FieldCompareRef::Some(where_op) => {
-            return has_items(ctx,  *entity, where_op, prefix_key, entity, id, body, false)
+            return has_items(ctx,  *ref_entity, where_op, prefix_key, entity, id, body, false)
           },
           FieldCompareRef::None(where_op) => {
-            return !has_items(ctx,  *entity, where_op, prefix_key, entity, id, body, false)
+            return !has_items(ctx,  *ref_entity, where_op, prefix_key, entity, id, body, false)
           },
           FieldCompareRef::Eq(where_op) => {
-            return has_one_item(ctx, *entity, where_op, prefix_key, entity, id, body)
+            return has_one_item(ctx, *ref_entity, where_op, prefix_key, entity, id, body)
           },
           FieldCompareRef::Ne(where_op) => {
-            return !has_one_item(ctx, *entity, where_op, prefix_key, entity, id, body)
+            return !has_one_item(ctx, *ref_entity, where_op, prefix_key, entity, id, body)
           }
         }
       }

@@ -118,17 +118,20 @@ fn update_rev_index(field: &mut Field, field_ref: &FieldRef, rev_field_ref: &Fie
 pub fn resolve_ref_bindings(models: &mut [Entity]) {
     let model_names: Vec<String> = models.iter().map(|f| f.name.clone()).collect();
     for model in models.iter_mut() {
+        let key_fields_count = model.fields.iter().filter(|f| matches!(f.location, FieldLocation::Key { .. })).count();
         for (field_index, field) in model.fields.iter_mut().enumerate() {
             let (FieldType::Ref(ref_info) | FieldType::RefList(ref_info)) = &mut field.ty else {
                 continue;
             };
 
             // Мы не ставим индексы для первого поля, поскольку такой элемент можно просто найти по ключу
-            if field_index == 0 {
+            if field_index == 0 && key_fields_count == 1 {
+                ref_info.binding = RefBinding::CurrentId;
                 continue;
             }
-            // То же самое касается таблицы на которую ссылаемся - если поле стоит первым элементом, то он находится сразу в таблице
+            // То же самое касается таблицы на которую ссылаемся - если поле в ней стоит первым, то этот элемент находится сразу в таблице
             if let Some(ref_field_idx) = ref_info.rev_field_idx && ref_field_idx == 0 { 
+                ref_info.binding = RefBinding::CurrentId;
                 continue;
             }
             // Также нам незачем ставить индексы на не виртуальные поля, если нет обратной ссылки
