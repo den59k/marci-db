@@ -26,6 +26,12 @@ pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Transati
           },
           FieldCompareRef::Ne(where_op) => {
             return !has_one_item(ctx, *ref_entity, where_op, prefix_key, entity, id, body)
+          },
+          FieldCompareRef::Exists => {
+            return has_one_item_exists(ctx, *ref_entity, prefix_key, entity, id, body)
+          },
+          FieldCompareRef::NotExists => {
+            return !has_one_item_exists(ctx, *ref_entity, prefix_key, entity, id, body)
           }
         }
       }
@@ -124,13 +130,33 @@ pub fn has_one_item<'a, F>(
   parent_body: &[u8],
 ) -> bool {
 
-  let Some(prefix) = get_prefix(prefix_key, Some((parent_entity, parent_id, parent_body)), ctx.schema) else {
+  let Some(item_id) = get_prefix(prefix_key, Some((parent_entity, parent_id, parent_body)), ctx.schema) else {
+    return false;
+  };
+
+  if where_op.only_id_required(entity) {
+    return process_where(&item_id, &[], ctx, entity, where_op)
+  }
+
+  let tree = ctx.get_tree(&entity.name);
+  let Some(value) = tree.get(item_id).unwrap() else {
+    return false;
+  };
+  return process_where(&item_id, &value, ctx, entity, where_op)
+}
+
+pub fn has_one_item_exists<'a, F>(
+  ctx: &mut TransationContext<'a, F>, 
+  entity: &Entity, 
+  prefix_key: &PrefixKey, 
+  parent_entity: &Entity,
+  parent_id: &[u8], 
+  parent_body: &[u8],
+) -> bool {
+  let Some(item_id) = get_prefix(prefix_key, Some((parent_entity, parent_id, parent_body)), ctx.schema) else {
     return false;
   };
 
   let tree = ctx.get_tree(&entity.name);
-  let Some(value) = tree.get(prefix).unwrap() else {
-    return false;
-  };
-  return process_where(&prefix, &value, ctx, entity, where_op)
+  return tree.prefix_keys(&item_id).unwrap().next().is_some()
 }

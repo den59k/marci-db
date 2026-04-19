@@ -1,4 +1,4 @@
-use crate::{Field, num_utils::NumberValue, query_op::PrefixKey, schema::{Entity}};
+use crate::{Field, FieldLocation, num_utils::NumberValue, query_op::PrefixKey, schema::Entity};
 
 #[derive(Debug, Clone)]
 pub enum Where<'a> {
@@ -32,5 +32,22 @@ pub enum FieldCompareRef<'a> {
     Some(Box<Where<'a>>),
     None(Box<Where<'a>>),
     Eq(Box<Where<'a>>),
-    Ne(Box<Where<'a>>)
+    Ne(Box<Where<'a>>),
+    Exists,
+    NotExists
+}
+
+
+impl Where<'_> {
+    pub fn only_id_required(&self, entity: &Entity) -> bool {
+        return match self {
+            Where::True => true,
+            Where::And(items) => items.iter().all(|i| i.only_id_required(entity)),
+            Where::Or(items) => items.iter().all(|i| i.only_id_required(entity)),
+            Where::Not(item) => item.only_id_required(entity),
+            Where::Field(field, _) => {
+                return matches!(field.location, FieldLocation::Key { .. })
+            },
+        };
+    }
 }

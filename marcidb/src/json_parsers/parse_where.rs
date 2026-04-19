@@ -75,7 +75,7 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
       let prefix = get_prefix_key(&ref_info.binding, field);
 
       if value.is_null() {
-        return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Ne(Box::new(Where::True))))
+        return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::NotExists))
       }
       let Some(obj) = value.as_object() else {
         return Err(EncodeError::type_mismatch(field, "object"))
@@ -85,7 +85,7 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
         let (key, value) = obj.iter().next().unwrap();
         match key.as_str() {
           "$ne" | "$not" => {
-            if value.is_null() { return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Eq(Box::new(Where::True))))  }
+            if value.is_null() { return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Exists))  }
             let filter = Box::new(parse_where(schema, entity, value)?);
             return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Ne(filter)))
           }

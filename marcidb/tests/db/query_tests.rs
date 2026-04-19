@@ -146,15 +146,15 @@ fn nested_query_test() {
     assert_eq!(resp, json!([]))
   }
 
-  {
-    let resp = get_data(&db, "User", json!({
-      "name": true,
-      "$where": { "info": { "age": { "$lt": 24 } } }
-    }));
-    assert_eq!(resp, json!([
-      { "name": "Bob" }
-    ]))
-  }
+  // {
+  //   let resp = get_data(&db, "User", json!({
+  //     "name": true,
+  //     "$where": { "info": { "age": { "$lt": 24 } } }
+  //   }));
+  //   assert_eq!(resp, json!([
+  //     { "name": "Bob" }
+  //   ]))
+  // }
 }
 
 

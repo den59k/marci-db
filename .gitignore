@@ -5,3 +5,6 @@
 /mock
 
 .env
+
+index.js
+index.d.ts
