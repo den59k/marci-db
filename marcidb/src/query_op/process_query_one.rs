@@ -25,11 +25,12 @@ where
             if ids.is_empty() {
               return None
             }
-            let id = &ids[0];
-
+            
             let tree = ctx.get_tree(&query.entity.name);
-            let value = tree.get(id).unwrap().unwrap();
-            return process_data(id, &value, ctx, query)
+            ids.iter().find_map(|id| {
+                let value = tree.get(id).unwrap().unwrap();
+                return process_data(id, &value, ctx, query)
+            })
         }
 
         Some(prefix_key) => {
@@ -43,11 +44,10 @@ where
         None => {
             let tree = ctx.get_tree(&query.entity.name);
             
-            let Some(item) = tree.iter().unwrap().next() else {
-                return None
-            };
-            let (id, data) = item.unwrap();
-            return process_data(&id, &data, ctx, query);
+            tree.iter().unwrap().find_map(| item | {
+                let (id, data) = item.unwrap();
+                process_data(&id, &data, ctx, query)
+            })
         }
     }
 }
