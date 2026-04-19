@@ -29,25 +29,25 @@ model Post {
 2. Generate the client:
 
 ```bash
-marci generate
+marcidb generate
 # or with custom paths
-marci generate schema.marci node_modules/.marcidb/client
+marcidb generate schema.marci node_modules/.marcidb/client
 ```
 
 3. Start your MarciDB server and connect:
 
 ```typescript
-import { marci } from "marcidb-client";
+import { marcidb } from "marcidb-client";
 
-const db = marci("http://localhost:3000");
+const db = marcidb("http://localhost:3000");
 ```
 
 ## Usage
 
 ```typescript
-import { marci } from "marcidb-client";
+import { marcidb } from "marcidb-client";
 
-const db = marci("http://localhost:3000");
+const db = marcidb("http://localhost:3000");
 
 // Find
 const users = await db.user.findMany({
@@ -79,7 +79,7 @@ await db.user.delete({ id: 1 });
 After every change to `schema.marci`, re-run:
 
 ```bash
-marci generate
+marcidb generate
 ```
 
 If types don't update in VSCode, run **TypeScript: Restart TS Server** (`Ctrl+Shift+P`).
