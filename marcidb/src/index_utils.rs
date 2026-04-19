@@ -37,6 +37,12 @@ fn generate_prefix<'a>(val: Vec<u8>, tree_name: &String) -> Option<PrefixKey<'a>
   Some(PrefixKey::IndexRange { start: Some(val), end, tree_name: tree_name.clone(), fixed_size })
 }
 
+#[inline]
+fn generate_prefix_starts_with<'a>(val: Vec<u8>, tree_name: &String) -> Option<PrefixKey<'a>> {
+  let end = increase_bit(&val);
+  Some(PrefixKey::IndexRange { start: Some(val), end, tree_name: tree_name.clone(), fixed_size: None })
+}
+
 pub fn encode_full_index(field: &Field, index: &FieldIndex, id: &[u8], value: &[u8]) -> Vec<u8> {
   let value = encode_index(field, index, value);
   [ value.as_slice(), &id ].concat()
@@ -158,6 +164,8 @@ pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> O
             FieldIndex::Value { tree_name,  .. } => {
               return match field_compare {
                   FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name),
+                  // Здесь мы не ставим нуль терминатор в конец, поскольку не обязательно, чтобы длина строк совпадала
+                  FieldCompare::StringStartsWith(val) => generate_prefix_starts_with(val.clone(), tree_name), 
                   _ => None
               }
             }
@@ -180,7 +188,7 @@ pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> O
               }
             },
             FieldIndex::Custom { .. } => {
-              todo!("Custom indexes not supported yet")
+              todo!("Custom indexes are not supported yet")
             },
         }
       }

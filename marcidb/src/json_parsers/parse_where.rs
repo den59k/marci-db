@@ -154,6 +154,14 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
         let (buf, has_null) = parse_field_value_in(field, value)?;
         Ok(FieldCompare::NotIn(buf, has_null))
       },
+      "$startsWith" => {
+        let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
+        Ok(FieldCompare::StringStartsWith(value.as_bytes().to_vec()))
+      },
+      "$includes" => {
+        let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
+        Ok(FieldCompare::StringIncludes(value.as_bytes().to_vec()))
+      },
       _ => return Err(EncodeError::UnsupportedOperation(key.clone())),
     }
   } else {

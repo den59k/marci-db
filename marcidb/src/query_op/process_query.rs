@@ -80,7 +80,7 @@ pub fn get_id_from_index_key(key: &[u8], fixed_size: Option<usize>) -> Vec<u8> {
     let Some(pos) = key.iter().position(|&b| b == b'\0') else {
       panic!("Not found null-terminator in variable length index")
     };
-    return key[pos..].to_vec();
+    return key[pos+1..].to_vec();
   }
 }
 

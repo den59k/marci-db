@@ -1,3 +1,5 @@
+use memchr::memmem;
+
 use crate::{query_op::{FieldCompare, FieldCompareRef, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
 
 pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut TransationContext<'a, F>, entity: &Entity, where_op: &Where<'a>) -> bool {
@@ -47,10 +49,14 @@ pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Transati
         FieldCompare::NotIn(items, _) => items.iter().all(|f| f != data),
         FieldCompare::Eq(f) => f == data,
         FieldCompare::Ne(f) => f != data,
+
         FieldCompare::Gt(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_gt()).unwrap_or(false),
         FieldCompare::Gte(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_ge()).unwrap_or(false),
         FieldCompare::Lt(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_lt()).unwrap_or(false),
         FieldCompare::Lte(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_le()).unwrap_or(false),
+
+        FieldCompare::StringStartsWith(value) => data.starts_with(value),
+        FieldCompare::StringIncludes(value) => memmem::find(data, value).is_some(),
 
         _ => false
       }

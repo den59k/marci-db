@@ -22,6 +22,8 @@ pub enum FieldCompare<'a> {
     Gte(NumberValue),
     Lt(NumberValue),
     Lte(NumberValue),
+    StringStartsWith(Vec<u8>),
+    StringIncludes(Vec<u8>)
 }
 
 #[derive(Debug, Clone)]

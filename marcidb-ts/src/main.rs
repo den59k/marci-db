@@ -118,7 +118,9 @@ fn get_field_where_str(field: &Field, schema: &Schema) -> String {
     },
     FieldType::Primitive(ty) => {
       if ty.get_num_type().is_some() {
-        format!("  {}?: CompareNumValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
+        format!("  {}?: CompareNumValue<{}>{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
+      } else if matches!(ty, PrimitiveFieldType::String) {
+        format!("  {}?: CompareStrValue{}", field.name, field_nullable)
       } else {
         format!("  {}?: CompareValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
       }

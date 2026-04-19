@@ -77,4 +77,22 @@ fn query_indexes_test() {
     assert_eq!(data, json!({ "title": "Second Alice post" }))
   }
 
+    {
+      let data = get_data(&db, "Post", json!({
+        "title": true,
+        "$where": { "title": { "$includes": "Alice" } }
+      }));
+      assert_eq!(data, json!([
+        { "title": "Last Alice post" }, { "title": "Second Alice post" }, { "title": "First Alice post" }
+      ]))
+    }
+
+  {
+    let data = get_data_one(&db, "User", json!({
+      "name": true,
+      "$where": { "email": { "$startsWith": "alice" } }
+    }));
+    assert_eq!(data, json!({ "name": "Alice" }))
+  }
+
 }
