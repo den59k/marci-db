@@ -6,7 +6,9 @@ type GetResult<TModel, TSelect extends Record<string, any>> = {
       ? TSelect[K] extends true
         ? TModel[K]                          // выбрали поле целиком
         : TSelect[K] extends Record<string, any>
-          ? GetResult<NonNullable<TModel[K]>, TSelect[K]> | (null extends TModel[K] ? null : never)
+          ? TModel[K] extends readonly object[]
+            ? GetResult<NonNullable<TModel[K][number]>, TSelect[K]>[]
+            : GetResult<NonNullable<TModel[K]>, TSelect[K]> | Extract<TModel[K], null>
           : TModel[K]                        // fallback
       : never
 }

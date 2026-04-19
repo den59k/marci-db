@@ -84,9 +84,13 @@ fn get_field_ty(ty: &FieldType, schema: &Schema) -> String {
 //   }
 // }
 
+fn get_field_nullable(field: &Field) -> &str {
+  if field.nullable && !matches!(field.ty, FieldType::RefList(_)) { " | null" } else { "" }
+}
+
 fn get_field_str(field: &Field, schema: &Schema) -> String { 
   // format!("  {}: {}", field.name, get_field_nullable_ty(&field, schema))
-  let field_nullable = if field.nullable { " | null" } else { "" };
+  let field_nullable = get_field_nullable(field);
 
   if field.format.is_some() {
     return format!("  {}: string{}", field.name, field_nullable)
