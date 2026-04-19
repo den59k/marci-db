@@ -35,8 +35,8 @@ type RefListUpdateStruct<I,U> = {
 type WhereValue<T> = T | { "$and": T[] } | { "$or": T[] } | { "$not": T }
 
 type CompareValue<T> = T | { "$eq": T } | { "$not": T } | { "$in": T[] } | { "$notIn": T[] }
-type CompareNumValue<T> = CompareValue<T> | { "$gt": T } | { "$gte": T } | { "$lt": T } | { "$lte": T }
-type CompareStrValue = CompareValue<string> | { "$includes": string,  } | { "$startsWith": string }
+type CompareNumValue<T> = { "$gt": T } | { "$gte": T } | { "$lt": T } | { "$lte": T }
+type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
 type CompareRefValue<T> = T | { "$not": T }
 type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
