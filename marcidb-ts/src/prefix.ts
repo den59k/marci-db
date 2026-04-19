@@ -40,4 +40,4 @@ type CompareStrValue = CompareValue<string> | { "$includes": string,  } | { "$st
 type CompareRefValue<T> = T | { "$not": T }
 type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
-export declare function marci(url: string): MarciDB;
+export declare function marcidb(url: string): MarciDB;

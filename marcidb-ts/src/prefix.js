@@ -1,6 +1,6 @@
 import { request, encodeId } from 'marcidb-client/runtime'
 
-export function marci(url) {
+export function marcidb(url) {
 
   const findMany = (model, select) => {
     return request("POST", `${url}/${model}/findMany`, select);
