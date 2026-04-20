@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_one, process_query_many}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
+use crate::{Field, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, utils::get_data, write_op::{InsertError, WriteOp, process_write}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -115,14 +115,14 @@ impl MarciDB {
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {
   let mut counters = Vec::with_capacity(schema.models.len());
-  for model in schema.models.iter() {
-    let model_tree = rx.get_tree(model.name.as_bytes()).unwrap().unwrap();
+  for entity in schema.models.iter() {
+    let model_tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
 
-    for field in model.fields.iter() {
+    for field in entity.fields.iter() {
       if let Some(FieldDefault::Counter(counter_idx)) = field.default_value {
         counters.resize(counter_idx+1, Arc::new(AtomicU64::new(0)));
         
-        let max_id = get_max_id(&model_tree);
+        let max_id = get_max_id(&model_tree, entity, field, schema);
         counters[counter_idx] = Arc::new(AtomicU64::new(max_id));
       }
     }
@@ -130,8 +130,11 @@ fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {
   return counters;
 }
 
-pub fn get_max_id(tree: &Tree) -> u64 {
+pub fn get_max_id(tree: &Tree, entity: &Entity, field: &Field, schema: &Schema) -> u64 {
   return tree.last().unwrap()
-    .map(|(key, _)| u64::from_be_bytes(key.as_ref().try_into().unwrap()) + 1)
+    .map(|(id, body)| {
+      let data = get_data(entity, field, &id, &body, schema).unwrap();
+      u64::from_be_bytes(data.try_into().unwrap()) + 1
+    })
     .unwrap_or(1);
 }
