@@ -56,6 +56,108 @@ pub fn encode_enum(dst: &mut Vec<u8>, field: &Field, enum_def: &EnumInfo, v: &Va
     Ok(())
 }
 
+pub fn encode_enum_list(
+    dst: &mut Vec<u8>,
+    field: &Field,
+    enum_def: &EnumInfo,
+    v: &Value,
+) -> Result<(), EncodeError> {
+    let Some(arr) = v.as_array() else {
+        return Err(EncodeError::type_mismatch(field, "Array"));
+    };
+
+    let list_start = dst.len();
+
+    dst.extend_from_slice(&(arr.len() as u32).to_be_bytes());
+
+    let outer_table_start = dst.len();
+    dst.resize(dst.len() + (arr.len() + 1) * 4, 0);
+
+    for (item_idx, item) in arr.iter().enumerate() {
+        // Записываем offset этого item во внешнюю таблицу
+        let item_offset_from_list = (dst.len() - list_start) as u32;
+        let entry_pos = outer_table_start + item_idx * 4;
+        dst[entry_pos..entry_pos + 4].copy_from_slice(&item_offset_from_list.to_be_bytes());
+
+        let (variant_str, payload) = match item {
+            Value::String(s) => (s.as_str(), None::<&serde_json::Map<String, Value>>),
+            Value::Object(obj) => {
+                let s = obj
+                    .get("$variant")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| EncodeError::TypeMismatch {
+                        field: field.name.clone(),
+                        expected: "object with \"$variant\" key".to_string(),
+                    })?;
+                (s, Some(obj))
+            }
+            _ => {
+                return Err(EncodeError::type_mismatch(
+                    field,
+                    "string or {\"$variant\": ...}",
+                ))
+            }
+        };
+
+        let &variant_idx = enum_def
+            .variants_map
+            .get(variant_str)
+            .ok_or_else(|| EncodeError::type_mismatch(field, enum_def.keys_to_string()))?;
+
+        let item_start = dst.len();
+
+        dst.extend_from_slice(&variant_idx.to_be_bytes());
+
+        let variant_fields = enum_def
+            .variant_fields
+            .get(&variant_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        if !variant_fields.is_empty() {
+            let inner_table_start = dst.len();
+            dst.resize(dst.len() + variant_fields.len() * 4, 0);
+
+            for (fi, vf) in variant_fields.iter().enumerate() {
+                let offset_entry_pos = inner_table_start + fi * 4;
+
+                let val = payload.and_then(|p| p.get(&vf.name));
+                let val = match val {
+                    Some(v) if !v.is_null() => v,
+                    _ => continue,
+                };
+
+                let field_data_offset = (dst.len() - item_start) as u32;
+                dst[offset_entry_pos..offset_entry_pos + 4]
+                    .copy_from_slice(&field_data_offset.to_be_bytes());
+
+                match &vf.ty {
+                    FieldType::Primitive(pt) => encode_primitive_value(dst, vf, pt, val)?,
+                    FieldType::PrimitiveList(pt, fixed_size) => {
+                        encode_list(dst, val, vf, pt, *fixed_size)?
+                    }
+                    FieldType::Enum(en) => encode_enum(dst, vf, en, val)?,
+                    _ => {
+                        return Err(EncodeError::UnsupportedOperation(format!(
+                            "Unsupported field type in EnumList variant: {}",
+                            vf.full_name
+                        )))
+                    }
+                }
+            }
+        }
+
+        let _ = item_start;
+    }
+
+    let sentinel = (dst.len() - list_start) as u32;
+    let sentinel_pos = outer_table_start + arr.len() * 4;
+    dst[sentinel_pos..sentinel_pos + 4].copy_from_slice(&sentinel.to_be_bytes());
+
+    Ok(())
+}
+
+
 fn insert_list_counter(current_len: usize, dst: &mut Vec<u8>, fixed_size: Option<usize>, field: &Field, ty: &PrimitiveFieldType) -> Result<(), EncodeError>  {
     if let Some(fixed_size) = fixed_size {
         if current_len != fixed_size {

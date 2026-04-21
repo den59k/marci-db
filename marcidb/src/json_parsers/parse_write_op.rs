@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_enum_list, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -149,6 +149,10 @@ fn parse_write_op<'a>(
                     FieldType::Enum(enum_def) => {
                         write_header(&mut data, offset_pos);
                         encode_enum(&mut data, field, enum_def, value)?;
+                    }
+                    FieldType::EnumList(enum_def) => {
+                        write_header(&mut data, offset_pos);
+                        encode_enum_list(&mut data, field, enum_def, value)?;
                     }
                     _ => { 
                         return Err(EncodeError::UnavailableKeyField(field.full_name.clone()));

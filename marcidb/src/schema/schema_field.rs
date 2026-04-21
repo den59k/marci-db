@@ -151,14 +151,16 @@ pub enum FieldType {
     // RefList - это всегда Virtual поле, то есть он хранит инфо только в индексе
     RefList(RefInfo),
     PrimitiveList(PrimitiveFieldType, Option<usize>),
-    Enum(EnumInfo)
+    Enum(EnumInfo),
+    EnumList(EnumInfo)
 }
 
 #[derive(Debug, Clone)]
 pub struct EnumInfo {
     pub variants: HashMap<u16,Vec<usize>>,
     pub variants_map: HashMap<String,u16>,
-    pub variants_names_map: HashMap<u16,String> // Обратная map к variants_map
+    pub variants_names_map: HashMap<u16,String>, // Обратная map к variants_map
+    pub variant_fields: HashMap<u16, Vec<Field>>
 }
 
 impl EnumInfo {

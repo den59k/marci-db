@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{ReadTransaction, Tree};
 
-use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::{get_data, check_exists_condition}};
 
 pub type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
@@ -99,6 +99,9 @@ pub fn process_data<'a, 'b, U, F>(
   let mut includes: Vec<IncludeResult<U>> = Vec::with_capacity(query.includes.len());
 
   for include in query.includes.iter() {
+    if !check_exists_condition(query.entity, &include.field.condition, id, data, ctx.schema) {
+      continue;
+    }
     match include.query_type {
       QueryType::One => {
         if let Some(result) = process_query_one(&include.query, ctx, Some((query.entity,id,data))) {

@@ -23,7 +23,10 @@ pub enum FieldCompare<'a> {
     Lt(NumberValue),
     Lte(NumberValue),
     StringStartsWith(Vec<u8>),
-    StringIncludes(Vec<u8>)
+    StringIncludes(Vec<u8>),
+    EnumListSome(EnumListFilter<'a>),
+    EnumListEvery(EnumListFilter<'a>),
+    EnumListNone(EnumListFilter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +40,20 @@ pub enum FieldCompareRef<'a> {
     NotExists
 }
 
+#[derive(Debug, Clone)]
+pub struct EnumListFilter<'a> {
+    pub variant_idx: Option<u16>,
+    pub field_filters: Vec<EnumListFieldFilter<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumListFieldFilter<'a> {
+    pub variant_idx: u16,
+    pub field_idx: usize,
+    pub num_variant_fields: usize,
+    pub field: &'a Field,
+    pub compare: FieldCompare<'a>,
+}
 
 impl Where<'_> {
     pub fn only_id_required(&self, entity: &Entity) -> bool {

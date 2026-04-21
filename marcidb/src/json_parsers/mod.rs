@@ -12,4 +12,4 @@ pub use crate::json_parsers::parse_update_op::{parse_update};
 pub use crate::json_parsers::parsers::{EncodeError,parse_id};
 
 #[cfg(test)]
-pub(crate) use crate::json_parsers::parsers::{encode_list};
+pub(crate) use crate::json_parsers::parsers::{encode_list, encode_enum_list};

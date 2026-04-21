@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{FieldCompare, FieldCompareRef, Where}, schema::{Entity, FieldType, Schema}};
+use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{EnumListFieldFilter, EnumListFilter, FieldCompare, FieldCompareRef, Where}, schema::{EnumInfo, Entity, FieldType, Schema}};
 
 /// Парсит JSON объект в where условие
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,EncodeError> {
@@ -114,7 +114,33 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
         _ => Err(EncodeError::UnsupportedOperation(key.clone()))
       };
     },
-    _ => { }
+    FieldType::EnumList(enum_info) => {
+      // Допускаем строку как сокращение для { "$some": "variant" }
+      if let Some(s) = value.as_str() {
+        let filter = parse_enum_list_item_filter(field, enum_info, &serde_json::json!({ "$variant": s }))?;
+        return Ok(FieldCompare::EnumListSome(filter));
+      }
+
+      let Some(obj) = value.as_object() else {
+        return Err(EncodeError::type_mismatch(field, "object with $some/$every/$none"));
+      };
+      if obj.len() != 1 {
+        return Err(EncodeError::OnlyOneKeyExpected(
+          field.full_name.clone(), value.to_string()
+        ));
+      }
+      let (key, filter_val) = obj.iter().next().unwrap();
+      let filter = parse_enum_list_item_filter(field, enum_info, filter_val)?;
+
+      return match key.as_str() {
+        "$some"  => Ok(FieldCompare::EnumListSome(filter)),
+        "$every" => Ok(FieldCompare::EnumListEvery(filter)),
+        "$none"  => Ok(FieldCompare::EnumListNone(filter)),
+        _ => Err(EncodeError::UnsupportedOperation(key.clone())),
+      };
+    },
+
+    _ => {}
   }
 
   if value.is_null() { return Ok(FieldCompare::EqNull) }
@@ -202,12 +228,111 @@ fn parse_field_value_in(field: &Field, value: &Value) -> Result<(Vec<Vec<u8>>,bo
   Ok((buf,has_null))
 }
 
+fn parse_enum_list_item_filter<'a>(
+  field: &'a Field,
+  enum_info: &'a EnumInfo,
+  value: &Value,
+) -> Result<EnumListFilter<'a>, EncodeError> {
+  // Допускаем строку как { "$variant": "name" }
+  if let Some(s) = value.as_str() {
+    let &variant_idx = enum_info.variants_map.get(s)
+        .ok_or_else(|| EncodeError::type_mismatch(field, enum_info.keys_to_string()))?;
+    return Ok(EnumListFilter { variant_idx: Some(variant_idx), field_filters: vec![] });
+  }
+
+  let Some(obj) = value.as_object() else {
+    return Err(EncodeError::type_mismatch(field, "string or object"));
+  };
+
+  // Читаем $variant если есть
+  let variant_idx = if let Some(v) = obj.get("$variant") {
+    let s = v.as_str()
+        .ok_or_else(|| EncodeError::type_mismatch(field, "string"))?;
+    Some(*enum_info.variants_map.get(s)
+        .ok_or_else(|| EncodeError::type_mismatch(field, enum_info.keys_to_string()))?)
+  } else {
+    None
+  };
+
+  // Определяем, по каким вариантам искать поля
+  let variants_to_search: Vec<u16> = if let Some(vi) = variant_idx {
+    vec![vi]
+  } else {
+    enum_info.variant_fields.keys().copied().collect()
+  };
+
+  let mut field_filters = vec![];
+
+  for &vi in &variants_to_search {
+    let Some(vfields) = enum_info.variant_fields.get(&vi) else { continue };
+    let num_variant_fields = vfields.len();
+
+    for (fi, vf) in vfields.iter().enumerate() {
+      let Some(field_val) = obj.get(&vf.name) else { continue };
+
+      // Рекурсивно парсим сравнение для примитивного поля варианта
+      let compare = parse_field_compare_primitive(vf, field_val)?;
+
+      field_filters.push(EnumListFieldFilter {
+        variant_idx: vi,
+        field_idx: fi,
+        num_variant_fields,
+        field: vf,
+        compare,
+      });
+    }
+  }
+
+  Ok(EnumListFilter { variant_idx, field_filters })
+}
+
+/// Упрощённый parse_field_compare для примитивных типов внутри EnumList-вариантов
+fn parse_field_compare_primitive<'a>(
+  field: &'a Field,
+  value: &Value,
+) -> Result<FieldCompare<'a>, EncodeError> {
+  if value.is_null() {
+    return Ok(FieldCompare::EqNull);
+  }
+
+  if let Some(obj) = value.as_object() {
+    if obj.len() != 1 {
+      return Err(EncodeError::OnlyOneKeyExpected(field.full_name.clone(), value.to_string()));
+    }
+    let (key, val) = obj.iter().next().unwrap();
+    return match key.as_str() {
+      "$eq"  => {
+        if val.is_null() { return Ok(FieldCompare::EqNull); }
+        Ok(FieldCompare::Eq(parse_field_value_binary(field, val)?))
+      },
+      "$ne" | "$not" => {
+        if val.is_null() { return Ok(FieldCompare::NeNull); }
+        Ok(FieldCompare::Ne(parse_field_value_binary(field, val)?))
+      },
+      "$gt"  => Ok(FieldCompare::Gt(parse_field_value_num(field, val)?)),
+      "$gte" => Ok(FieldCompare::Gte(parse_field_value_num(field, val)?)),
+      "$lt"  => Ok(FieldCompare::Lt(parse_field_value_num(field, val)?)),
+      "$lte" => Ok(FieldCompare::Lte(parse_field_value_num(field, val)?)),
+      "$in"  => {
+        let (buf, has_null) = parse_field_value_in(field, val)?;
+        Ok(FieldCompare::In(buf, has_null))
+      },
+      "$notIn" => {
+        let (buf, has_null) = parse_field_value_in(field, val)?;
+        Ok(FieldCompare::NotIn(buf, has_null))
+      },
+      _ => Err(EncodeError::UnsupportedOperation(key.clone())),
+    };
+  }
+
+  Ok(FieldCompare::Eq(parse_field_value_binary(field, value)?))
+}
+
 #[cfg(test)]
 mod tests {
   use serde_json::json;
-  use std::assert_matches;
-
-use crate::{json_parsers::parse_where::parse_where, num_utils::NumberValue, parse_schema, query_op::{FieldCompare, Where}};
+  use std::assert_matches::assert_matches;
+  use crate::{json_parsers::parse_where::parse_where, num_utils::NumberValue, parse_schema, query_op::{FieldCompare, Where}};
 
   #[test]
   fn basic_where_test() {

@@ -149,14 +149,40 @@ fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Enti
 
                 if let Some(enum_def) = enums.get(name) {
                     if matches!(&field.ty, FieldType::RefListUnresolved(_)) {
-                        panic!("{}[]: Enum list is not supported!", field.name)
+                        let mut variant_fields_map: HashMap<u16, Vec<Field>> = HashMap::new();
+                        for (variant_name, raw_fields) in enum_def.variants.iter() {
+                            let &variant_idx = enum_def.variants_map.get(variant_name).unwrap();
+                            let mut resolved = Vec::new();
+                            for (fi, raw_field) in raw_fields.iter().enumerate() {
+                                let mut f = raw_field.clone();
+                                f.full_name = format!(
+                                    "{}[{}={}].{}",
+                                    entity.name, field.name, variant_name, f.name
+                                );
+                                f.location = FieldLocation::Body { offset_pos: 2 + fi * 4 };
+                                resolved.push(f);
+                            }
+                            variant_fields_map.insert(variant_idx, resolved);
+                        }
+
+                        let enum_info = EnumInfo {
+                            variants: enum_def.variants_map.values().map(|&v| (v, vec![])).collect(),
+                            variants_map: enum_def.variants_map.clone(),
+                            variants_names_map: create_variants_names_map(&enum_def.variants_map),
+                            variant_fields: variant_fields_map,
+                        };
+
+                        entity.fields[i].ty = FieldType::EnumList(enum_info);
+                        // RefListUnresolved по умолчанию Virtual — нам нужен Body
+                        entity.fields[i].location = FieldLocation::Body { offset_pos: 0 };
+                        entity.fields[i].nullable = false;
+                        i += 1;
+                        continue;
                     }
 
                     let field_name = field.name.clone();
                     let enum_info = create_enum_info(enum_def, entity, &field_name, i);
-
                     entity.fields[i].ty = FieldType::Enum(enum_info);
-
                     i += 1;
                     continue;
                 }
@@ -212,7 +238,8 @@ fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String
     EnumInfo { 
         variants, 
         variants_map: enum_def.variants_map.clone(), 
-        variants_names_map: create_variants_names_map(&enum_def.variants_map) 
+        variants_names_map: create_variants_names_map(&enum_def.variants_map),
+        variant_fields: HashMap::new()
     }
 }
 
@@ -298,13 +325,20 @@ fn resolve_ref_constraints(models: &mut [Entity]) {
                                 continue;
                             },
                             RefBinding::FieldValue => DeleteConstraint::SetNull,
-                            RefBinding::IndexTree(_) => { continue; }
-                       };
+                            RefBinding::IndexTree(_) => {
+                                // Как и RefList с IndexTree — при удалении дочернего объекта нужно убрать запись из индекса
+                                refs[ref_info.model_index].push(EntityDependency {
+                                    model_index: model_index,
+                                    field_index: field_index,
+                                    constraint: DeleteConstraint::RemoveItem
+                                });
+                                continue;
+                            }
+                        };
                     }
-
-                    refs[ref_info.model_index].push(EntityDependency { 
-                        model_index: model_index, 
-                        field_index: field_index, 
+                    refs[ref_info.model_index].push(EntityDependency {
+                        model_index: model_index,
+                        field_index: field_index,
                         constraint
                     });
                 }
@@ -370,7 +404,7 @@ fn resolve_indexes(model: &mut Entity) {
                         field.indexes.push(FieldIndex::Value { tree_name: format!("index_{}", field.full_name), unique });
                     }
                 },
-                FieldType::Enum(_) | FieldType::PrimitiveList(_, _) => {
+                FieldType::Enum(_) | FieldType::PrimitiveList(_, _) | FieldType::EnumList(_) => {
                     field.indexes.push(FieldIndex::Value { tree_name: format!("index_{}", field.full_name), unique });
                 }
                 FieldType::Ref(ref_info) => {

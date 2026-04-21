@@ -322,6 +322,131 @@ fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: 
             };
             insert_string(obj, &field_name, variant_value);
         }
+        FieldType::EnumList(en) => {
+            let list_start = offset_start;
+
+            let count = u32::from_be_bytes(
+                data[list_start..list_start + 4].try_into().unwrap()
+            ) as usize;
+            let outer_table_start = list_start + 4;
+
+            let mut items: Vec<String> = Vec::with_capacity(count);
+
+            for i in 0..count {
+                let off_a = u32::from_be_bytes(
+                    data[outer_table_start + i * 4..outer_table_start + i * 4 + 4]
+                        .try_into().unwrap()
+                ) as usize;
+                let off_b = u32::from_be_bytes(
+                    data[outer_table_start + (i + 1) * 4..outer_table_start + (i + 1) * 4 + 4]
+                        .try_into().unwrap()
+                ) as usize;
+
+                let item_data = &data[list_start + off_a..list_start + off_b];
+
+                // Читаем variant index (u16)
+                let variant_idx = u16::from_be_bytes(item_data[0..2].try_into().unwrap());
+                let Some(variant_name) = en.variants_names_map.get(&variant_idx) else {
+                    return Err(DecodeError::WrongEnumValue(variant_idx));
+                };
+
+                let variant_fields = en.variant_fields
+                    .get(&variant_idx)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+
+                if variant_fields.is_empty() {
+                    items.push(format!("\"{}\"", variant_name));
+                } else {
+                    let mut item_json = String::with_capacity(64);
+                    item_json.push('{');
+                    // Добавляем discriminator
+                    item_json.push_str("\"$variant\":\"");
+                    item_json.push_str(variant_name);
+                    item_json.push('"');
+
+                    const INNER_TABLE_START: usize = 2;
+
+                    for (fi, vf) in variant_fields.iter().enumerate() {
+                        let off_pos = INNER_TABLE_START + fi * 4;
+                        let field_offset = u32::from_be_bytes(
+                            item_data[off_pos..off_pos + 4].try_into().unwrap()
+                        ) as usize;
+
+                        if field_offset == 0 {
+                            insert_null(&mut item_json, &vf.name);
+                            continue;
+                        }
+
+                        let field_start = field_offset; // relative to item_data
+
+                        let field_end = vf.get_size()
+                            .map(|s| field_start + s)
+                            .unwrap_or_else(|| {
+                                let mut j = fi + 1;
+                                while j < variant_fields.len() {
+                                    let next_pos = INNER_TABLE_START + j * 4;
+                                    let next_off = u32::from_be_bytes(
+                                        item_data[next_pos..next_pos + 4].try_into().unwrap()
+                                    ) as usize;
+                                    if next_off != 0 {
+                                        return next_off;
+                                    }
+                                    j += 1;
+                                }
+                                item_data.len()
+                            });
+
+                        let field_name = &vf.name;
+
+                        match &vf.ty {
+                            FieldType::Primitive(pt) => {
+                                let value = decode_primitive_value(pt, &item_data[field_start..field_end])?;
+                                insert_value(&mut item_json, field_name, &value);
+                            }
+                            FieldType::PrimitiveList(primitive, fixed_size) => {
+                                let size = fixed_size.unwrap_or_else(|| {
+                                    u32::from_be_bytes(
+                                        item_data[field_start..field_start + 4].try_into().unwrap()
+                                    ) as usize
+                                });
+                                // arr_payload_start — начало offset-таблицы массива (после u32 count)
+                                let arr_payload_start = if fixed_size.is_none() {
+                                    field_start + 4
+                                } else {
+                                    field_start
+                                };
+                                let vec = match primitive.get_size() {
+                                    None => decode_array_dynamic(
+                                        item_data, primitive, size, field_start, arr_payload_start
+                                    )?,
+                                    Some(el_size) => decode_array_static(
+                                        item_data, primitive, size, arr_payload_start, el_size
+                                    )?,
+                                };
+                                insert_array_arc(&mut item_json, field_name, &vec);
+                            }
+                            FieldType::Enum(en) => {
+                                let v_idx = u16::from_be_bytes(
+                                    item_data[field_start..field_start + 2].try_into().unwrap()
+                                );
+                                let Some(v_name) = en.variants_names_map.get(&v_idx) else {
+                                    return Err(DecodeError::WrongEnumValue(v_idx));
+                                };
+                                insert_string(&mut item_json, field_name, v_name);
+                            }
+                            _ => {} // остальные типы пропускаем
+                        }
+                    }
+
+                    item_json.push('}');
+                    items.push(item_json);
+                }
+            }
+
+            insert_array_arc(obj, &field_name, &items);
+        }
+
         _ => {}
     };
 

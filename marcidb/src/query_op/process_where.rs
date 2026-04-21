@@ -1,6 +1,6 @@
 use memchr::memmem;
 
-use crate::{query_op::{FieldCompare, FieldCompareRef, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
+use crate::{query_op::{EnumListFilter, FieldCompare, FieldCompareRef, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
 
 pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut TransationContext<'a, F>, entity: &Entity, where_op: &Where<'a>) -> bool {
 
@@ -35,6 +35,50 @@ pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Transati
           }
         }
       }
+
+      match field_compare {
+        FieldCompare::EnumListSome(_filter) |
+        FieldCompare::EnumListEvery(_filter) |
+        FieldCompare::EnumListNone(_filter) => {
+          let raw = get_data(entity, field, id, body, ctx.schema);
+
+          // Пустой список: $every → true (пустое утверждение верно), остальные → false
+          let Some(data) = raw else {
+            return matches!(field_compare, FieldCompare::EnumListEvery(_));
+          };
+
+          let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+          if count == 0 {
+            return matches!(field_compare, FieldCompare::EnumListEvery(_));
+          }
+
+          let outer_table = 4usize; // начало таблицы offset-ов во внешнем списке
+
+          return match field_compare {
+            FieldCompare::EnumListSome(f) => {
+              (0..count).any(|i| {
+                let item = get_enum_list_item(data, outer_table, i);
+                enum_list_item_matches(item, f)
+              })
+            },
+            FieldCompare::EnumListEvery(f) => {
+              (0..count).all(|i| {
+                let item = get_enum_list_item(data, outer_table, i);
+                enum_list_item_matches(item, f)
+              })
+            },
+            FieldCompare::EnumListNone(f) => {
+              !(0..count).any(|i| {
+                let item = get_enum_list_item(data, outer_table, i);
+                enum_list_item_matches(item, f)
+              })
+            },
+            _ => unreachable!()
+          };
+        },
+        _ => {}
+      }
+
 
       let Some(data) = get_data(entity, field, id, body, ctx.schema) else {
         return match field_compare {
@@ -159,4 +203,101 @@ pub fn has_one_item_exists<'a, F>(
 
   let tree = ctx.get_tree(&entity.name);
   return tree.prefix_keys(&item_id).unwrap().next().is_some()
+}
+
+/// Извлекает срез байт для i-го элемента EnumList
+#[inline]
+fn get_enum_list_item<'a>(data: &'a [u8], outer_table: usize, i: usize) -> &'a [u8] {
+  let off_a = u32::from_be_bytes(
+    data[outer_table + i * 4..outer_table + i * 4 + 4].try_into().unwrap()
+  ) as usize;
+  let off_b = u32::from_be_bytes(
+    data[outer_table + (i + 1) * 4..outer_table + (i + 1) * 4 + 4].try_into().unwrap()
+  ) as usize;
+  &data[off_a..off_b]
+}
+
+/// Проверяет, соответствует ли один item (срез байт) фильтру
+fn enum_list_item_matches(item: &[u8], filter: &EnumListFilter<'_>) -> bool {
+  let item_variant = u16::from_be_bytes(item[0..2].try_into().unwrap());
+
+  // Проверяем вариант
+  if let Some(expected) = filter.variant_idx {
+    if item_variant != expected {
+      return false;
+    }
+  }
+
+  // Проверяем поля
+  for ff in &filter.field_filters {
+    // Поле принадлежит другому варианту — пропускаем
+    if ff.variant_idx != item_variant {
+      continue;
+    }
+
+    const INNER_TABLE: usize = 2; // после u16 variant
+    let off_pos = INNER_TABLE + ff.field_idx * 4;
+    let field_offset = u32::from_be_bytes(
+      item[off_pos..off_pos + 4].try_into().unwrap()
+    ) as usize;
+
+    // Получаем данные поля
+    let field_data: Option<&[u8]> = if field_offset == 0 {
+      None
+    } else {
+      let field_end = ff.field.get_size()
+          .map(|s| field_offset + s)
+          .unwrap_or_else(|| {
+            // Динамический размер: ищем следующий ненулевой offset в таблице
+            let mut j = ff.field_idx + 1;
+            while j < ff.num_variant_fields {
+              let next_pos = INNER_TABLE + j * 4;
+              let next_off = u32::from_be_bytes(
+                item[next_pos..next_pos + 4].try_into().unwrap()
+              ) as usize;
+              if next_off != 0 {
+                return next_off;
+              }
+              j += 1;
+            }
+            item.len()
+          });
+      Some(&item[field_offset..field_end])
+    };
+
+    let matches = compare_field_bytes(field_data, &ff.compare);
+    if !matches {
+      return false;
+    }
+  }
+
+  true
+}
+
+/// Сравнивает байты поля с FieldCompare
+fn compare_field_bytes(data: Option<&[u8]>, compare: &FieldCompare<'_>) -> bool {
+  let Some(data) = data else {
+    return match compare {
+      FieldCompare::EqNull => true,
+      FieldCompare::NeNull => false,
+      FieldCompare::Ne(_) => true,
+      FieldCompare::In(_, has_null) => *has_null,
+      FieldCompare::NotIn(_, has_null) => !has_null,
+      _ => false,
+    };
+  };
+
+  match compare {
+    FieldCompare::EqNull    => false,
+    FieldCompare::NeNull    => true,
+    FieldCompare::Eq(v)     => v.as_slice() == data,
+    FieldCompare::Ne(v)     => v.as_slice() != data,
+    FieldCompare::In(vs, _) => vs.iter().any(|v| v.as_slice() == data),
+    FieldCompare::NotIn(vs, _) => vs.iter().all(|v| v.as_slice() != data),
+    FieldCompare::Gt(nv)    => nv.compare_with_bytes(data).map(|o| o.is_gt()).unwrap_or(false),
+    FieldCompare::Gte(nv)   => nv.compare_with_bytes(data).map(|o| o.is_ge()).unwrap_or(false),
+    FieldCompare::Lt(nv)    => nv.compare_with_bytes(data).map(|o| o.is_lt()).unwrap_or(false),
+    FieldCompare::Lte(nv)   => nv.compare_with_bytes(data).map(|o| o.is_le()).unwrap_or(false),
+    _ => false,
+  }
 }

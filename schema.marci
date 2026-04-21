@@ -3,6 +3,18 @@ model User {
     name        String
     info        UserInfo?
     posts       Post[]        @bind(Post.author)
+    roles 	RoleKind[]
+}
+
+enum RoleKind {
+    viewer
+    admin {
+        features  String[]
+        level     Int
+    }
+    moderator {
+        section   String
+    }
 }
 
 struct UserInfo {

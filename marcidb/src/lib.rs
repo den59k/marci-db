@@ -1,3 +1,5 @@
+#![feature(assert_matches)]
+
 mod schema;
 mod marci_db;
 mod write_op;

@@ -10,7 +10,7 @@ use crate::{Field, schema::{Entity, FieldLocation, FieldType}};
 pub use process_query::{DecodeCtx,TransationContext,IncludeResult};
 pub use process_query_one::process_query_one;
 pub use process_query_many::process_query_many;
-pub use r#where::{Where,FieldCompare,FieldCompareRef};
+pub use r#where::{Where, FieldCompare, FieldCompareRef, EnumListFilter, EnumListFieldFilter};
 
 #[derive(Debug)]
 pub struct QueryOp<'a> {
