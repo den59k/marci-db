@@ -34,7 +34,9 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     if matches!(val, Value::Bool(false)) {
       continue;
     }
-    if let FieldExistsCondition::EnumValue { field_index, .. }  = &field.condition && !mask[*field_index] {
+    if let FieldExistsCondition::EnumValue { field_index, .. }
+    | FieldExistsCondition::EnumValueAny { field_index, .. } = &field.condition
+        && !mask[*field_index] {
       continue;
     }
     match &field.ty {

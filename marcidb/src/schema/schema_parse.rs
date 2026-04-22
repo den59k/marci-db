@@ -235,6 +235,50 @@ fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String
         variants.insert(variant, variant_field_indexes);
     }
 
+    for (variant_names, shared_flds) in enum_def.shared_fields.iter() {
+        let variant_indices: Vec<u16> = variant_names.iter()
+            .map(|name| {
+                *enum_def.variants_map.get(name).unwrap_or_else(|| {
+                    panic!(
+                        "Unknown enum variant '{}' in shared field group [{}]",
+                        name,
+                        variant_names.join(" | ")
+                    )
+                })
+            })
+            .collect();
+
+        let base_name = format!(
+            "{}[{}={}]",
+            entity.name,
+            field_name,
+            variant_names.join("|")
+        );
+
+        for field in shared_flds {
+            if let Some(exists_field) = entity.fields.iter().find(|f| f.name == field.name) {
+                panic!(
+                    "Cannot add shared enum field '{}' to '{}'. Field '{}' already exists",
+                    field.name, entity.name, exists_field.full_name
+                );
+            }
+
+            let field_pos = entity.fields.len();
+
+            let mut f = field.clone();
+            f.full_name = format!("{}.{}", base_name, f.name);
+            f.condition = FieldExistsCondition::EnumValueAny {
+                field_index,
+                variants: variant_indices.clone(),
+            };
+            entity.fields.push(f);
+
+            for &v_idx in &variant_indices {
+                variants.entry(v_idx).or_default().push(field_pos);
+            }
+        }
+    }
+
     EnumInfo { 
         variants, 
         variants_map: enum_def.variants_map.clone(), 

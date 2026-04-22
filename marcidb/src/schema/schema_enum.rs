@@ -5,7 +5,8 @@ use crate::{Field, schema::{schema_parse::parse_fields}};
 #[derive(Debug,Clone)]
 pub struct EnumDef {
     pub variants: HashMap<String, Vec<Field>>,
-    pub variants_map: HashMap<String, u16>
+    pub variants_map: HashMap<String, u16>,
+    pub shared_fields: Vec<(Vec<String>, Vec<Field>)>
 }
 
 pub fn parse_enum_block(
@@ -13,6 +14,7 @@ pub fn parse_enum_block(
 ) -> EnumDef {
     let mut variants = HashMap::new();
     let mut variants_map = HashMap::new();
+    let mut shared_fields = Vec::new();
 
     let mut index = 0;
     while let Some(raw) = lines.peek() {
@@ -35,22 +37,36 @@ pub fn parse_enum_block(
 
         if let Some(brace_pos) = line.find('{') {
             let name_part = &line[..brace_pos];
-            let variant_name = name_part.trim().to_string();
-            // Offsets in enum has pre_header_size 4 bytes: 2 bytes - enum variant, 2 bytes - payload_offset
-            let fields = parse_fields(lines); 
-            variants.insert(variant_name.clone(), fields);
-            variants_map.insert(variant_name.clone(), index);
+            let name_part = name_part.trim();
+
+            // Синтаксис общих полей: `VariantA | VariantB { ... }`
+            if name_part.contains('|') {
+                let variant_names: Vec<String> = name_part
+                    .split('|')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let fields = parse_fields(lines);
+                shared_fields.push((variant_names, fields));
+            } else {
+                let variant_name = name_part.to_string();
+                let fields = parse_fields(lines);
+                variants.insert(variant_name.clone(), fields);
+                variants_map.insert(variant_name.clone(), index);
+                index += 1;
+            }
         } else {
             let variant_name = line.to_string();
             variants.insert(variant_name.clone(), Vec::new());
             variants_map.insert(variant_name.clone(), index);
+            index += 1;
         }
-        index += 1;
     }
 
     EnumDef {
         variants,
         variants_map,
+        shared_fields,
     }
 }
 

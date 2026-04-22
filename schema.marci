@@ -4,6 +4,18 @@ model User {
     info        UserInfo?
     posts       Post[]        @bind(Post.author)
     roles 	RoleKind[]
+    gender	Gender	
+}
+
+enum Gender {
+    male {
+        experience	Int
+    }
+    female
+    male | female {
+        weight		Int
+	height		Int
+    }
 }
 
 enum RoleKind {

@@ -206,7 +206,8 @@ pub enum RefBinding {
 /// Структура для проверки существования поля в Entity
 pub enum FieldExistsCondition {
     None,
-    EnumValue { field_index: usize, variant: u16 }
+    EnumValue { field_index: usize, variant: u16 },
+    EnumValueAny { field_index: usize, variants: Vec<u16> }
 }
 
 fn is_valid_string(s: &str) -> bool {

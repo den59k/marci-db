@@ -122,6 +122,13 @@ pub fn check_exists_condition(entity: &Entity, condition: &FieldExistsCondition,
         }
         return true;
       },
+      FieldExistsCondition::EnumValueAny { field_index, variants } => {
+          let Some(val) = get_data(entity, &entity.fields[*field_index], &id, &data, schema) else {
+              return false;
+          };
+          let val = u16::from_be_bytes(val.try_into().unwrap());
+          return variants.contains(&val);
+      },
       FieldExistsCondition::None => {
         return true
       }
