@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod aggregate_tests;
 pub mod delete_tests;
 pub mod indexes_tests;
 pub mod insert_tests;
@@ -12,7 +13,7 @@ pub mod companion_id_tests;
 
 use std::str::FromStr;
 
-use marcidb::{MarciDB, array_to_json, decode_document, decode_id, parse_id, parse_insert, parse_query, parse_update};
+use marcidb::{MarciDB, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
 use serde_json::Value;
 
 
@@ -59,4 +60,11 @@ pub fn delete_data(db: &MarciDB, model: &str, data: Value) {
   let entity = db.get_model(model).unwrap();
   let id = parse_id(&db.schema, entity, &data).unwrap();
   db.delete_item(entity, &id).unwrap();
+}
+
+pub fn get_aggregate(db: &MarciDB, model: &str, json_query: Value) -> Value {
+  let entity = db.get_model(model).unwrap();
+  let op = parse_aggregate(&db.schema, entity, &json_query).unwrap();
+  let result = db.aggregate(&op);
+  Value::from_str(&aggregate_to_json(&op, &result)).unwrap()
 }

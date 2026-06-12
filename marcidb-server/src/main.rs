@@ -6,7 +6,7 @@ use hyper_util::rt::TokioIo;
 use marcidb::MarciDB;
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_delete, handle_find_first, handle_find_many, handle_insert, handle_update}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_update}};
 
 mod handlers;
 mod errors;
@@ -42,6 +42,8 @@ async fn handle_inner(
         (&Method::POST, "insert") => handle_insert(req, ctx.clone(), model).await,
         (&Method::POST, "findMany") => handle_find_many(req, ctx.clone(), model).await,
         (&Method::POST, "findFirst") => handle_find_first(req, ctx.clone(), model).await,
+        (&Method::POST, "count") => handle_count(req, ctx.clone(), model).await,
+        (&Method::POST, "aggregate") => handle_aggregate(req, ctx.clone(), model).await,
         (&Method::POST, "update") => {
             let Some(query) = query else { return Err(ApiError::BadRequest("Param :itemId required".to_string())) };
             handle_update(req, query, ctx.clone(), model).await

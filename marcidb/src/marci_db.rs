@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, utils::get_data, write_op::{InsertError, WriteOp, process_write}};
+use crate::{Field, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, utils::get_data, write_op::{InsertError, WriteOp, process_write}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -82,6 +82,13 @@ impl MarciDB {
     let rx = self.db.begin_read().unwrap();
     let tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
     return tree.len();
+  }
+
+  pub fn aggregate(&self, op: &AggregateOp) -> AggregateResult {
+    let rx = self.db.begin_read().unwrap();
+    // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
+    let mut ctx = TransationContext::new(&rx, &self.schema, |_: DecodeCtx<()>| ());
+    return process_aggregate(op, &mut ctx);
   }
 
   pub fn count_dev(&self, tree_name: &str) -> u64 { 

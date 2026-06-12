@@ -44,4 +44,12 @@ type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
 type CompareRefValue<T> = T | { "$not": T }
 type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
+// Результат aggregate: только запрошенные ключи; пустое множество даёт null (кроме count)
+type AggregateResult<TModel, T> =
+  (T extends { $count: true } ? { count: number } : {}) &
+  (T extends { $sum: string } ? { sum: number | null } : {}) &
+  (T extends { $avg: string } ? { avg: number | null } : {}) &
+  (T extends { $min: infer F } ? { min: (F extends keyof TModel ? TModel[F] : never) | null } : {}) &
+  (T extends { $max: infer F } ? { max: (F extends keyof TModel ? TModel[F] : never) | null } : {})
+
 export declare function marcidb(url: string): MarciDB;

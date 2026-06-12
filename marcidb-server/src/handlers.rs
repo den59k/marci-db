@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{array_to_json, decode_document, decode_id, parse_id_from_url, parse_insert, parse_query, parse_update};
+use marcidb::{aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update};
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body}};
 
@@ -48,6 +48,40 @@ pub async fn handle_find_first(req: Request<hyper::body::Incoming>, ctx: Arc<Ser
             return Ok("null".to_string())
         };
         Ok(item.clone())
+    }).await?;
+
+    Ok(ok_response(result))
+}
+
+pub async fn handle_count(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, model_index: usize) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+
+    let result = blocking(move || {
+        let entity = ctx.db.get_model_by_index(model_index);
+        let mut aggregate_op = parse_aggregate(&ctx.db.schema, entity, &json_val)
+            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+        aggregate_op.count = true;
+
+        let result = ctx.db.aggregate(&aggregate_op);
+        Ok(result.count.to_string())
+    }).await?;
+
+    Ok(ok_response(result))
+}
+
+pub async fn handle_aggregate(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, model_index: usize) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+
+    let result = blocking(move || {
+        let entity = ctx.db.get_model_by_index(model_index);
+        let aggregate_op = parse_aggregate(&ctx.db.schema, entity, &json_val)
+            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+        if !aggregate_op.has_aggregates() {
+            return Err(ApiError::BadRequest("At least one of $count, $sum, $avg, $min, $max is required".to_string()));
+        }
+
+        let result = ctx.db.aggregate(&aggregate_op);
+        Ok(aggregate_to_json(&aggregate_op, &result))
     }).await?;
 
     Ok(ok_response(result))

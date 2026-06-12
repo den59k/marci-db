@@ -30,6 +30,30 @@ fn get_model_order_name(model: &Entity) -> String {
   format!("{}Model$Order", model.name.replace('.', "_"))
 }
 
+fn get_model_aggregate_name(model: &Entity) -> String {
+  format!("{}ModelAggregateQuery", model.name.replace('.', "_"))
+}
+
+/// Имена полей, доступных агрегациям (зеркало parse_aggregate_field)
+fn get_aggregate_fields_union(model: &Entity, numeric: bool) -> String {
+  let names: Vec<String> = model.fields.iter()
+    .filter(|field| {
+      if field.name.starts_with("@") { return false; }
+      if !matches!(field.condition, FieldExistsCondition::None) { return false; }
+      if matches!(field.location, FieldLocation::Virtual) { return false; }
+      match &field.ty {
+        FieldType::Primitive(ty) => {
+          !numeric || matches!(ty, PrimitiveFieldType::Int64 | PrimitiveFieldType::UInt64 | PrimitiveFieldType::Float | PrimitiveFieldType::Double)
+        },
+        _ => false
+      }
+    })
+    .map(|field| format!("\"{}\"", field.name))
+    .collect();
+
+  if names.is_empty() { "never".to_string() } else { names.join(" | ") }
+}
+
 fn get_model_query_name(model: &Entity) -> String {
   format!("{}ModelQuery", model.name.replace('.', "_"))
 }
@@ -464,6 +488,16 @@ fn main() {
     lines.push(format!("  $cursor?: {}", get_model_id_name(model)));
     lines.push("}".to_string());
 
+    // Заполняем поля для Aggregate
+    lines.push(format!("type {} = {{", get_model_aggregate_name(model)));
+    lines.push(format!("  $where?: {}", get_model_where_name(model)));
+    lines.push("  $count?: true".to_string());
+    lines.push(format!("  $sum?: {}", get_aggregate_fields_union(model, true)));
+    lines.push(format!("  $avg?: {}", get_aggregate_fields_union(model, true)));
+    lines.push(format!("  $min?: {}", get_aggregate_fields_union(model, false)));
+    lines.push(format!("  $max?: {}", get_aggregate_fields_union(model, false)));
+    lines.push("}".to_string());
+
     lines.push("".to_string());
   }
   
@@ -476,6 +510,8 @@ fn main() {
     lines.push(format!("    insert(data: {}): Promise<{}>", get_model_insert_name(model), get_model_id_name(model)));
     lines.push(format!("    update(id: {}, data: {}): Promise<void>", get_model_id_name(model), get_model_update_name(model)));
     lines.push(format!("    delete(id: {}): Promise<void>", get_model_id_name(model)));
+    lines.push(format!("    count(query?: {{ $where?: {} }}): Promise<number>", get_model_where_name(model)));
+    lines.push(format!("    aggregate<T extends {}>(query: T): Promise<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
     lines.push("  }".to_string());
   }
   lines.push("}".to_string());
@@ -493,7 +529,9 @@ fn main() {
     lines.push(format!("  findFirst: (select) => findFirst(\"{}\", select),", model.name));
     lines.push(format!("  insert: (data) => insert(\"{}\", data),", model.name));
     lines.push(format!("  update: (id,data) => update(\"{}\", id, data),", model.name));
-    lines.push(format!("  delete: (id) => runDelete(\"{}\", id)", model.name));
+    lines.push(format!("  delete: (id) => runDelete(\"{}\", id),", model.name));
+    lines.push(format!("  count: (query) => count(\"{}\", query),", model.name));
+    lines.push(format!("  aggregate: (query) => aggregate(\"{}\", query)", model.name));
     lines.push("},".to_string());
   }
 

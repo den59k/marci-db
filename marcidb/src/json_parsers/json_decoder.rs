@@ -221,6 +221,17 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     // return Ok(Value::Object(obj));
 }
 
+/// Декодирует одиночное значение примитивного поля в JSON (для min/max в агрегациях)
+pub fn decode_field_value(field: &Field, data: &[u8]) -> Result<String, DecodeError> {
+  if let Some(format) = &field.format {
+    return decode_by_format(data, format, Some(&field.ty));
+  }
+  match &field.ty {
+    FieldType::Primitive(primitive) => decode_primitive_value(primitive, data),
+    _ => Err(DecodeError::TypeMismatch(format!("Field {} is not primitive", field.full_name)))
+  }
+}
+
 pub fn decode_id(id: &[u8], entity: &Entity, schema: &Schema) -> String {
     let mut str = String::new();
     str.push('{');

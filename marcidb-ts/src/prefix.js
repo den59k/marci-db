@@ -22,6 +22,14 @@ export function marcidb(url) {
     return request("POST", `${url}/${model}/delete/${encodeId(id)}`);
   }
 
+  const count = (model, query) => {
+    return request("POST", `${url}/${model}/count`, query ?? {});
+  }
+
+  const aggregate = (model, query) => {
+    return request("POST", `${url}/${model}/aggregate`, query);
+  }
+
   return {
     /* generated_data */
   };
