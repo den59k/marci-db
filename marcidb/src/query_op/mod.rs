@@ -20,6 +20,8 @@ pub struct QueryOp<'a> {
   pub filter: Option<Where<'a>>,
   pub limit: Option<usize>,
   pub skip: Option<usize>,
+  /// Keyset-пагинация: id элемента, строго после которого идут результаты
+  pub cursor: Option<Vec<u8>>,
   /// Направление скана (выставляется планировщиком)
   pub reverse: bool,
   /// Скан не даёт нужного порядка — строки сортируются в памяти после фильтра
@@ -97,6 +99,7 @@ impl<'a> QueryOp<'a> {
       filter: None,
       limit: None,
       skip: None,
+      cursor: None,
       reverse: false,
       post_sort: false,
       prefix_key: None,

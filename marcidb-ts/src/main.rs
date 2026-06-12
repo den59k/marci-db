@@ -461,6 +461,7 @@ fn main() {
     lines.push(format!("  $order?: {}", get_model_order_name(model)));
     lines.push("  $limit?: number".to_string());
     lines.push("  $skip?: number".to_string());
+    lines.push(format!("  $cursor?: {}", get_model_id_name(model)));
     lines.push("}".to_string());
 
     lines.push("".to_string());

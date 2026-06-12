@@ -1,4 +1,4 @@
-type ServiceKeys = "$where" | "$order" | "$limit" | "$skip";
+type ServiceKeys = "$where" | "$order" | "$limit" | "$skip" | "$cursor";
 
 // Дистрибутивен по union-моделям (discriminated union у enum с payload):
 // ключи, которых нет в текущей ветке union, отбрасываются

@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where, parsers::parse_id}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -36,6 +36,12 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   let limit = parse_service_number(json_val, "$limit")?;
   let skip = parse_service_number(json_val, "$skip")?;
 
+  // $cursor — это id элемента: результаты идут строго после него (exclusive)
+  let cursor = match json_val.get("$cursor") {
+    Some(cursor_value) => Some(parse_id(schema, entity, cursor_value).map_err(|err| ParseError::CursorError(err))?),
+    None => None
+  };
+
   for (field_index, field) in entity.fields.iter().enumerate() {
     let Some(val) = json_val.get(&field.name) else {
       continue;
@@ -62,7 +68,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, reverse: false, post_sort: false })
+  Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false })
 }
 
 fn parse_service_number(json_val: &Map<String,Value>, key: &str) -> Result<Option<usize>, ParseError> {
@@ -112,7 +118,14 @@ fn parse_order<'a>(entity: &'a Entity, order_value: &Value) -> Result<Sort<'a>, 
 pub fn resolve_sort_plan(query: &mut QueryOp) {
   query.reverse = false;
   query.post_sort = false;
-  let Some(sort) = &query.sort else { return };
+  let Some(sort) = &query.sort else {
+    // $cursor без $order означает порядок по id: скан индекса $where идёт
+    // в порядке значения, поэтому от него приходится отказаться
+    if query.cursor.is_some() && matches!(query.prefix_key, Some(PrefixKey::IndexRange { .. })) {
+      query.prefix_key = None;
+    }
+    return;
+  };
   let (field, desc) = (sort.field(), sort.is_desc());
 
   // Первичный ключ: деревья моделей и Parent-привязки уже идут в порядке id
@@ -201,6 +214,7 @@ pub enum ParseError {
   UnknownField(String),
   NotSortable(String),
   WrongServiceValue(String, String),
+  CursorError(EncodeError),
 }
 
 impl ParseError {

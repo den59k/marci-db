@@ -130,6 +130,20 @@ pub fn encode_f64(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Позиция строки в индексном дереве поля: та же кодировка, в которой ключи лежат в индексе
+/// (encoded_value ++ id). Используется для keyset-курсора при скане индекса
+pub fn make_index_cursor_key(field: &Field, value: &[u8], id: &[u8]) -> Vec<u8> {
+  let mut key = match &field.ty {
+    FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
+      encode_index_number(&ty.get_num_type().unwrap(), value)
+    },
+    // Строки получают нуль-терминатор (как в индексах), остальное сравнивается как есть
+    _ => encode_index_data(field, value)
+  };
+  key.extend_from_slice(id);
+  key
+}
+
 /// Ключ сортировки в памяти. Байтовое сравнение ключей даёт тот же порядок,
 /// что и скан соответствующего индексного дерева (та же кодировка значений + id как tie-break).
 /// null-значения уходят в конец при asc и в начало при desc
@@ -143,16 +157,7 @@ pub fn make_sort_key(entity: &Entity, field: &Field, id: &[u8], data: &[u8], sch
 
   let mut key = Vec::with_capacity(value.len() + id.len() + 2);
   key.push(0x00);
-  match &field.ty {
-    FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
-      key.extend(encode_index_number(&ty.get_num_type().unwrap(), value));
-    },
-    // Строки получают нуль-терминатор (как в индексах), остальное сравнивается как есть
-    _ => {
-      key.extend(encode_index_data(field, value));
-    }
-  }
-  key.extend_from_slice(id);
+  key.extend(make_index_cursor_key(field, value, id));
   key
 }
 

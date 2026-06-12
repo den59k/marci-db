@@ -8,8 +8,8 @@ pub fn process_query_one<'a, U, F>(
 where
     F: Fn(DecodeCtx<U>) -> U,
 {
-    // Нестандартный порядок или смещение: переиспользуем механизм many с лимитом 1
-    if query.post_sort || query.reverse || query.skip.is_some() {
+    // Нестандартный порядок, смещение или курсор: переиспользуем механизм many с лимитом 1
+    if query.post_sort || query.reverse || query.skip.is_some() || query.cursor.is_some() {
         return process_query_many_limited(query, ctx, parent, Some(1)).pop();
     }
 
