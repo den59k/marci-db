@@ -1,6 +1,6 @@
 use std::{env, fs, path::Path};
 
-use marcidb::{Entity, Field, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
+use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
 
 fn get_model_id_name(model: &Entity) -> String {
   format!("{}ModelId", model.name.replace('.', "_"))
@@ -66,14 +66,42 @@ fn get_field_ty(ty: &FieldType, schema: &Schema) -> String {
       }
     },
     FieldType::Enum(enum_info) => {
-      enum_info.variants_map.keys().fold(String::new(), |mut acc, item| {
-        if !acc.is_empty() { acc.push_str(" | ") }
-        acc.push_str(format!("\"{}\"", item).as_str());
-        acc
-      })
+      let mut variants: Vec<(&String, &u16)> = enum_info.variants_map.iter().collect();
+      variants.sort_by_key(|(_, index)| **index);
+      variants.iter()
+        .map(|(name, _)| format!("\"{}\"", name))
+        .collect::<Vec<_>>()
+        .join(" | ")
     },
     _ => panic!("Unsupported field type")
   }
+}
+
+/// Enum, у которого хотя бы один вариант содержит поля — в типах превращается в discriminated union
+fn is_payload_enum(field: &Field) -> bool {
+  if !matches!(field.location, FieldLocation::Body { .. }) { return false; }
+  match &field.ty {
+    FieldType::Enum(enum_info) => enum_info.variants.values().any(|fields| !fields.is_empty()),
+    _ => false
+  }
+}
+
+/// Поле, инжектированное в модель из варианта enum
+fn is_variant_field(field: &Field) -> bool {
+  matches!(field.condition, FieldExistsCondition::EnumValue { .. })
+}
+
+/// Варианты enum в порядке их объявления вместе с инжектированными полями
+fn enum_variants_sorted<'a>(entity: &'a Entity, enum_info: &'a EnumInfo) -> Vec<(&'a String, Vec<&'a Field>)> {
+  let mut keys: Vec<u16> = enum_info.variants.keys().copied().collect();
+  keys.sort();
+  keys.into_iter().map(|variant| {
+    let name = enum_info.variants_names_map.get(&variant).unwrap();
+    let fields = enum_info.variants.get(&variant).unwrap().iter()
+      .map(|field_index| &entity.fields[*field_index])
+      .collect();
+    (name, fields)
+  }).collect()
 }
 
 // fn get_field_nullable_ty(field: &Field, schema: &Schema) -> String {
@@ -88,7 +116,7 @@ fn get_field_nullable(field: &Field) -> &str {
   if field.nullable && !matches!(field.ty, FieldType::RefList(_)) { " | null" } else { "" }
 }
 
-fn get_field_str(field: &Field, schema: &Schema) -> String { 
+fn get_field_str(field: &Field, schema: &Schema) -> String {
   // format!("  {}: {}", field.name, get_field_nullable_ty(&field, schema))
   let field_nullable = get_field_nullable(field);
 
@@ -97,6 +125,119 @@ fn get_field_str(field: &Field, schema: &Schema) -> String {
   }
 
   format!("  {}: {}{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
+}
+
+// В Id-типе ссылки сужаются до ModelId: для параметров update/delete и результата insert
+// нужен только ключ. Полный тип ссылки доборно прописывается в самом Model
+fn get_field_id_str(field: &Field, schema: &Schema) -> String {
+  if field.format.is_none() {
+    if let FieldType::Ref(ref_info) = &field.ty {
+      return format!("  {}: {}", field.name, get_model_id_name(&schema.models[ref_info.model_index]));
+    }
+  }
+  get_field_str(field, schema)
+}
+
+/// Содержимое веток union для типа Model (без скобок): `role: "admin", sign: string`
+fn get_model_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> Vec<String> {
+  let FieldType::Enum(enum_info) = &field.ty else { panic!("Expected enum field") };
+  let mut branches = vec![];
+  for (variant_name, variant_fields) in enum_variants_sorted(entity, enum_info) {
+    let mut parts = vec![format!("{}: \"{}\"", field.name, variant_name)];
+    for variant_field in variant_fields {
+      parts.push(get_field_str(variant_field, schema).trim_start().to_string());
+    }
+    branches.push(parts.join(", "));
+  }
+  if field.nullable {
+    branches.push(format!("{}: null", field.name));
+  }
+  branches
+}
+
+/// Ветки union для типа Insert: поля выбранного варианта обязательны, поля других вариантов запрещены
+fn get_insert_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> Vec<String> {
+  let FieldType::Enum(enum_info) = &field.ty else { panic!("Expected enum field") };
+  let variants = enum_variants_sorted(entity, enum_info);
+  let mut branches = vec![];
+  for (variant_name, variant_fields) in variants.iter() {
+    let mut parts = vec![format!("{}: \"{}\"", field.name, variant_name)];
+    for variant_field in variant_fields {
+      parts.push(get_field_insert_str(variant_field, schema).trim_start().to_string());
+    }
+    push_never_fields(&mut parts, &variants, Some(variant_name));
+    branches.push(format!("{{ {} }}", parts.join(", ")));
+  }
+  // Если enum можно не указывать (nullable или есть default) — ветка без полей вариантов
+  if field.nullable || field.default_value.is_some() {
+    let enum_part = if field.nullable {
+      format!("{}?: null", field.name)
+    } else {
+      format!("{}?: never", field.name)
+    };
+    let mut parts = vec![enum_part];
+    push_never_fields(&mut parts, &variants, None);
+    branches.push(format!("{{ {} }}", parts.join(", ")));
+  }
+  branches
+}
+
+/// Ветки union для типа Update: либо enum не трогаем (поля текущего варианта можно менять частично),
+/// либо меняем вместе с полным набором полей нового варианта
+fn get_update_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> Vec<String> {
+  let FieldType::Enum(enum_info) = &field.ty else { panic!("Expected enum field") };
+  let variants = enum_variants_sorted(entity, enum_info);
+  let mut branches = vec![];
+
+  let mut parts = vec![format!("{}?: never", field.name)];
+  for (_, variant_fields) in variants.iter() {
+    for variant_field in variant_fields {
+      parts.push(get_field_update_str(variant_field, schema).trim_start().to_string());
+    }
+  }
+  branches.push(format!("{{ {} }}", parts.join(", ")));
+
+  for (variant_name, variant_fields) in variants.iter() {
+    let mut parts = vec![format!("{}: \"{}\"", field.name, variant_name)];
+    for variant_field in variant_fields {
+      parts.push(get_field_insert_str(variant_field, schema).trim_start().to_string());
+    }
+    push_never_fields(&mut parts, &variants, Some(variant_name));
+    branches.push(format!("{{ {} }}", parts.join(", ")));
+  }
+
+  if field.nullable {
+    let mut parts = vec![format!("{}: null", field.name)];
+    push_never_fields(&mut parts, &variants, None);
+    branches.push(format!("{{ {} }}", parts.join(", ")));
+  }
+  branches
+}
+
+/// Добавляет `field?: never` для полей всех вариантов, кроме текущего —
+/// закрывает ветку union от полей чужих вариантов
+fn push_never_fields(parts: &mut Vec<String>, variants: &[(&String, Vec<&Field>)], current_variant: Option<&String>) {
+  for (variant_name, variant_fields) in variants.iter() {
+    if Some(*variant_name) == current_variant { continue; }
+    for variant_field in variant_fields {
+      parts.push(format!("{}?: never", variant_field.name));
+    }
+  }
+}
+
+/// Дописывает в выходной файл union-блоки вида `} & (\n  {...}\n  | {...}\n)` для Insert/Update
+fn push_union_blocks(lines: &mut Vec<String>, payload_enums: &[&Field], branches_list: Vec<Vec<String>>) {
+  if payload_enums.is_empty() {
+    lines.push("}".to_string());
+    return;
+  }
+  for (i, branches) in branches_list.iter().enumerate() {
+    lines.push(if i == 0 { "} & (".to_string() } else { ") & (".to_string() });
+    for (j, branch) in branches.iter().enumerate() {
+      lines.push(if j == 0 { format!("  {}", branch) } else { format!("  | {}", branch) });
+    }
+  }
+  lines.push(")".to_string());
 }
 
 fn get_field_select_str(field: &Field, schema: &Schema) -> String {
@@ -203,40 +344,80 @@ fn main() {
 
     lines.push(format!("// {}", model.name));
 
+    // Enum с полями в вариантах превращаются в discriminated union
+    let payload_enums: Vec<&Field> = model.fields.iter()
+      .filter(|field| !field.name.starts_with("@") && is_payload_enum(field))
+      .collect();
+
     // Заполняем поля от ID
     lines.push(format!("type {} = {{", get_model_id_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
       if matches!(field.location, FieldLocation::Key { .. }) {
-        lines.push(get_field_str(field, &schema));
+        lines.push(get_field_id_str(field, &schema));
       }
     }
     lines.push("}".to_string());
 
     // Заполняем поля от body
-    lines.push(format!("type {} = {} & {{", get_model_name(model), get_model_id_name(model)));
+    // При наличии payload enum генерируем XModelBase + union, чтобы GetResult дистрибутивно
+    // выводил поля варианта только при соответствующем значении enum
+    let model_base_name = if payload_enums.is_empty() {
+      get_model_name(model)
+    } else {
+      format!("{}Base", get_model_name(model))
+    };
+    lines.push(format!("type {} = {} & {{", model_base_name, get_model_id_name(model)));
     for field in model.fields.iter() {
-      if !matches!(field.location, FieldLocation::Key { .. }) {
-        lines.push(get_field_str(field, &schema));
+      if field.name.starts_with("@") { continue; }
+      if matches!(field.location, FieldLocation::Key { .. }) {
+        // Ref-ключи в Id-типе сужены до ModelId — здесь возвращаем им полный тип
+        if matches!(field.ty, FieldType::Ref(_)) {
+          lines.push(get_field_str(field, &schema));
+        }
+        continue;
       }
+      if is_variant_field(field) || is_payload_enum(field) { continue; }
+      lines.push(get_field_str(field, &schema));
     }
     lines.push("}".to_string());
+
+    if !payload_enums.is_empty() {
+      // Декартово произведение веток всех payload enum модели
+      let mut combos: Vec<String> = vec![String::new()];
+      for field in payload_enums.iter() {
+        let branches = get_model_enum_branches(field, model, &schema);
+        combos = combos.iter().flat_map(|combo| {
+          branches.iter().map(move |branch| {
+            if combo.is_empty() { branch.clone() } else { format!("{}, {}", combo, branch) }
+          })
+        }).collect();
+      }
+      lines.push(format!("type {} =", get_model_name(model)));
+      for combo in combos {
+        lines.push(format!("  | ({} & {{ {} }})", model_base_name, combo));
+      }
+    }
 
     // Заполняем поля для Insert
     lines.push(format!("type {} = {{", get_model_insert_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
+      if is_variant_field(field) || is_payload_enum(field) { continue; }
       lines.push(get_field_insert_str(field, &schema));
     }
-    lines.push("}".to_string());
+    push_union_blocks(&mut lines, &payload_enums,
+      payload_enums.iter().map(|field| get_insert_enum_branches(field, model, &schema)).collect());
 
     // Заполняем поля для Update
     lines.push(format!("type {} = {{", get_model_update_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
+      if is_variant_field(field) || is_payload_enum(field) { continue; }
       lines.push(get_field_update_str(field, &schema));
     }
-    lines.push("}".to_string());
+    push_union_blocks(&mut lines, &payload_enums,
+      payload_enums.iter().map(|field| get_update_enum_branches(field, model, &schema)).collect());
 
     
     // Заполняем поля для select

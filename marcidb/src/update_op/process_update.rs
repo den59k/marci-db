@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, delete_op::process_delete, index_utils::{encode_full_index, encode_index}, schema::{Entity, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, delete_op::process_delete, index_utils::{encode_full_index, encode_index}, schema::{Entity, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -10,7 +10,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
     return Ok(false)
   };
 
-  let resp = update_fields(&update.update_fields, &data, entity, | field, old_value, new_value | {
+  let resp = update_fields(&update.update_fields, id, &data, entity, &db.schema, | field, old_value, new_value | {
     for field_index in field.indexes.iter() {
       let mut tree = tx.get_tree(field_index.tree_name()).unwrap().unwrap();
 
@@ -77,13 +77,21 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
   Ok(true)
 }
 
-fn update_fields<F>(fields: &[UpdateField], source_data: &[u8], entity: &Entity, on_change: F) -> Result<Option<Vec<u8>>,UpdateError>
+fn update_fields<F>(fields: &[UpdateField], id: &[u8], source_data: &[u8], entity: &Entity, schema: &Schema, on_change: F) -> Result<Option<Vec<u8>>,UpdateError>
   where F: Fn(&Field, Option<&[u8]>, Option<&[u8]>) -> Result<(),UpdateError> {
 
   let mut cloned_data: Option<Vec<u8>> = None;
 
   for update_field in fields.iter() {
     let data = cloned_data.as_deref().unwrap_or(source_data);
+
+    // Пропускаем поля, чей enum-вариант не совпадает с текущим значением enum.
+    // Проверка идёт по уже изменённым данным: если в этом же update меняется сам enum,
+    // он находится в списке раньше своих полей и значение к этому моменту уже новое
+    if !check_exists_condition(entity, &update_field.field.condition, id, data, schema) {
+      continue;
+    }
+
     let offset_start = get_offset(data, update_field.offset_pos);
 
     match &update_field.value {
@@ -144,7 +152,7 @@ fn set_null(dst: &mut Vec<u8>, entity: &Entity, field: &Field, offset_pos: usize
 // Вставка данных
 fn insert_data(dst: &mut Vec<u8>, item_data: &[u8], entity: &Entity, offset_pos: usize) {
   let insert_place = get_end(dst, offset_pos, entity.payload_offset);
-  dst[offset_pos..offset_pos + 4].copy_from_slice(&insert_place.to_be_bytes());
+  dst[offset_pos..offset_pos + 4].copy_from_slice(&(insert_place as u32).to_be_bytes());
 
   if !item_data.is_empty() {
     dst.splice(insert_place..insert_place, item_data.iter().cloned());
@@ -237,8 +245,8 @@ fn test_update_op() {
     let update_op = parse_update(&schema, user_model, &json!({
       "name": null
     })).unwrap();
-  
-    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
+
+    let updated = update_fields(&update_op.update_fields, &encoded.id, &encoded.data, user_model, &schema, |_, _, _| { Ok(()) }).unwrap();
        
     let encoded_resp = parse_insert(&schema, user_model, &json!({
       "name": null,
@@ -253,8 +261,8 @@ fn test_update_op() {
       "name": "Alice New",
       "age": { "$increment": 10 }
     })).unwrap();
-  
-    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
+
+    let updated = update_fields(&update_op.update_fields, &encoded.id, &encoded.data, user_model, &schema, |_, _, _| { Ok(()) }).unwrap();
        
     let encoded_resp = parse_insert(&schema, user_model, &json!({
       "name": "Alice New",

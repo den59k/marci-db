@@ -23,7 +23,7 @@ model Project {
 enum Role {
     creator
     admin {
-    sign      String
+        sign      String
     }
 }
 

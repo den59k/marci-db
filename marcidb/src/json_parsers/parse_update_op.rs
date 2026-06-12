@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, parse_id, schema::{Entity, FieldLocation, FieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
+use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, parse_id, schema::{Entity, FieldExistsCondition, FieldLocation, FieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
 
 pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<UpdateOp<'a>, EncodeError> {
     let obj = json_val
@@ -19,7 +19,7 @@ fn parse_update_op<'a>(
     let mut update_fields = vec![];
     let mut update_refs = vec![];
 
-    for field in entity.fields.iter() {
+    for (field_index, field) in entity.fields.iter().enumerate() {
         let Some(value) = obj.get(&field.name) else {
             continue;
         };
@@ -151,6 +151,26 @@ fn parse_update_op<'a>(
         let FieldLocation::Body { offset_pos } = field.location else {
             return Err(EncodeError::OnlyBodyKeyAvailableToEdit(field.full_name.clone()));
         };
+
+        // При смене значения enum очищаем поля других вариантов, иначе их данные
+        // останутся в body и "воскреснут" при обратной смене варианта.
+        // Эти Null-операции добавляются ДО записи самого enum: их exists_condition
+        // проверяется по ещё не изменённому значению enum
+        if let FieldType::Enum(enum_info) = &field.ty {
+            let new_variant = value.as_str().and_then(|s| enum_info.variants_map.get(s)).copied();
+            for variant_field in entity.fields.iter() {
+                let FieldExistsCondition::EnumValue { field_index: cond_field_index, variant } = &variant_field.condition else {
+                    continue;
+                };
+                if *cond_field_index != field_index || Some(*variant) == new_variant {
+                    continue;
+                }
+                let FieldLocation::Body { offset_pos } = variant_field.location else {
+                    continue;
+                };
+                update_fields.push(UpdateField { field: variant_field, value: UpdateValue::Null, offset_pos });
+            }
+        }
 
         if value.is_null() {
             update_fields.push(UpdateField { field, value: UpdateValue::Null, offset_pos });

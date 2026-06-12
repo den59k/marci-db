@@ -1,7 +1,9 @@
-type ServiceKeys = "$where" | "$order" | "$take" | "$limit";
+type ServiceKeys = "$where" | "$order" | "$limit";
 
-type GetResult<TModel, TSelect extends Record<string, any>> = {
-  [K in keyof Omit<TSelect, ServiceKeys> as TSelect[K] extends false | undefined ? never : K]:
+// Дистрибутивен по union-моделям (discriminated union у enum с payload):
+// ключи, которых нет в текущей ветке union, отбрасываются
+type GetResult<TModel, TSelect extends Record<string, any>> = TModel extends any ? {
+  [K in keyof Omit<TSelect, ServiceKeys> as TSelect[K] extends false | undefined ? never : K extends keyof TModel ? K : never]:
     K extends keyof TModel
       ? TSelect[K] extends true
         ? TModel[K]                          // выбрали поле целиком
@@ -11,7 +13,7 @@ type GetResult<TModel, TSelect extends Record<string, any>> = {
             : GetResult<NonNullable<TModel[K]>, TSelect[K]> | Extract<TModel[K], null>
           : TModel[K]                        // fallback
       : never
-}
+} : never
 
 type RefUpdate<I> = {
   "$connect"?: I
@@ -24,14 +26,14 @@ type RefUpdateStruct<I,U> = {
 }
 
 type RefListUpdate<I> = {
-  "$connect": I | I[],
-  "$remove": I | I[],
+  "$connect"?: I | I[],
+  "$remove"?: I | I[],
 }
 
 type RefListUpdateStruct<I,U> = {
-  "$push": I | I[],
-  "$remove": I | I[],
-  "$set": I[]
+  "$push"?: I | I[],
+  "$remove"?: I | I[],
+  "$set"?: I[]
 }
 
 type WhereValue<T> = T | { "$and": T[] } | { "$or": T[] } | { "$not": T }

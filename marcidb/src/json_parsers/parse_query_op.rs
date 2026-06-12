@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Where}, schema::{Entity, FieldExistsCondition, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Where}, schema::{Entity, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -32,9 +32,6 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
       continue;
     };
     if matches!(val, Value::Bool(false)) {
-      continue;
-    }
-    if let FieldExistsCondition::EnumValue { field_index, .. }  = &field.condition && !mask[*field_index] {
       continue;
     }
     match &field.ty {
