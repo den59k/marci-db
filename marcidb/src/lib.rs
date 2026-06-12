@@ -17,6 +17,7 @@ pub use crate::aggregate_op::{AggregateOp,AggregateResult,SumValue};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::MarciDB;
 
+pub use crate::query_op::DecodeCtx;
 pub use crate::update_op::UpdateError;
 pub use crate::write_op::InsertError;
 pub use crate::delete_op::DeleteError;

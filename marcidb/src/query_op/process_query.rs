@@ -100,9 +100,9 @@ pub fn get_id_from_index_key(key: &[u8], fixed_size: Option<usize>) -> Vec<u8> {
 pub fn process_data<'a, 'b, U, F>(
   id: &'b [u8],
   data: &'b [u8],
-  ctx: &mut TransationContext<'a, F>,
+  ctx: &mut TransationContext<'a, U, F>,
   query: &'a QueryOp,
-) -> Option<U> where F: Fn(DecodeCtx<U>) -> U {
+) -> Option<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
 
   if let Some(where_op) = &query.filter && !process_where(id, data, ctx, query.entity, where_op) {
     return None
@@ -115,9 +115,9 @@ pub fn process_data<'a, 'b, U, F>(
 pub fn decode_row<'a, 'b, U, F>(
   id: &'b [u8],
   data: &'b [u8],
-  ctx: &mut TransationContext<'a, F>,
+  ctx: &mut TransationContext<'a, U, F>,
   query: &'a QueryOp,
-) -> U where F: Fn(DecodeCtx<U>) -> U {
+) -> U where U: Clone, F: Fn(DecodeCtx<U>) -> U {
 
   let mut includes: Vec<IncludeResult<U>> = Vec::with_capacity(query.includes.len());
 
@@ -151,16 +151,32 @@ pub fn decode_row<'a, 'b, U, F>(
   return (ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema });
 }
 
-pub struct TransationContext<'a, F> {
+/// Кэш include-результатов одного вложенного запроса (id записи → результат декода).
+/// Хранится U — сейчас это JSON-строка, при переходе на бинарный формат код не меняется
+pub struct IncludeCache<U> {
+  pub hits: u32,
+  pub misses: u32,
+  pub items: HashMap<Vec<u8>, Option<U>>
+}
+
+impl<U> Default for IncludeCache<U> {
+  fn default() -> Self {
+    Self { hits: 0, misses: 0, items: HashMap::new() }
+  }
+}
+
+pub struct TransationContext<'a, U, F> {
   pub trees: HashMap<String, Arc<Tree<'a>>>,
   pub rx: &'a ReadTransaction,
   pub schema: &'a Schema,
-  pub f: F
+  pub f: F,
+  /// Кэши include-результатов на время одного запроса, по идентичности вложенного запроса
+  pub include_cache: HashMap<usize, IncludeCache<U>>
 }
 
-impl<'a, F> TransationContext<'a, F> {
+impl<'a, U, F> TransationContext<'a, U, F> {
   pub fn new(rx: &'a ReadTransaction, schema: &'a Schema, f: F) -> Self {
-    Self { trees: HashMap::new(), rx, f, schema }
+    Self { trees: HashMap::new(), rx, f, schema, include_cache: HashMap::new() }
   }
   pub fn get_tree(&mut self, key: &str) -> Arc<Tree<'a>> {
     self.trees

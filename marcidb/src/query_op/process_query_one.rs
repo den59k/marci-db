@@ -2,10 +2,11 @@ use crate::query_op::{DecodeCtx, PrefixKey, QueryOp, TransationContext, process_
 
 pub fn process_query_one<'a, U, F>(
     query: &'a QueryOp,
-    ctx: &mut TransationContext<'a, F>,
+    ctx: &mut TransationContext<'a, U, F>,
     parent: Option<ParentData>,
 ) -> Option<U>
 where
+    U: Clone,
     F: Fn(DecodeCtx<U>) -> U,
 {
     // Нестандартный порядок, смещение или курсор: переиспользуем механизм many с лимитом 1
@@ -40,11 +41,42 @@ where
         }
 
         Some(prefix_key) => {
-            let prefix = get_prefix(prefix_key, parent, ctx.schema)?;
+            let schema = ctx.schema;
+            let prefix = get_prefix(prefix_key, parent, schema)?;
+
+            // Связи many-to-one (FieldValue) разделяются между строками выборки —
+            // кэшируем готовый результат декода по id, чтобы не читать и не декодировать повторно.
+            // Если на первых строках не встретилось ни одного повтора, связи уникальны —
+            // кэш для этого include отключается, чтобы не платить за него впустую
+            const CACHE_DISABLE_AFTER_MISSES: u32 = 256;
+
+            let mut use_cache = matches!(prefix_key, PrefixKey::ParentField(_));
+            if use_cache {
+                let cache_ptr = query as *const QueryOp as usize;
+                if let Some(cache) = ctx.include_cache.get_mut(&cache_ptr) {
+                    if cache.hits == 0 && cache.misses >= CACHE_DISABLE_AFTER_MISSES {
+                        if !cache.items.is_empty() {
+                            cache.items = std::collections::HashMap::new();
+                        }
+                        use_cache = false;
+                    } else if let Some(cached) = cache.items.get(prefix) {
+                        cache.hits += 1;
+                        return cached.clone();
+                    }
+                }
+            }
+
             let tree = ctx.get_tree(&query.entity.name);
-            return tree.get(prefix).unwrap().and_then(|value| {
+            let result = tree.get(prefix).unwrap().and_then(|value| {
               process_data(prefix, &value, ctx, query)
             });
+
+            if use_cache {
+                let cache = ctx.include_cache.entry(query as *const QueryOp as usize).or_default();
+                cache.misses += 1;
+                cache.items.insert(prefix.to_vec(), result.clone());
+            }
+            return result;
         }
 
         None => {

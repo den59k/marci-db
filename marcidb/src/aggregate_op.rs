@@ -44,7 +44,7 @@ pub struct AggregateResult {
   pub max: Option<Vec<u8>>,
 }
 
-pub fn process_aggregate<'a, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>) -> AggregateResult {
+pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> AggregateResult {
   let mut result = AggregateResult::default();
 
   // Быстрые пути: count по ключам, без чтения и декодирования строк
@@ -133,7 +133,7 @@ struct Accumulators {
   max: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-fn aggregate_rows<'a, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, F>, op: &'a AggregateOp, acc: &mut Accumulators)
+fn aggregate_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F>, op: &'a AggregateOp, acc: &mut Accumulators)
   where I: Iterator<Item = (A, B)>, A: AsRef<[u8]>, B: AsRef<[u8]> {
 
   for (id, data) in iter {

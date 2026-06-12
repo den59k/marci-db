@@ -1,15 +1,15 @@
 use crate::{index_utils::{make_index_cursor_key, make_sort_key}, query_op::{DecodeCtx, PrefixKey, QueryOp, TransationContext, process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, maybe_rev, range_keys_iter}, process_where::process_where}, utils::get_data};
 
 pub fn process_query_many<'a, U, F>
-  (query: &'a QueryOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>) -> Vec<U>
-  where F: Fn(DecodeCtx<U>) -> U {
+  (query: &'a QueryOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> Vec<U>
+  where U: Clone, F: Fn(DecodeCtx<U>) -> U {
   process_query_many_limited(query, ctx, parent, None)
 }
 
 /// hard_limit — дополнительный потолок количества строк (используется findFirst)
 pub fn process_query_many_limited<'a, U, F>
-  (query: &'a QueryOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>, hard_limit: Option<usize>) -> Vec<U>
-  where F: Fn(DecodeCtx<U>) -> U {
+  (query: &'a QueryOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>, hard_limit: Option<usize>) -> Vec<U>
+  where U: Clone, F: Fn(DecodeCtx<U>) -> U {
 
   // Граница курсора для путей без позиционирования диапазоном:
   // post_sort сравнивает ключи сортировки, ленивые id-сканы — сами id
@@ -120,8 +120,8 @@ fn effective_limit(query: &QueryOp, hard_limit: Option<usize>) -> usize {
 /// Прогоняет строки скана через фильтр, курсор, skip/limit и декод.
 /// Ленивый путь даёт ранний выход по limit; post_sort сортирует строки в памяти до декода.
 /// cursor_gate: в post_sort-пути — ключ сортировки строки курсора, в ленивом — её id
-fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, F>, query: &'a QueryOp, hard_limit: Option<usize>, cursor_gate: Option<Vec<u8>>) -> Vec<U>
-  where F: Fn(DecodeCtx<U>) -> U, I: Iterator<Item = (A, B)>, A: AsRef<[u8]>, B: AsRef<[u8]> {
+fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F>, query: &'a QueryOp, hard_limit: Option<usize>, cursor_gate: Option<Vec<u8>>) -> Vec<U>
+  where U: Clone, F: Fn(DecodeCtx<U>) -> U, I: Iterator<Item = (A, B)>, A: AsRef<[u8]>, B: AsRef<[u8]> {
 
   let skip = query.skip.unwrap_or(0);
   let limit = effective_limit(query, hard_limit);

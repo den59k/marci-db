@@ -60,13 +60,13 @@ impl MarciDB {
     return &self.schema.models[index]
   }
 
-  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where F: Fn(DecodeCtx<U>) -> U { 
+  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
     return process_query_many(query, &mut ctx,None);
   }
 
-  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
+  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
     return process_query_one(query, &mut ctx,None);
@@ -87,7 +87,7 @@ impl MarciDB {
   pub fn aggregate(&self, op: &AggregateOp) -> AggregateResult {
     let rx = self.db.begin_read().unwrap();
     // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
-    let mut ctx = TransationContext::new(&rx, &self.schema, |_: DecodeCtx<()>| ());
+    let mut ctx: TransationContext<(), _> = TransationContext::new(&rx, &self.schema, |_: DecodeCtx<()>| ());
     return process_aggregate(op, &mut ctx, None);
   }
 

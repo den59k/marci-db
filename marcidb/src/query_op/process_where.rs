@@ -2,7 +2,7 @@ use memchr::memmem;
 
 use crate::{query_op::{FieldCompare, FieldCompareRef, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
 
-pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut TransationContext<'a, F>, entity: &Entity, where_op: &Where<'a>) -> bool {
+pub fn process_where<'a, 'b, U, F>(id: &'b [u8], body: &'b [u8], ctx: &mut TransationContext<'a, U, F>, entity: &Entity, where_op: &Where<'a>) -> bool {
 
   match where_op {
     Where::True => true,
@@ -70,8 +70,8 @@ pub fn process_where<'a, 'b, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Transati
   }
 }
 
-pub fn has_items<'a, F>(
-  ctx: &mut TransationContext<'a, F>, 
+pub fn has_items<'a, U, F>(
+  ctx: &mut TransationContext<'a, U, F>, 
   entity: &Entity, 
   where_op: &Where<'a>, 
   prefix_key: &PrefixKey, 
@@ -120,8 +120,8 @@ pub fn has_items<'a, F>(
   }
 }
 
-pub fn has_one_item<'a, F>(
-  ctx: &mut TransationContext<'a, F>, 
+pub fn has_one_item<'a, U, F>(
+  ctx: &mut TransationContext<'a, U, F>, 
   entity: &Entity, 
   where_op: &Where<'a>, 
   prefix_key: &PrefixKey, 
@@ -145,8 +145,8 @@ pub fn has_one_item<'a, F>(
   return process_where(&item_id, &value, ctx, entity, where_op)
 }
 
-pub fn has_one_item_exists<'a, F>(
-  ctx: &mut TransationContext<'a, F>, 
+pub fn has_one_item_exists<'a, U, F>(
+  ctx: &mut TransationContext<'a, U, F>, 
   entity: &Entity, 
   prefix_key: &PrefixKey, 
   parent_entity: &Entity,

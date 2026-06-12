@@ -212,3 +212,71 @@ fn many_to_many_query_test() {
   }
 
 }
+#[test]
+fn include_cache_test() {
+  let schema_str = "
+    model User {
+      name        String
+      posts       Post[]      @bind(Post.author)
+    }
+
+    model Post {
+      title       String
+      author      User?
+    }
+  ";
+
+  let dir = tempdir().unwrap();
+  let db: MarciDB = MarciDB::new(schema_str, dir.path().to_str().unwrap());
+
+  let alice = insert_data(&db, "User", json!({ "name": "Alice" }));
+  let bob = insert_data(&db, "User", json!({ "name": "Bob" }));
+
+  insert_data(&db, "Post", json!({ "title": "First", "author": { "id": alice["id"] } }));
+  insert_data(&db, "Post", json!({ "title": "Second", "author": { "id": alice["id"] } }));
+  insert_data(&db, "Post", json!({ "title": "Third", "author": { "id": bob["id"] } }));
+  insert_data(&db, "Post", json!({ "title": "Orphan" }));
+
+  // Общий автор у нескольких постов декодируется через кэш — результат не должен отличаться
+  {
+    let resp = get_data(&db, "Post", json!({ "title": true, "author": { "name": true } }));
+    assert_eq!(resp, json!([
+      { "title": "First", "author": { "name": "Alice" } },
+      { "title": "Second", "author": { "name": "Alice" } },
+      { "title": "Third", "author": { "name": "Bob" } },
+      { "title": "Orphan", "author": null }
+    ]));
+  }
+
+  // Два разных select одной сущности в одном запросе не делят кэш между собой
+  {
+    let schema_str2 = "
+      model Item {
+        title       String
+        owner       User?
+        editor      User?
+      }
+
+      model User {
+        name        String
+        rank        UInt        @default(1)
+      }
+    ";
+    let dir2 = tempdir().unwrap();
+    let db2: MarciDB = MarciDB::new(schema_str2, dir2.path().to_str().unwrap());
+
+    let user = insert_data(&db2, "User", json!({ "name": "Dana", "rank": 7 }));
+    insert_data(&db2, "Item", json!({ "title": "A", "owner": { "id": user["id"] }, "editor": { "id": user["id"] } }));
+    insert_data(&db2, "Item", json!({ "title": "B", "owner": { "id": user["id"] }, "editor": { "id": user["id"] } }));
+
+    let resp = get_data(&db2, "Item", json!({
+      "title": true,
+      "owner": { "name": true },
+      "editor": { "rank": true }
+    }));
+    assert_eq!(resp, json!([
+      { "title": "A", "owner": { "name": "Dana" }, "editor": { "rank": 7 } },
+      { "title": "B", "owner": { "name": "Dana" }, "editor": { "rank": 7 } }
+    ]));
+  }
+}
