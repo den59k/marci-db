@@ -61,6 +61,63 @@ fn count_test() {
     let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "age": { "$gt": 100 } } }));
     assert_eq!(resp, json!({ "count": 0 }));
   }
+
+  // null / not-null по индексированному nullable-полю — разность размеров деревьев, без скана
+  {
+    let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "rating": { "$not": null } } }));
+    assert_eq!(resp, json!({ "count": 3 }));
+
+    let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "rating": null } }));
+    assert_eq!(resp, json!({ "count": 1 }));
+  }
+}
+
+#[test]
+fn min_max_index_fast_path_test() {
+  let schema_str = "
+    model Reading {
+      sensor      String      @index
+      celsius     Int         @index
+      voltage     Double      @index
+    }
+  ";
+
+  let dir = tempdir().unwrap();
+  let db = MarciDB::new(schema_str, dir.path().to_str().unwrap());
+
+  // Пустая таблица: min/max — null, count — 0
+  {
+    let resp = get_aggregate(&db, "Reading", json!({ "$count": true, "$min": "celsius", "$max": "celsius" }));
+    assert_eq!(resp, json!({ "count": 0, "min": null, "max": null }));
+  }
+
+  insert_data(&db, "Reading", json!({ "sensor": "north", "celsius": -25, "voltage": 3.7 }));
+  insert_data(&db, "Reading", json!({ "sensor": "south", "celsius": 14, "voltage": -0.5 }));
+  insert_data(&db, "Reading", json!({ "sensor": "east", "celsius": -3, "voltage": 12.25 }));
+
+  // Int с отрицательными значениями: обратный sign-flip декод из ключа индекса
+  {
+    let resp = get_aggregate(&db, "Reading", json!({ "$count": true, "$min": "celsius", "$max": "celsius" }));
+    assert_eq!(resp, json!({ "count": 3, "min": -25, "max": 14 }));
+  }
+
+  // Double: отрицательные инвертируются полностью
+  {
+    let resp = get_aggregate(&db, "Reading", json!({ "$min": "voltage", "$max": "voltage" }));
+    assert_eq!(resp, json!({ "min": -0.5, "max": 12.25 }));
+  }
+
+  // Строковый Value-индекс: значение до нуль-терминатора
+  {
+    let resp = get_aggregate(&db, "Reading", json!({ "$min": "sensor", "$max": "sensor" }));
+    assert_eq!(resp, json!({ "min": "east", "max": "south" }));
+  }
+
+  // Смешанный запрос: min по индексу + sum — уходит в скан, результат тот же
+  {
+    let resp = get_aggregate(&db, "Reading", json!({ "$min": "celsius", "$sum": "celsius" }));
+    assert_eq!(resp, json!({ "min": -25, "sum": -14 }));
+  }
 }
 
 #[test]

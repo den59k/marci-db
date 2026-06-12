@@ -91,6 +91,53 @@ fn encode_num_wh(value: &NumberValue) -> Vec<u8> {
   }
 }
 
+/// Обратное преобразование к encode_index_number: байты ключа индекса → be-bytes значения
+pub fn decode_index_number(ty: &FieldIndexNum, data: &[u8]) -> Vec<u8> {
+  match ty {
+    FieldIndexNum::Int64 => {
+      let mut out = data.to_vec();
+      out[0] ^= 0x80;
+      out
+    },
+    FieldIndexNum::UInt64 => data.to_vec(),
+    FieldIndexNum::Float | FieldIndexNum::Double => {
+      let mut out = data.to_vec();
+      if out[0] & 0x80 != 0 {
+        // Было положительное — возвращаем знаковый бит
+        out[0] ^= 0x80;
+      } else {
+        // Было отрицательное — инвертируем все биты обратно
+        for b in &mut out {
+          *b = !*b;
+        }
+      }
+      out
+    }
+  }
+}
+
+/// Извлекает значение поля из ключа индекса (encoded_value ++ id)
+/// и возвращает его в формате get_data (be-bytes значения)
+pub fn decode_index_key_value(field: &Field, index: &FieldIndex, key: &[u8]) -> Vec<u8> {
+  match index {
+    FieldIndex::Number { ty, .. } => {
+      let size = field.get_size().expect("Number index field must have fixed size");
+      decode_index_number(ty, &key[..size])
+    },
+    FieldIndex::Value { .. } => {
+      match field.get_size() {
+        Some(size) => key[..size].to_vec(),
+        // Динамический размер: значение до нуль-терминатора
+        None => {
+          let pos = key.iter().position(|&b| b == b'\0').unwrap_or(key.len());
+          key[..pos].to_vec()
+        }
+      }
+    },
+    FieldIndex::Custom { .. } => panic!("Cannot decode value from custom index")
+  }
+}
+
 /// i64 be_bytes → лексикографически сортируемые байты
 /// Флипаем только старший бит (знаковый)
 pub fn encode_i64(bytes: &[u8]) -> Vec<u8> {
@@ -161,8 +208,29 @@ pub fn make_sort_key(entity: &Entity, field: &Field, id: &[u8], data: &[u8], sch
   key
 }
 
+// Приоритеты условий для выбора индексного пути доступа (меньше — селективнее)
+const SCORE_ID: u8 = 0;          // точный первичный ключ
+const SCORE_UNIQUE_EQ: u8 = 1;   // eq по unique-индексу
+const SCORE_ID_PREFIX: u8 = 2;   // префикс составного первичного ключа
+const SCORE_EQ: u8 = 3;          // eq по обычному индексу
+const SCORE_STARTS_WITH: u8 = 4;
+const SCORE_RANGE: u8 = 5;
+
 // Генеририрует индекс для Where
 pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> Option<PrefixKey<'a>> {
+  generate_prefix_scored(entity, where_op).map(|(prefix, _)| prefix)
+}
+
+fn id_prefix_score(prefix: &PrefixKey) -> u8 {
+  match prefix {
+    PrefixKey::Id(_) => SCORE_ID,
+    _ => SCORE_ID_PREFIX
+  }
+}
+
+/// Возвращает путь доступа вместе с приоритетом. Из нескольких индексированных
+/// условий выбирается самое селективное по статическому приоритету
+fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(PrefixKey<'a>, u8)> {
   match where_op {
     Where::True => None,
     Where::And(items) => {
@@ -174,11 +242,23 @@ pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> O
           _ => None
         }
       }).collect();
-      if let Some(prefix) = try_to_generate_id_prefix(entity, key_fields) {
-        return Some(prefix)
+      let id_prefix = try_to_generate_id_prefix(entity, key_fields);
+      if let Some(prefix) = &id_prefix && id_prefix_score(prefix) == SCORE_ID {
+        return id_prefix.map(|p| (p, SCORE_ID));
       }
 
-      return items.iter().find_map(|f| generate_prefix_from_where(entity, f))
+      let best = items.iter()
+        .filter_map(|f| generate_prefix_scored(entity, f))
+        .min_by_key(|(_, score)| *score);
+
+      match (id_prefix, best) {
+        (Some(prefix), Some((best_prefix, best_score))) => {
+          let prefix_score = id_prefix_score(&prefix);
+          if best_score < prefix_score { Some((best_prefix, best_score)) } else { Some((prefix, prefix_score)) }
+        },
+        (Some(prefix), None) => { let score = id_prefix_score(&prefix); Some((prefix, score)) },
+        (None, best) => best
+      }
     },
     Where::Or(_) => None,
     Where::Not(_) => None,
@@ -186,34 +266,38 @@ pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> O
       // Проверяем, это может быть единственное поле для ID
       if matches!(field.location, FieldLocation::Key { index } if index == 0) && let FieldCompare::Eq(value) = field_compare {
         if let Some(prefix) = try_to_generate_id_prefix(entity, vec![( field, value )]) {
-          return Some(prefix)
+          let score = id_prefix_score(&prefix);
+          return Some((prefix, score))
         }
       }
 
       for index in field.indexes.iter() {
         match index {
-            FieldIndex::Value { tree_name,  .. } => {
+            FieldIndex::Value { tree_name, unique } => {
               return match field_compare {
-                  FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name),
+                  FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name)
+                    .map(|p| (p, if *unique { SCORE_UNIQUE_EQ } else { SCORE_EQ })),
                   // Здесь мы не ставим нуль терминатор в конец, поскольку не обязательно, чтобы длина строк совпадала
-                  FieldCompare::StringStartsWith(val) => generate_prefix_starts_with(val.clone(), tree_name), 
+                  FieldCompare::StringStartsWith(val) => generate_prefix_starts_with(val.clone(), tree_name)
+                    .map(|p| (p, SCORE_STARTS_WITH)),
                   _ => None
               }
             }
-            FieldIndex::Number { tree_name, ty, .. } => {
+            FieldIndex::Number { tree_name, ty, unique } => {
               return match field_compare {
-                FieldCompare::Eq(val) => generate_prefix( encode_index_number(ty, val), tree_name),
+                FieldCompare::Eq(val) => generate_prefix( encode_index_number(ty, val), tree_name)
+                  .map(|p| (p, if *unique { SCORE_UNIQUE_EQ } else { SCORE_EQ })),
                 FieldCompare::Gte(val) => {
-                  Some(PrefixKey::IndexRange { start: Some(encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() })
+                  Some((PrefixKey::IndexRange { start: Some(encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
                 }
                 FieldCompare::Gt(val) => {
-                  Some(PrefixKey::IndexRange { start: increase_bit(&encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() })
+                  Some((PrefixKey::IndexRange { start: increase_bit(&encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
                 }
                 FieldCompare::Lte(val) => {
-                  Some(PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() })
+                  Some((PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
                 }
                 FieldCompare::Lt(val) => {
-                  Some(PrefixKey::IndexRange { start: None, end: decrease_bit(&encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() })
+                  Some((PrefixKey::IndexRange { start: None, end: decrease_bit(&encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
                 }
                 _ => None
               }

@@ -337,6 +337,59 @@ mod tests {
   }
 
   #[test]
+  fn test_prefix_priority() {
+    let schema = parse_schema("
+      model User {
+          age         UInt      @index
+          email       String    @unique
+          city        String    @index
+      }
+    ");
+    let user_model = &schema.models[0];
+
+    // eq по unique побеждает диапазон, даже если идёт позже в схеме
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "age": { "$gte": 10 }, "email": "a@b.c" }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, .. }) => assert_eq!(tree_name.as_str(), "index_User.email"),
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // Обычный eq побеждает диапазон
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "age": { "$gte": 10 }, "city": "Oslo" }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, .. }) => assert_eq!(tree_name.as_str(), "index_User.city"),
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // unique eq побеждает обычный eq
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "city": "Oslo", "email": "a@b.c" }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, .. }) => assert_eq!(tree_name.as_str(), "index_User.email"),
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // Точный id побеждает всё
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "id": 1, "email": "a@b.c" }
+      })).unwrap();
+      assert!(matches!(q.prefix_key, Some(PrefixKey::Id(_))), "Expected Id, got {:?}", q.prefix_key);
+    }
+  }
+
+  #[test]
   fn test_sort_plan() {
     let schema = parse_schema("
       model User {

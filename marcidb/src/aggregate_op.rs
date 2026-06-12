@@ -1,4 +1,4 @@
-use crate::{Field, query_op::{ParentData, PrefixKey, TransationContext, Where, get_id_from_index_key, get_prefix, process_where, range_keys_iter}, schema::{Entity, PrimitiveFieldType}, utils::get_data};
+use crate::{Field, index_utils::decode_index_key_value, query_op::{FieldCompare, ParentData, PrefixKey, TransationContext, Where, get_id_from_index_key, get_prefix, process_where, range_keys_iter}, schema::{Entity, FieldExistsCondition, FieldIndex, PrimitiveFieldType}, utils::get_data};
 
 #[derive(Debug)]
 pub struct AggregateOp<'a> {
@@ -71,6 +71,30 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
     return result;
   }
 
+  // count по null/not-null индексированного поля: sparse-индекс не содержит null-строк,
+  // поэтому разность размеров деревьев даёт точный ответ без скана
+  if op.sum.is_none() && op.avg.is_none() && op.min.is_none() && op.max.is_none() && op.prefix_key.is_none() {
+    if let Some(Where::Field(field, compare @ (FieldCompare::EqNull | FieldCompare::NeNull))) = &op.filter
+      && matches!(field.condition, FieldExistsCondition::None)
+      && let Some(index) = find_usable_index(field) {
+
+      let index_len = ctx.get_tree(index_tree_name(index)).len();
+      result.count = match compare {
+        FieldCompare::NeNull => index_len,
+        _ => ctx.get_tree(&op.entity.name).len() - index_len
+      };
+      return result;
+    }
+  }
+
+  // min/max по крайним ключам индекса: O(log n) вместо скана.
+  // Применимо без фильтра и без sum/avg, когда все запрошенные поля индексированы и non-nullable
+  if op.filter.is_none() && op.prefix_key.is_none() && op.sum.is_none() && op.avg.is_none() {
+    if let Some(fast_result) = try_minmax_by_index(op, ctx) {
+      return fast_result;
+    }
+  }
+
   let mut acc = Accumulators::default();
 
   match &op.prefix_key {
@@ -120,6 +144,51 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
   result.min = acc.min.map(|(_, value)| value);
   result.max = acc.max.map(|(_, value)| value);
   result
+}
+
+fn find_usable_index(field: &Field) -> Option<&FieldIndex> {
+  field.indexes.iter().find(|i| matches!(i, FieldIndex::Value { .. } | FieldIndex::Number { .. }))
+}
+
+fn index_tree_name(index: &FieldIndex) -> &str {
+  match index {
+    FieldIndex::Value { tree_name, .. } | FieldIndex::Number { tree_name, .. } => tree_name,
+    _ => unreachable!()
+  }
+}
+
+/// Поле пригодно для min/max по крайним ключам индекса: индексировано, non-nullable,
+/// не из enum-варианта (sparse-индекс мог бы потерять строки)
+fn minmax_index<'a>(field: Option<&'a Field>) -> Option<Option<(&'a Field, &'a FieldIndex)>> {
+  let Some(field) = field else {
+    return Some(None); // агрегат не запрошен — ограничений нет
+  };
+  if field.nullable || !matches!(field.condition, FieldExistsCondition::None) {
+    return None;
+  }
+  find_usable_index(field).map(|index| Some((field, index)))
+}
+
+/// min/max через первый/последний ключ индекса, count через len()
+fn try_minmax_by_index<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>) -> Option<AggregateResult> {
+  let min_index = minmax_index(op.min)?;
+  let max_index = minmax_index(op.max)?;
+
+  let mut result = AggregateResult::default();
+  if op.count {
+    result.count = ctx.get_tree(&op.entity.name).len();
+  }
+
+  if let Some((field, index)) = min_index {
+    let index_tree = ctx.get_tree(index_tree_name(index));
+    result.min = index_tree.first().unwrap().map(|(key, _)| decode_index_key_value(field, index, &key));
+  }
+  if let Some((field, index)) = max_index {
+    let index_tree = ctx.get_tree(index_tree_name(index));
+    result.max = index_tree.last().unwrap().map(|(key, _)| decode_index_key_value(field, index, &key));
+  }
+
+  Some(result)
 }
 
 #[derive(Default)]
