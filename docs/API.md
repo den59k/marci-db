@@ -27,6 +27,9 @@ model Post {
 enum Role {
     viewer
     admin {
+        level   Int
+    }
+    admin | moderator {
         sign    String
     }
 }
@@ -63,7 +66,8 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 
 - `struct` — nested entity stored under the parent's key prefix; inserted/updated inline with the parent.
 - `Model` / `Model[]` fields — relations by id; lists require a `@bind` on the opposite side.
-- `enum` variants may carry **payload fields** which are injected into the model itself. In TS this is a discriminated union: `{ role: "viewer" } | { role: "admin", sign: string }`. Switching the variant on update requires the full payload of the new variant and clears fields of the old one.
+- `enum` variants may carry **payload fields** which are injected into the model itself. In TS this is a discriminated union: `{ role: "viewer" } | { role: "admin", level: number, sign: string } | { role: "moderator", sign: string }`. Switching the variant on update requires the full payload of the new variant and clears fields of the old one.
+- Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
 
 ## Queries
 

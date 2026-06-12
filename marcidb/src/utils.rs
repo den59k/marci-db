@@ -112,15 +112,12 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
 
 pub fn check_exists_condition(entity: &Entity, condition: &FieldExistsCondition, id: &[u8], data: &[u8], schema: &Schema) -> bool {
   match condition {
-      FieldExistsCondition::EnumValue { field_index, variant } => {
+      FieldExistsCondition::EnumValue { field_index, variants } => {
         let Some(val) = get_data(entity, &entity.fields[*field_index], &id, &data, schema) else {
             return false;
         };
         let val = u16::from_be_bytes(val.try_into().unwrap());
-        if val != *variant {
-            return false;
-        }
-        return true;
+        return variants.contains(&val);
       },
       FieldExistsCondition::None => {
         return true

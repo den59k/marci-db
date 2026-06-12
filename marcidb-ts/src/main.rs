@@ -218,8 +218,12 @@ fn get_update_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> 
   let mut branches = vec![];
 
   let mut parts = vec![format!("{}?: never", field.name)];
+  let mut seen: Vec<&str> = vec![];
   for (_, variant_fields) in variants.iter() {
     for variant_field in variant_fields {
+      // Общее поле нескольких вариантов добавляем один раз
+      if seen.contains(&variant_field.name.as_str()) { continue; }
+      seen.push(variant_field.name.as_str());
       parts.push(get_field_update_str(variant_field, schema).trim_start().to_string());
     }
   }
@@ -243,12 +247,22 @@ fn get_update_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> 
 }
 
 /// Добавляет `field?: never` для полей всех вариантов, кроме текущего —
-/// закрывает ветку union от полей чужих вариантов
+/// закрывает ветку union от полей чужих вариантов.
+/// Общее поле нескольких вариантов не запрещаем, если текущий вариант — один из них
 fn push_never_fields(parts: &mut Vec<String>, variants: &[(&String, Vec<&Field>)], current_variant: Option<&String>) {
+  let current_fields: Vec<&str> = variants.iter()
+    .filter(|(name, _)| Some(*name) == current_variant)
+    .flat_map(|(_, fields)| fields.iter().map(|f| f.name.as_str()))
+    .collect();
+
+  let mut seen: Vec<&str> = vec![];
   for (variant_name, variant_fields) in variants.iter() {
     if Some(*variant_name) == current_variant { continue; }
     for variant_field in variant_fields {
-      parts.push(format!("{}?: never", variant_field.name));
+      let name = variant_field.name.as_str();
+      if current_fields.contains(&name) || seen.contains(&name) { continue; }
+      seen.push(name);
+      parts.push(format!("{}?: never", name));
     }
   }
 }

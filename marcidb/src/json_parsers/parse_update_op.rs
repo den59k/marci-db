@@ -159,10 +159,11 @@ fn parse_update_op<'a>(
         if let FieldType::Enum(enum_info) = &field.ty {
             let new_variant = value.as_str().and_then(|s| enum_info.variants_map.get(s)).copied();
             for variant_field in entity.fields.iter() {
-                let FieldExistsCondition::EnumValue { field_index: cond_field_index, variant } = &variant_field.condition else {
+                let FieldExistsCondition::EnumValue { field_index: cond_field_index, variants } = &variant_field.condition else {
                     continue;
                 };
-                if *cond_field_index != field_index || Some(*variant) == new_variant {
+                // Общее поле, принадлежащее и новому варианту, не очищаем
+                if *cond_field_index != field_index || new_variant.is_some_and(|v| variants.contains(&v)) {
                     continue;
                 }
                 let FieldLocation::Body { offset_pos } = variant_field.location else {

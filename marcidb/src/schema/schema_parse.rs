@@ -187,32 +187,37 @@ fn create_entity_model(field: &Field, st: &Entity, parent_name: &String) -> Enti
     entity_model
 }
 
-/// Добавляет поля из Enum в текущую Entity
+/// Добавляет поля из Enum в текущую Entity.
+/// Общее поле нескольких вариантов добавляется один раз — его индекс попадает в списки всех своих вариантов
 fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String, field_index: usize) -> EnumInfo {
-    let mut variants: HashMap<u16,Vec<usize>> = HashMap::new();
-    for (variant_name, variant_fields) in enum_def.variants.iter() {
-        let base_name = format!("{}[{}={}]", entity.name, field_name, variant_name);
-        let mut variant_field_indexes = vec![];
-        let variant = *enum_def.variants_map.get(variant_name).unwrap();
+    let variants_names_map = create_variants_names_map(&enum_def.variants_map);
 
-        for field in variant_fields {
-            variant_field_indexes.push(entity.fields.len());
-            let mut field = field.clone();
-            field.full_name = format!("{}.{}", base_name, field.name);
-            field.condition = FieldExistsCondition::EnumValue { field_index, variant };
+    let mut variants: HashMap<u16,Vec<usize>> = enum_def.variants_map.values().map(|variant| (*variant, vec![])).collect();
 
-            if let Some(exists_field) = entity.fields.iter().find(|f| f.name == field.name) {
-                panic!("Cannot add enum field {} to {}. Field {} already exists", field.name, entity.name, exists_field.full_name);
-            }
-            entity.fields.push(field);
+    for field_def in enum_def.fields.iter() {
+        let variant_names: Vec<&str> = field_def.variants.iter()
+            .map(|variant| variants_names_map.get(variant).unwrap().as_str())
+            .collect();
+        let base_name = format!("{}[{}={}]", entity.name, field_name, variant_names.join("|"));
+
+        let mut field = field_def.field.clone();
+        field.full_name = format!("{}.{}", base_name, field.name);
+        field.condition = FieldExistsCondition::EnumValue { field_index, variants: field_def.variants.clone() };
+
+        if let Some(exists_field) = entity.fields.iter().find(|f| f.name == field.name) {
+            panic!("Cannot add enum field {} to {}. Field {} already exists", field.name, entity.name, exists_field.full_name);
         }
-        variants.insert(variant, variant_field_indexes);
+
+        for variant in field_def.variants.iter() {
+            variants.get_mut(variant).unwrap().push(entity.fields.len());
+        }
+        entity.fields.push(field);
     }
 
-    EnumInfo { 
-        variants, 
-        variants_map: enum_def.variants_map.clone(), 
-        variants_names_map: create_variants_names_map(&enum_def.variants_map) 
+    EnumInfo {
+        variants,
+        variants_map: enum_def.variants_map.clone(),
+        variants_names_map
     }
 }
 
@@ -502,6 +507,53 @@ mod tests {
                 
             },
             _ => panic!("Wrong schema field location {}. Expected FieldLocation::Virtual", schema.models[0].fields[3].full_name)
+        }
+    }
+
+    #[test]
+    fn test_parse_schema_enum_union() {
+        let schema = parse_schema("
+        model Account {
+            name        String
+            type        AccountType
+        }
+
+        enum AccountType {
+            basic
+            pro | business {
+                sign    String
+            }
+            business {
+                company String
+            }
+        }
+        ");
+
+        let entity = &schema.models[0];
+        // id, name, type, sign, company — sign добавлен один раз, несмотря на два варианта
+        assert_eq!(entity.fields.len(), 5);
+        assert_eq!(entity.fields[3].name, "sign");
+        assert_eq!(entity.fields[4].name, "company");
+
+        match &entity.fields[2].ty {
+            FieldType::Enum(enum_info) => {
+                assert_eq!(enum_info.variants_map.get("basic"), Some(&0));
+                assert_eq!(enum_info.variants_map.get("pro"), Some(&1));
+                assert_eq!(enum_info.variants_map.get("business"), Some(&2));
+
+                // Оба варианта ссылаются на одно физическое поле sign
+                assert_eq!(enum_info.variants.get(&0).unwrap(), &Vec::<usize>::new());
+                assert_eq!(enum_info.variants.get(&1).unwrap(), &vec![3]);
+                assert_eq!(enum_info.variants.get(&2).unwrap(), &vec![3, 4]);
+            },
+            _ => panic!("Wrong field type {:?}", entity.fields[2].ty)
+        }
+
+        match &entity.fields[3].condition {
+            crate::schema::FieldExistsCondition::EnumValue { variants, .. } => {
+                assert_eq!(variants, &vec![1, 2]);
+            },
+            _ => panic!("Wrong condition for field {}", entity.fields[3].full_name)
         }
     }
 

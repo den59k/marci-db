@@ -28,7 +28,7 @@ const posts = await db.post.findMany({
 
 ## Features
 
-- **Schema-first**: relations, nested structs and enums with payload fields are part of the schema, not application code
+- **Schema-first**: relations, nested structs and enums with payload fields (including fields shared between variants: `pro | business { ... }`) are part of the schema, not application code
 - **Typed TS client**: result types are inferred from the `select` shape, including discriminated unions for enums
 - **Secondary indexes** with a query planner: range scans, `$order` by index, keyset pagination (`$cursor`)
 - **Aggregations**: `count` / `$sum` / `$avg` / `$min` / `$max`, including aggregates over relations inside a select (`posts: { $count: true }` — counted by index keys, without reading rows)

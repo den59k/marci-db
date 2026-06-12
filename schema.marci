@@ -23,6 +23,9 @@ model Project {
 enum Role {
     creator
     admin {
+        level     Int
+    }
+    admin | creator {
         sign      String
     }
 }
