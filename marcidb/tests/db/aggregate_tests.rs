@@ -2,7 +2,7 @@ use marcidb::MarciDB;
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::db::{get_aggregate, insert_data};
+use crate::db::{get_aggregate, get_data, get_data_one, insert_data};
 
 fn create_db(dir: &tempfile::TempDir) -> MarciDB {
   let schema_str = "
@@ -131,4 +131,107 @@ fn min_max_test() {
     let resp = get_aggregate(&db, "User", json!({ "$min": "age", "$where": { "age": { "$gt": 100 } } }));
     assert_eq!(resp, json!({ "min": null }));
   }
+}
+
+#[test]
+fn nested_aggregate_test() {
+  let schema_str = "
+    model User {
+      name        String
+      posts       Post[]      @bind(Post.author)
+    }
+
+    model Post {
+      title       String
+      views       UInt
+      author      User?
+    }
+  ";
+
+  let dir = tempdir().unwrap();
+  let db = MarciDB::new(schema_str, dir.path().to_str().unwrap());
+
+  let alice = insert_data(&db, "User", json!({ "name": "Alice" }));
+  insert_data(&db, "User", json!({ "name": "Bob" }));
+
+  insert_data(&db, "Post", json!({ "title": "First", "views": 10, "author": { "id": alice["id"] } }));
+  insert_data(&db, "Post", json!({ "title": "Second", "views": 25, "author": { "id": alice["id"] } }));
+  insert_data(&db, "Post", json!({ "title": "Third", "views": 5, "author": { "id": alice["id"] } }));
+
+  // count по связи: подсчёт ключей индекса, у Bob — ноль детей
+  {
+    let resp = get_data(&db, "User", json!({ "name": true, "posts": { "$count": true } }));
+    assert_eq!(resp, json!([
+      { "name": "Alice", "posts": { "count": 3 } },
+      { "name": "Bob", "posts": { "count": 0 } }
+    ]));
+  }
+
+  // Несколько агрегатов по связи
+  {
+    let resp = get_data_one(&db, "User", json!({
+      "posts": { "$count": true, "$sum": "views", "$max": "views", "$min": "title" },
+      "$where": { "name": "Alice" }
+    }));
+    assert_eq!(resp, json!({
+      "posts": { "count": 3, "sum": 40, "max": 25, "min": "First" }
+    }));
+  }
+
+  // Агрегат с $where по детям (residual-фильтр)
+  {
+    let resp = get_data_one(&db, "User", json!({
+      "posts": { "$count": true, "$sum": "views", "$where": { "views": { "$gte": 10 } } },
+      "$where": { "name": "Alice" }
+    }));
+    assert_eq!(resp, json!({ "posts": { "count": 2, "sum": 35 } }));
+  }
+
+  // Пустая связь: агрегаты по нулю строк
+  {
+    let resp = get_data_one(&db, "User", json!({
+      "posts": { "$count": true, "$max": "views" },
+      "$where": { "name": "Bob" }
+    }));
+    assert_eq!(resp, json!({ "posts": { "count": 0, "max": null } }));
+  }
+}
+
+#[test]
+fn nested_aggregate_struct_test() {
+  let schema_str = "
+    model Project {
+      name        String
+      tasks       Task[]
+    }
+
+    struct Task {
+      title       String
+      hours       UInt
+    }
+  ";
+
+  let dir = tempdir().unwrap();
+  let db = MarciDB::new(schema_str, dir.path().to_str().unwrap());
+
+  insert_data(&db, "Project", json!({
+    "name": "Apollo",
+    "tasks": [
+      { "title": "Design", "hours": 8 },
+      { "title": "Build", "hours": 20 }
+    ]
+  }));
+
+  // Обычный select для сверки
+  {
+    let resp = get_data_one(&db, "Project", json!({ "name": true, "tasks": { "title": true } }));
+    assert_eq!(resp, json!({ "name": "Apollo", "tasks": [ { "title": "Design" }, { "title": "Build" } ] }));
+  }
+
+  // Struct-дети живут под префиксом родителя в основном дереве
+  let resp = get_data_one(&db, "Project", json!({
+    "name": true,
+    "tasks": { "$count": true, "$sum": "hours" }
+  }));
+  assert_eq!(resp, json!({ "name": "Apollo", "tasks": { "count": 2, "sum": 28 } }));
 }

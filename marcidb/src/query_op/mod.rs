@@ -12,7 +12,7 @@ pub use process_query_one::process_query_one;
 pub use process_query_many::process_query_many;
 pub use r#where::{Where,FieldCompare,FieldCompareRef};
 
-pub(crate) use process_query::{get_id_from_index_key, range_keys_iter};
+pub(crate) use process_query::{ParentData, get_id_from_index_key, get_prefix, range_keys_iter};
 pub(crate) use process_where::process_where;
 
 #[derive(Debug)]
@@ -65,7 +65,15 @@ impl<'a> Sort<'a> {
 pub struct QueryInclude<'a> {
   pub query_type: QueryType,
   pub field: &'a Field,
-  pub query: QueryOp<'a>,
+  pub query: IncludeQuery<'a>,
+}
+
+#[derive(Debug)]
+pub enum IncludeQuery<'a> {
+  // Вложенный select связанных записей
+  Query(QueryOp<'a>),
+  // Агрегация по связанным записям
+  Aggregate(crate::aggregate_op::AggregateOp<'a>)
 }
 
 #[derive(Debug,Clone)]

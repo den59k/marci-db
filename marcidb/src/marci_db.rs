@@ -88,7 +88,7 @@ impl MarciDB {
     let rx = self.db.begin_read().unwrap();
     // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
     let mut ctx = TransationContext::new(&rx, &self.schema, |_: DecodeCtx<()>| ());
-    return process_aggregate(op, &mut ctx);
+    return process_aggregate(op, &mut ctx, None);
   }
 
   pub fn count_dev(&self, tree_name: &str) -> u64 { 

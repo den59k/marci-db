@@ -1,4 +1,4 @@
-use crate::{Field, query_op::{PrefixKey, TransationContext, Where, get_id_from_index_key, process_where, range_keys_iter}, schema::{Entity, PrimitiveFieldType}, utils::get_data};
+use crate::{Field, query_op::{ParentData, PrefixKey, TransationContext, Where, get_id_from_index_key, get_prefix, process_where, range_keys_iter}, schema::{Entity, PrimitiveFieldType}, utils::get_data};
 
 #[derive(Debug)]
 pub struct AggregateOp<'a> {
@@ -44,7 +44,7 @@ pub struct AggregateResult {
   pub max: Option<Vec<u8>>,
 }
 
-pub fn process_aggregate<'a, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, F>) -> AggregateResult {
+pub fn process_aggregate<'a, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, F>, parent: Option<ParentData>) -> AggregateResult {
   let mut result = AggregateResult::default();
 
   // Быстрые пути: count по ключам, без чтения и декодирования строк
@@ -55,11 +55,18 @@ pub fn process_aggregate<'a, F>(op: &'a AggregateOp, ctx: &mut TransationContext
         let index_tree = ctx.get_tree(tree_name);
         range_keys_iter(&index_tree, start, end, false).count() as u64
       },
-      Some(PrefixKey::Id(prefix)) | Some(PrefixKey::IdPrefix(prefix)) => {
-        let tree = ctx.get_tree(&op.entity.name);
-        tree.prefix_keys(&prefix.as_slice()).unwrap().count() as u64
+      // Связи родителя: количество детей = количество ключей по префиксу parent_id
+      Some(PrefixKey::ParentIndexTree(tree_name)) => {
+        let index_tree = ctx.get_tree(tree_name);
+        index_tree.prefix_keys(&parent.unwrap().1).unwrap().count() as u64
       },
-      _ => panic!("Unsupported aggregate prefix key: {:?}", op.prefix_key)
+      Some(prefix_key) => {
+        let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
+          return result;
+        };
+        let tree = ctx.get_tree(&op.entity.name);
+        tree.prefix_keys(&prefix).unwrap().count() as u64
+      },
     };
     return result;
   }
@@ -78,9 +85,26 @@ pub fn process_aggregate<'a, F>(op: &'a AggregateOp, ctx: &mut TransationContext
         });
       aggregate_rows(iter, ctx, op, &mut acc);
     },
-    Some(PrefixKey::Id(prefix)) | Some(PrefixKey::IdPrefix(prefix)) => {
+    Some(PrefixKey::ParentIndexTree(tree_name)) => {
+      let index_tree = ctx.get_tree(tree_name);
       let tree = ctx.get_tree(&op.entity.name);
-      let iter = tree.prefix(&prefix.as_slice()).unwrap().map(|item| item.unwrap());
+      let parent_id = parent.unwrap().1;
+      let parent_id_len = parent_id.len();
+      let iter = index_tree.prefix_keys(&parent_id).unwrap()
+        .map(|item| {
+          let key = item.unwrap();
+          let id = key[parent_id_len..].to_vec();
+          let value = tree.get(&id).unwrap().unwrap();
+          (id, value)
+        });
+      aggregate_rows(iter, ctx, op, &mut acc);
+    },
+    Some(prefix_key) => {
+      let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
+        return result;
+      };
+      let tree = ctx.get_tree(&op.entity.name);
+      let iter = tree.prefix(&prefix).unwrap().map(|item| item.unwrap());
       aggregate_rows(iter, ctx, op, &mut acc);
     },
     None => {
@@ -88,7 +112,6 @@ pub fn process_aggregate<'a, F>(op: &'a AggregateOp, ctx: &mut TransationContext
       let iter = tree.iter().unwrap().map(|item| item.unwrap());
       aggregate_rows(iter, ctx, op, &mut acc);
     },
-    _ => panic!("Unsupported aggregate prefix key: {:?}", op.prefix_key)
   }
 
   result.count = acc.count;

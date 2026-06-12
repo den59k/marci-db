@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end_optimized, get_id_field_size, get_offset}};
+use crate::{json_parsers::parse_aggregate_op::aggregate_to_json, query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end_optimized, get_id_field_size, get_offset}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -211,6 +211,9 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
             },
             IncludeResult::Many(field, val) => {
                 insert_array_arc(&mut str, field, &val);
+            },
+            IncludeResult::Aggregate(field, op, result) => {
+                insert_value(&mut str, field, &aggregate_to_json(op, &result));
             }
         }
     }

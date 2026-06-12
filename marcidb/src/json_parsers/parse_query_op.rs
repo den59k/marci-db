@@ -1,7 +1,9 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where, parsers::parse_id}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_aggregate_op::parse_aggregate, parse_where::parse_where, parsers::parse_id}, query_op::{IncludeQuery, PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
+
+const AGGREGATE_KEYS: [&str; 5] = ["$count", "$sum", "$avg", "$min", "$max"];
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
@@ -51,16 +53,24 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
     match &field.ty {
       FieldType::Ref (ref_info) => {
+        if has_aggregate_keys(val) {
+          return Err(ParseError::TypeMismatch { field: field.full_name.clone(), expected: "list relation for aggregate".to_string() });
+        }
         let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
         op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
         resolve_sort_plan(&mut op);
-        includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
+        includes.push(QueryInclude { query_type: QueryType::One, field, query: IncludeQuery::Query(op) });
       }
       FieldType::RefList (ref_info) => {
+        if has_aggregate_keys(val) {
+          let op = parse_aggregate_include(val, &schema.models[ref_info.model_index], field, schema, &ref_info.binding)?;
+          includes.push(QueryInclude { query_type: QueryType::Many, field, query: IncludeQuery::Aggregate(op) });
+          continue;
+        }
         let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
         op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
         resolve_sort_plan(&mut op);
-        includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
+        includes.push(QueryInclude { query_type: QueryType::Many, field, query: IncludeQuery::Query(op) });
       }
       _ => {
         mask.set(field_index, true);
@@ -69,6 +79,36 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   }
 
   Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false })
+}
+
+fn has_aggregate_keys(val: &Value) -> bool {
+  match val.as_object() {
+    Some(obj) => AGGREGATE_KEYS.iter().any(|key| obj.contains_key(*key)),
+    None => false
+  }
+}
+
+/// Агрегация по связанным записям: select-поля и порядок/лимиты внутри неё запрещены
+fn parse_aggregate_include<'a>(val: &Value, ref_entity: &'a Entity, field: &'a Field, schema: &'a Schema, binding: &'a RefBinding) -> Result<crate::aggregate_op::AggregateOp<'a>, ParseError> {
+  let Some(obj) = val.as_object() else {
+    return Err(ParseError::NotAnObject);
+  };
+
+  for key in obj.keys() {
+    if key != "$where" && !AGGREGATE_KEYS.contains(&key.as_str()) {
+      return Err(ParseError::WrongServiceValue(
+        format!("{}.{}", field.name, key),
+        "only $where and aggregate keys are allowed in relation aggregate".to_string()
+      ));
+    }
+  }
+
+  let mut op = parse_aggregate(schema, ref_entity, val)?;
+  // Скан идёт по привязке родителя; собственный префикс из $where ей замещается,
+  // фильтр остаётся residual-условием
+  op.prefix_key = Some(get_prefix_key(binding, field));
+  op.fully_covered = false;
+  Ok(op)
 }
 
 fn parse_service_number(json_val: &Map<String,Value>, key: &str) -> Result<Option<usize>, ParseError> {
@@ -263,8 +303,11 @@ mod tests {
 
       let encoded = parse_query(&schema, user_model, &input).unwrap();
       assert_eq!(encoded.includes.len(), 1);
-      
-      assert!(matches!(encoded.includes[0].query.prefix_key, Some(PrefixKey::ParentId)));
+
+      let crate::query_op::IncludeQuery::Query(include_query) = &encoded.includes[0].query else {
+        panic!("Expected IncludeQuery::Query");
+      };
+      assert!(matches!(include_query.prefix_key, Some(PrefixKey::ParentId)));
     }
 
     {

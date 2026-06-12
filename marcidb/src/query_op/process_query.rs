@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{Bytes, ReadTransaction, Tree};
 
-use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, query_op::{IncludeQuery, PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
 pub type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
@@ -122,20 +122,28 @@ pub fn decode_row<'a, 'b, U, F>(
   let mut includes: Vec<IncludeResult<U>> = Vec::with_capacity(query.includes.len());
 
   for include in query.includes.iter() {
-    match include.query_type {
-      QueryType::One => {
-        if let Some(result) = process_query_one(&include.query, ctx, Some((query.entity,id,data))) {
-          includes.push(IncludeResult::One(include.field, result));
-        } else {
-          includes.push(IncludeResult::None(include.field));
+    match &include.query {
+      IncludeQuery::Query(include_query) => {
+        match include.query_type {
+          QueryType::One => {
+            if let Some(result) = process_query_one(include_query, ctx, Some((query.entity,id,data))) {
+              includes.push(IncludeResult::One(include.field, result));
+            } else {
+              includes.push(IncludeResult::None(include.field));
+            }
+          },
+          QueryType::Many => {
+            let result = process_query_many(include_query, ctx, Some((query.entity,id,data)));
+            includes.push(IncludeResult::Many(include.field, result));
+          },
+          QueryType::First => {
+            todo!("Make QueryType::First method")
+          }
         }
       },
-      QueryType::Many => {
-        let result = process_query_many(&include.query, ctx, Some((query.entity,id,data)));
-        includes.push(IncludeResult::Many(include.field, result));
-      },
-      QueryType::First => {
-        todo!("Make QueryType::First method")
+      IncludeQuery::Aggregate(aggregate_op) => {
+        let result = process_aggregate(aggregate_op, ctx, Some((query.entity,id,data)));
+        includes.push(IncludeResult::Aggregate(include.field, aggregate_op, result));
       }
     }
   }
@@ -177,5 +185,7 @@ pub struct DecodeCtx<'a, U> {
 pub enum IncludeResult<'a, U> {
   None(&'a Field),
   One(&'a Field,U),
-  Many(&'a Field,Vec<U>)
+  Many(&'a Field,Vec<U>),
+  // Агрегация по связанным записям: форматируется на json-слое
+  Aggregate(&'a Field, &'a AggregateOp<'a>, AggregateResult)
 }

@@ -274,7 +274,8 @@ fn get_field_select_str(field: &Field, schema: &Schema) -> String {
       format!("  {}?: {} | boolean", field.name, get_model_select_name(&schema.models[ref_info.model_index]))
     },
     FieldType::RefList(ref_info) => {
-      format!("  {}?: {} | boolean", field.name, get_model_query_name(&schema.models[ref_info.model_index]))
+      let ref_model = &schema.models[ref_info.model_index];
+      format!("  {}?: {} | {} | boolean", field.name, get_model_query_name(ref_model), get_model_aggregate_name(ref_model))
     },
     _ => format!("  {}?: boolean", field.name)
   }

@@ -1,5 +1,8 @@
 type ServiceKeys = "$where" | "$order" | "$limit" | "$skip" | "$cursor";
 
+// Запрос-агрегат по связанным записям внутри select
+type AggregateKeys = { $count: true } | { $sum: string } | { $avg: string } | { $min: string } | { $max: string }
+
 // Дистрибутивен по union-моделям (discriminated union у enum с payload):
 // ключи, которых нет в текущей ветке union, отбрасываются
 type GetResult<TModel, TSelect extends Record<string, any>> = TModel extends any ? {
@@ -9,7 +12,9 @@ type GetResult<TModel, TSelect extends Record<string, any>> = TModel extends any
         ? TModel[K]                          // выбрали поле целиком
         : TSelect[K] extends Record<string, any>
           ? TModel[K] extends readonly object[]
-            ? GetResult<NonNullable<TModel[K][number]>, TSelect[K]>[]
+            ? TSelect[K] extends AggregateKeys
+              ? AggregateResult<NonNullable<TModel[K][number]>, TSelect[K]>   // агрегат по связи
+              : GetResult<NonNullable<TModel[K][number]>, TSelect[K]>[]
             : GetResult<NonNullable<TModel[K]>, TSelect[K]> | Extract<TModel[K], null>
           : TModel[K]                        // fallback
       : never
