@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::{Entity, Field, FieldLocation, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum}};
+use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema}, utils::get_data};
 
 /// Увеличивает буффер на один бит
 pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
@@ -128,6 +128,32 @@ pub fn encode_f64(bytes: &[u8]) -> Vec<u8> {
         out[0] ^= 0x80;
     }
     out
+}
+
+/// Ключ сортировки в памяти. Байтовое сравнение ключей даёт тот же порядок,
+/// что и скан соответствующего индексного дерева (та же кодировка значений + id как tie-break).
+/// null-значения уходят в конец при asc и в начало при desc
+pub fn make_sort_key(entity: &Entity, field: &Field, id: &[u8], data: &[u8], schema: &Schema) -> Vec<u8> {
+  let Some(value) = get_data(entity, field, id, data, schema) else {
+    let mut key = Vec::with_capacity(id.len() + 1);
+    key.push(0xFF);
+    key.extend_from_slice(id);
+    return key;
+  };
+
+  let mut key = Vec::with_capacity(value.len() + id.len() + 2);
+  key.push(0x00);
+  match &field.ty {
+    FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
+      key.extend(encode_index_number(&ty.get_num_type().unwrap(), value));
+    },
+    // Строки получают нуль-терминатор (как в индексах), остальное сравнивается как есть
+    _ => {
+      key.extend(encode_index_data(field, value));
+    }
+  }
+  key.extend_from_slice(id);
+  key
 }
 
 // Генеририрует индекс для Where

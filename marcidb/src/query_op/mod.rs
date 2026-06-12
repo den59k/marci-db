@@ -18,8 +18,12 @@ pub struct QueryOp<'a> {
   pub entity: &'a Entity,
   pub sort: Option<Sort<'a>>,
   pub filter: Option<Where<'a>>,
-  pub take: Option<usize>,
+  pub limit: Option<usize>,
   pub skip: Option<usize>,
+  /// Направление скана (выставляется планировщиком)
+  pub reverse: bool,
+  /// Скан не даёт нужного порядка — строки сортируются в памяти после фильтра
+  pub post_sort: bool,
   pub prefix_key: Option<PrefixKey<'a>>,
   pub includes: Vec<QueryInclude<'a>>
 }
@@ -38,6 +42,18 @@ pub enum QueryType {
 pub enum Sort<'a> {
   Asc(&'a Field),
   Desc(&'a Field)
+}
+
+impl<'a> Sort<'a> {
+  pub fn field(&self) -> &'a Field {
+    match self {
+      Sort::Asc(field) | Sort::Desc(field) => field
+    }
+  }
+
+  pub fn is_desc(&self) -> bool {
+    matches!(self, Sort::Desc(_))
+  }
 }
 
 #[derive(Debug)]
@@ -74,14 +90,16 @@ impl<'a> QueryOp<'a> {
         mask.set(field_index, false);
       }
     }
-    return QueryOp { 
+    return QueryOp {
       mask,
-      entity, 
-      sort: None, 
-      filter: None, 
-      take: None, 
-      skip: None, 
-      prefix_key: None, 
+      entity,
+      sort: None,
+      filter: None,
+      limit: None,
+      skip: None,
+      reverse: false,
+      post_sort: false,
+      prefix_key: None,
       includes: vec![]
     }
   }

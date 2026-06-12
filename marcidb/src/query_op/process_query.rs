@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bitvec::vec::BitVec;
-use canopydb::{ReadTransaction, Tree};
+use canopydb::{Bytes, ReadTransaction, Tree};
 
 use crate::{Field, query_op::{PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
@@ -44,32 +44,44 @@ pub fn get_first_id_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Option<Vec<u
     .next()
 }
 
-pub fn get_ids_by_range(
-    index_tree: &Tree,
+/// Итератор для опционально-обратного обхода без аллокаций
+pub enum MaybeRev<I> {
+  Fwd(I),
+  Rev(std::iter::Rev<I>)
+}
+
+impl<I: DoubleEndedIterator> Iterator for MaybeRev<I> {
+  type Item = I::Item;
+
+  #[inline]
+  fn next(&mut self) -> Option<Self::Item> {
+    match self {
+      MaybeRev::Fwd(iter) => iter.next(),
+      MaybeRev::Rev(iter) => iter.next()
+    }
+  }
+}
+
+pub fn maybe_rev<I: DoubleEndedIterator>(iter: I, reverse: bool) -> MaybeRev<I> {
+  if reverse { MaybeRev::Rev(iter.rev()) } else { MaybeRev::Fwd(iter) }
+}
+
+/// Ленивый обход ключей индексного дерева в заданном диапазоне и направлении
+pub fn range_keys_iter<'t>(
+    index_tree: &'t Tree,
     start: &Option<Vec<u8>>,
     end: &Option<Vec<u8>>,
-    fixed_size: Option<usize>,
-    limit: Option<usize>
-) -> Vec<Vec<u8>> {
+    reverse: bool
+) -> impl Iterator<Item = Bytes> + 't {
   let iter = match (start.as_deref(), end.as_deref()) {
       (Some(s), Some(e)) => index_tree.range_keys(s..e),
       (Some(s), None) => index_tree.range_keys(s..),
       (None, Some(e)) => index_tree.range_keys(..e),
-      (None, None) => panic!("Start or end of range must be defined"),
+      // Полный обход: диапазон от пустого ключа покрывает всё дерево
+      (None, None) => index_tree.range_keys((&[] as &[u8])..),
   };
 
-  if let Some(limit) = limit {
-    iter
-      .unwrap()
-      .take(limit)
-      .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
-      .collect()
-  } else {
-    iter
-      .unwrap()
-      .map(|e| get_id_from_index_key(&e.unwrap(), fixed_size))
-      .collect()
-  }
+  maybe_rev(iter.unwrap(), reverse).map(|item| item.unwrap())
 }
 
 #[inline]
@@ -90,11 +102,22 @@ pub fn process_data<'a, 'b, U, F>(
   data: &'b [u8],
   ctx: &mut TransationContext<'a, F>,
   query: &'a QueryOp,
-) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
+) -> Option<U> where F: Fn(DecodeCtx<U>) -> U {
 
   if let Some(where_op) = &query.filter && !process_where(id, data, ctx, query.entity, where_op) {
     return None
   }
+
+  Some(decode_row(id, data, ctx, query))
+}
+
+// Декодирует строку вместе с includes. Фильтр должен быть проверен до вызова
+pub fn decode_row<'a, 'b, U, F>(
+  id: &'b [u8],
+  data: &'b [u8],
+  ctx: &mut TransationContext<'a, F>,
+  query: &'a QueryOp,
+) -> U where F: Fn(DecodeCtx<U>) -> U {
 
   let mut includes: Vec<IncludeResult<U>> = Vec::with_capacity(query.includes.len());
 
@@ -117,7 +140,7 @@ pub fn process_data<'a, 'b, U, F>(
     }
   }
 
-  return Some((ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema }));
+  return (ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema });
 }
 
 pub struct TransationContext<'a, F> {

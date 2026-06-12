@@ -3,6 +3,7 @@
 pub mod delete_tests;
 pub mod indexes_tests;
 pub mod insert_tests;
+pub mod order_tests;
 pub mod query_tests;
 pub mod unique_tests;
 pub mod update_tests;

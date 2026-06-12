@@ -1,13 +1,15 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Where}, schema::{Entity, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_where::parse_where}, query_op::{PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
     return Err(ParseError::NotAnObject)
   };
-  return parse_query_internal(schema, entity, obj);
+  let mut op = parse_query_internal(schema, entity, obj)?;
+  resolve_sort_plan(&mut op);
+  return Ok(op);
 }
 
 pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Map<String,Value>) -> Result<QueryOp<'a>, ParseError> {
@@ -20,13 +22,20 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   if let Some(where_value) = json_val.get("$where") {
     let where_op = parse_where(schema, entity, where_value)
       .map_err(|err| ParseError::WhereError(err))?;
-    
+
     if !matches!(where_op, Where::True) {
       prefix_key = generate_prefix_from_where(entity, &where_op);
       filter = Some(where_op);
     }
   }
-  
+
+  let sort = match json_val.get("$order") {
+    Some(order_value) => Some(parse_order(entity, order_value)?),
+    None => None
+  };
+  let limit = parse_service_number(json_val, "$limit")?;
+  let skip = parse_service_number(json_val, "$skip")?;
+
   for (field_index, field) in entity.fields.iter().enumerate() {
     let Some(val) = json_val.get(&field.name) else {
       continue;
@@ -38,11 +47,13 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
       FieldType::Ref (ref_info) => {
         let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
         op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
+        resolve_sort_plan(&mut op);
         includes.push(QueryInclude { query_type: QueryType::One, field, query: op });
       }
       FieldType::RefList (ref_info) => {
         let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
         op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
+        resolve_sort_plan(&mut op);
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
       }
       _ => {
@@ -51,7 +62,108 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  Ok(QueryOp { mask, entity, sort: None, filter, prefix_key, includes, take: None, skip: None })
+  Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, reverse: false, post_sort: false })
+}
+
+fn parse_service_number(json_val: &Map<String,Value>, key: &str) -> Result<Option<usize>, ParseError> {
+  let Some(value) = json_val.get(key) else {
+    return Ok(None);
+  };
+  let Some(number) = value.as_u64() else {
+    return Err(ParseError::WrongServiceValue(key.to_string(), "positive number".to_string()));
+  };
+  Ok(Some(number as usize))
+}
+
+/// Парсит $order: { field: "asc" | "desc" }. Поддерживается одно поле
+fn parse_order<'a>(entity: &'a Entity, order_value: &Value) -> Result<Sort<'a>, ParseError> {
+  let Some(obj) = order_value.as_object() else {
+    return Err(ParseError::WrongServiceValue("$order".to_string(), "object".to_string()));
+  };
+  if obj.len() != 1 {
+    return Err(ParseError::WrongServiceValue("$order".to_string(), "exactly one field".to_string()));
+  }
+  let (field_name, direction) = obj.iter().next().unwrap();
+
+  let Some(field) = entity.fields.iter().find(|f| &f.name == field_name) else {
+    return Err(ParseError::UnknownField(field_name.clone()));
+  };
+
+  // Сортировать можно по ключевым полям и по примитивам/enum из body
+  let sortable = match field.location {
+    FieldLocation::Key { .. } => true,
+    FieldLocation::Body { .. } => matches!(field.ty, FieldType::Primitive(_) | FieldType::Enum(_)),
+    FieldLocation::Virtual => false
+  };
+  if !sortable {
+    return Err(ParseError::NotSortable(field.full_name.clone()));
+  }
+
+  match direction.as_str() {
+    Some("asc") => Ok(Sort::Asc(field)),
+    Some("desc") => Ok(Sort::Desc(field)),
+    _ => Err(ParseError::WrongServiceValue("$order".to_string(), "\"asc\" | \"desc\"".to_string()))
+  }
+}
+
+/// Планировщик: выбирает дерево скана и направление под $order.
+/// Корректность не зависит от выбора — фильтр перепроверяет все условия для каждой строки,
+/// планировщик влияет только на скорость
+pub fn resolve_sort_plan(query: &mut QueryOp) {
+  query.reverse = false;
+  query.post_sort = false;
+  let Some(sort) = &query.sort else { return };
+  let (field, desc) = (sort.field(), sort.is_desc());
+
+  // Первичный ключ: деревья моделей и Parent-привязки уже идут в порядке id
+  if matches!(field.location, FieldLocation::Key { index: 0 }) {
+    match &query.prefix_key {
+      // Скан индекса $where идёт в порядке значения, а не id
+      Some(PrefixKey::IndexRange { .. }) => { query.post_sort = true; },
+      _ => { query.reverse = desc; }
+    }
+    return;
+  }
+
+  // Поле с индексом: можно сканировать дерево индекса.
+  // Только non-nullable и не из enum-варианта: sparse-индексы не содержат null-строк,
+  // и скан по ним потерял бы записи
+  if !field.nullable && matches!(field.condition, FieldExistsCondition::None) {
+    let sort_index = field.indexes.iter().find(|i| matches!(i, FieldIndex::Value { .. } | FieldIndex::Number { .. }));
+    if let Some(sort_index) = sort_index {
+      let tree_name = match sort_index {
+        FieldIndex::Value { tree_name, .. } | FieldIndex::Number { tree_name, .. } => tree_name,
+        _ => unreachable!()
+      };
+
+      match &query.prefix_key {
+        // $where уже сканирует индекс этого же поля — диапазон отсортирован по значению
+        Some(PrefixKey::IndexRange { tree_name: where_tree, .. }) if where_tree == tree_name => {
+          query.reverse = desc;
+          return;
+        }
+        // Другого пути доступа нет — сканируем индекс сортировки целиком
+        None => {
+          query.prefix_key = Some(PrefixKey::IndexRange {
+            start: None, end: None, tree_name: tree_name.clone(), fixed_size: field.get_size()
+          });
+          query.reverse = desc;
+          return;
+        }
+        // Есть $limit — ранний выход по индексу сортировки важнее селективности $where
+        Some(PrefixKey::IndexRange { .. }) if query.limit.is_some() => {
+          query.prefix_key = Some(PrefixKey::IndexRange {
+            start: None, end: None, tree_name: tree_name.clone(), fixed_size: field.get_size()
+          });
+          query.reverse = desc;
+          return;
+        }
+        _ => {}
+      }
+    }
+  }
+
+  query.post_sort = true;
 }
 
 fn parse_query_ref<'a>(val: &Value, ref_entity: &'a Entity, field: &'a Field, schema: &'a Schema) -> Result<QueryOp<'a>, ParseError> {
@@ -86,6 +198,9 @@ pub enum ParseError {
   MissingIdField(String),
   WhereError(EncodeError),
   TypeMismatch { field: String, expected: String },
+  UnknownField(String),
+  NotSortable(String),
+  WrongServiceValue(String, String),
 }
 
 impl ParseError {
@@ -161,6 +276,58 @@ mod tests {
         Some(PrefixKey::Id(value)) => { assert_eq!(value, vec![ 0, 0, 0, 0, 0, 0, 0, 1 ]) },
         _ => panic!("Wrong prefix key value: {:?}", encoded.prefix_key)
       }
+    }
+  }
+
+  #[test]
+  fn test_sort_plan() {
+    let schema = parse_schema("
+      model User {
+          name        String
+          age         UInt      @index
+          rating      Int?      @index
+      }
+    ");
+    let user_model = &schema.models[0];
+
+    // $order по индексированному полю без $where → скан индекса сортировки
+    {
+      let q = parse_query(&schema, user_model, &json!({ "name": true, "$order": { "age": "desc" } })).unwrap();
+      assert!(q.reverse);
+      assert!(!q.post_sort);
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, start: None, end: None, .. }) => {
+          assert_eq!(tree_name.as_str(), "index_User.age");
+        },
+        _ => panic!("Expected full IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // Диапазон $where по тому же полю — переиспользуется, post_sort не нужен
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "name": true, "$where": { "age": { "$gte": 10 } }, "$order": { "age": "desc" }
+      })).unwrap();
+      assert!(q.reverse);
+      assert!(!q.post_sort);
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { start: Some(_), .. }) => {},
+        _ => panic!("Expected range from $where, got {:?}", q.prefix_key)
+      }
+    }
+
+    // Nullable поле: sparse-индекс не используется — сортировка в памяти
+    {
+      let q = parse_query(&schema, user_model, &json!({ "name": true, "$order": { "rating": "asc" } })).unwrap();
+      assert!(q.post_sort);
+      assert!(q.prefix_key.is_none());
+    }
+
+    // Сортировка по id — нативный порядок дерева
+    {
+      let q = parse_query(&schema, user_model, &json!({ "name": true, "$order": { "id": "desc" } })).unwrap();
+      assert!(q.reverse);
+      assert!(!q.post_sort);
     }
   }
 

@@ -26,6 +26,10 @@ fn get_model_where_name(model: &Entity) -> String {
   format!("{}Model$Where", model.name.replace('.', "_"))
 }
 
+fn get_model_order_name(model: &Entity) -> String {
+  format!("{}Model$Order", model.name.replace('.', "_"))
+}
+
 fn get_model_query_name(model: &Entity) -> String {
   format!("{}ModelQuery", model.name.replace('.', "_"))
 }
@@ -436,9 +440,27 @@ fn main() {
     }
     lines.push("}".to_string());
 
+    // Заполняем поля для Order (зеркало parse_order: ключевые поля + примитивы/enum из body)
+    lines.push(format!("type {} = {{", get_model_order_name(model)));
+    for field in model.fields.iter() {
+      if field.name.starts_with("@") { continue; }
+      let sortable = match field.location {
+        FieldLocation::Key { .. } => true,
+        FieldLocation::Body { .. } => matches!(field.ty, FieldType::Primitive(_) | FieldType::Enum(_)),
+        FieldLocation::Virtual => false
+      };
+      if sortable {
+        lines.push(format!("  {}?: \"asc\" | \"desc\"", field.name));
+      }
+    }
+    lines.push("}".to_string());
+
     // Заполняем поля для Query
     lines.push(format!("type {} = {} & {{", get_model_query_name(model), get_model_select_name(model)));
     lines.push(format!("  $where?: {}", get_model_where_name(model)));
+    lines.push(format!("  $order?: {}", get_model_order_name(model)));
+    lines.push("  $limit?: number".to_string());
+    lines.push("  $skip?: number".to_string());
     lines.push("}".to_string());
 
     lines.push("".to_string());
