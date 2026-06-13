@@ -187,6 +187,48 @@ impl MarciDB {
     self.schema = new_schema;
     Ok(())
   }
+
+  /// Полный сброс БД к новой схеме (hard reset). В отличие от [`MarciDB::migrate_to`] —
+  /// декларативного диффа, сохраняющего данные, — `reinit` СНОСИТ все данные и индексы и
+  /// пересоздаёт деревья с нуля под любую схему. Это bootstrap без файлов миграций (эндпоинт
+  /// `$init`): удобно, когда нет возможности гонять CLI — из CI, скрипта или прямого HTTP.
+  ///
+  /// Атомарно: всё в одной write-транзакции. `list_trees` видит всё, что физически есть в файле
+  /// (старые модели, индексы, `__marci_meta__`, любые осиротевшие деревья) — поэтому сброс полный
+  /// и не зависит от того, какой была прежняя схема. Версия миграций сбрасывается на 1.
+  pub fn reinit(&mut self, new_schema_text: &str) -> Result<(), MigrationApplyError> {
+    let new_schema = parse_schema(new_schema_text);
+
+    let tx = self.db.begin_write().unwrap();
+
+    // Сносим всё. delete_tree помечает дерево Deleted, поэтому повторный get_or_create_tree того же
+    // имени ниже создаёт пустое — данные общих со старой схемой моделей тоже стираются
+    for name in tx.list_trees()? {
+      tx.delete_tree(&name)?;
+    }
+
+    // Пустые деревья новой схемы
+    for model in new_schema.models.iter() {
+      create_entity_trees(&tx, model)?;
+    }
+
+    // meta заново: схема + версия с 1
+    {
+      let mut meta = tx.get_or_create_tree(META_TREE)?;
+      meta.insert(b"schema", new_schema_text.as_bytes())?;
+      meta.insert(b"version", &1u64.to_be_bytes())?;
+    }
+    tx.commit()?;
+
+    let rx = self.db.begin_read().unwrap();
+    self.counters = build_counters(&new_schema, &rx);
+    drop(rx);
+
+    self.model_by_name = new_schema.build_model_name_map();
+    self.schema_text = new_schema_text.to_string();
+    self.schema = new_schema;
+    Ok(())
+  }
 }
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {

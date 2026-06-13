@@ -21,6 +21,7 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | Endpoint | Body | Response |
 |---|---|---|
 | `POST /:db/$migrate` | schema text (`.marci`) | empty — applies the schema, creating the db if absent |
+| `POST /:db/$init` | schema text (`.marci`) | empty — **resets** the db to the schema, wiping all data (creates it if absent) |
 | `POST /:db/:model/findMany` | query object | JSON array |
 | `POST /:db/:model/findFirst` | query object | object or `null` |
 | `POST /:db/:model/insert` | insert object | id object |
@@ -90,6 +91,16 @@ The server reconstructs each database's schema from its own storage on open, so 
 ```bash
 npx marcidb migrate push myapp --url http://localhost:3000
 ```
+
+### Resetting a database — `$init`
+
+`POST /:db/$init` is a destructive alternative to `$migrate` for when you can't run the CLI (CI, a shell script, a bare HTTP client). The body is the same **schema text**, but instead of diffing, it **drops all data and indexes and recreates the database from scratch** to match the schema exactly. Because nothing is preserved it accepts any schema — including changes `$migrate` rejects (type changes, renames, reordering, dropped fields). The database is created if absent.
+
+```bash
+curl -X POST http://localhost:3000/myapp/\$init --data-binary @schema.marci
+```
+
+Use `$migrate` to evolve a database while keeping its data; use `$init` to (re)create one from a schema when the data is disposable.
 
 ## Transactions
 

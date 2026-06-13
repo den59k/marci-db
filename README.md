@@ -86,6 +86,12 @@ npx marcidb migrate push myapp --url http://localhost:3000
 curl -X POST http://localhost:3000/myapp/\$migrate --data-binary @schema.marci
 ```
 
+No Node toolchain at all? `$init` applies a schema directly from plain text — a one-shot bootstrap that **wipes any existing data** and recreates the database to match (accepts any schema, no migration files):
+
+```bash
+curl -X POST http://localhost:3000/myapp/\$init --data-binary @schema.marci
+```
+
 ## Documentation
 
 - [TypeScript API](docs/API.md) — schema DSL, queries, updates, aggregations

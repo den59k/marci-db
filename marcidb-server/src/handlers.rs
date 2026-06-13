@@ -37,6 +37,25 @@ pub async fn handle_migrate(req: Request<hyper::body::Incoming>, ctx: Arc<Server
     Ok(ok_response(Vec::new()))
 }
 
+/// Полный сброс БД к схеме (hard reset, bootstrap без CLI). Тело запроса — текст схемы `.marci`.
+/// В отличие от `$migrate` (дифф, данные сохраняются) — стирает ВСЕ данные и пересоздаёт БД с нуля.
+/// Если БД нет — создаётся. Удобно, когда нет возможности гонять миграции (CI, скрипт, прямой HTTP)
+pub async fn handle_init(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
+    let schema_text = parse_text_body(req).await?;
+
+    blocking(move || {
+        let db = ctx.get_db(&db_name, true)?; // create-if-absent
+        let mut db = db.write().unwrap_or_else(|e| e.into_inner());
+        db.reinit(&schema_text).map_err(|e| match e {
+            MigrationApplyError::Storage(_) => ApiError::Internal(format!("{:?}", e)),
+            _ => ApiError::BadRequest(format!("{:?}", e)),
+        })?;
+        Ok::<_, ApiError>(String::new())
+    }).await?;
+
+    Ok(ok_response(Vec::new()))
+}
+
 /// Атомарная batch-транзакция: тело — массив операций `{ model, action, ... }`
 pub async fn handle_transaction(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
     let json_val = parse_json_body(req).await?;

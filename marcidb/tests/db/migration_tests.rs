@@ -105,3 +105,49 @@ fn migrate_drop_field_unsupported() {
   let result = db.migrate_to("model User {\n  name String\n}");
   assert!(matches!(result, Err(MigrationApplyError::Unsupported(_))));
 }
+
+/// $init (reinit): полный сброс — старые данные стираются, применяется ЛЮБАЯ новая схема,
+/// даже несовместимая с прежней (смена типа поля + новая модель — migrate_to бы их отклонил)
+#[test]
+fn init_resets_data_and_schema() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new("model User {\n  name String\n  age  UInt\n}", dir.path().to_str().unwrap());
+
+  insert_data(&db, "User", json!({ "name": "Alice", "age": 30 }));
+  insert_data(&db, "User", json!({ "name": "Bob", "age": 40 }));
+
+  // age сменил тип UInt→String, добавлена модель Post — migrate_to отклонил бы смену типа
+  db.reinit("model User {\n  name String\n  age  String\n}\nmodel Post {\n  title String\n}").unwrap();
+
+  // Старые данные стёрты
+  assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([]));
+
+  // Новая схема работает: age теперь String, появилась модель Post
+  insert_data(&db, "User", json!({ "name": "Carol", "age": "old" }));
+  assert_eq!(
+    get_data_one(&db, "User", json!({ "name": true, "age": true })),
+    json!({ "name": "Carol", "age": "old" })
+  );
+  insert_data(&db, "Post", json!({ "title": "Hi" }));
+  assert_eq!(get_data(&db, "Post", json!({ "title": true })), json!([{ "title": "Hi" }]));
+}
+
+/// Сброс через reinit переживает рестарт: open() реконструирует НОВую схему из __marci_meta__,
+/// а деревья старой модели физически снесены (модель не воскресает)
+#[test]
+fn init_persists_across_reopen() {
+  let dir = tempdir().unwrap();
+  let path = dir.path().to_str().unwrap().to_string();
+
+  {
+    let mut db = MarciDB::new("model User {\n  name String\n}", &path);
+    insert_data(&db, "User", json!({ "name": "Alice" }));
+    db.reinit("model Account {\n  email String\n}").unwrap();
+    insert_data(&db, "Account", json!({ "email": "a@x.com" }));
+  }
+
+  let db = MarciDB::open(&path);
+  assert!(db.get_model("User").is_none());     // старая модель ушла
+  assert!(db.get_model("Account").is_some());  // новая на месте
+  assert_eq!(get_data(&db, "Account", json!({ "email": true })), json!([{ "email": "a@x.com" }]));
+}
