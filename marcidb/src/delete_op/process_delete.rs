@@ -93,7 +93,7 @@ pub fn process_delete<'a>(
   Ok(true)
 }
 
-pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id: &[u8]) -> Result<(), canopydb::Error> {
+pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id: &[u8]) -> Result<(), DeleteError> {
   match ref_to_delete {
     RefToDelete::Index { tree_name } => {
       let mut tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
@@ -104,14 +104,15 @@ pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id:
       if action.is_empty() {
         delete_by_prefix(&mut tree, parent_id)?;
       } else {
-        todo!()
+        // Каскад во вложенную owned-коллекцию, у которой свои зависимости, пока не реализован
+        return Err(DeleteError::Unsupported("cascade delete of a nested owned collection with its own dependencies is not supported yet"));
       }
     }
   }
   Ok(())
 }
 
-fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema: &Schema, id: &[u8], body: &Option<Vec<u8>>) -> Result<Vec<Vec<u8>>, canopydb::Error> {
+fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema: &Schema, id: &[u8], body: &Option<Vec<u8>>) -> Result<Vec<Vec<u8>>, DeleteError> {
   let item_ids = match dep.binding {
     Some((_, RefBinding::CurrentId)) => {
       let tree = tx.get_tree(dep.rev_entity.name.as_bytes())?.unwrap();
@@ -135,7 +136,7 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
     None => {
       match &dep.rev_binding {
         RefBinding::CurrentId => {
-          panic!("Cannot use binding as current ID here")
+          return Err(DeleteError::Unsupported("delete dependency with CurrentId reverse-binding and no forward binding is not supported"));
         },
         RefBinding::FieldValue => {
           let tree = tx.get_tree(dep.rev_entity.name.as_bytes())?.unwrap();
@@ -148,7 +149,7 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
           }
           item_ids
         },
-        RefBinding::IndexTree(_) => todo!(),
+        RefBinding::IndexTree(_) => return Err(DeleteError::Unsupported("delete dependency with IndexTree reverse-binding and no forward binding is not supported")),
       }
     },
   };

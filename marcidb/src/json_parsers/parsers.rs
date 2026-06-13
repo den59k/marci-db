@@ -273,6 +273,10 @@ pub enum EncodeError {
     /// `$set`/`$ensure` (вложенная запись) применены к ref-полю, хранящемуся в body (FK):
     /// создание вложенной записи поддержано только для owned/struct-связей — используйте `$connect`
     NestedWriteNotSupported { field: String, op: String },
+    /// Обязательное поле (non-nullable, без `@default`) отсутствует в insert
+    MissingRequiredField(String),
+    /// Полю передан `null`, но оно non-nullable
+    NullNotAllowed(String),
 }
 
 

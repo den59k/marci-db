@@ -134,9 +134,6 @@ pub fn decode_row<'a, 'b, U, F>(
             let result = process_query_many(include_query, ctx, Some((query.entity,id,data)))?;
             includes.push(IncludeResult::Many(include.field, result));
           },
-          QueryType::First => {
-            todo!("Make QueryType::First method")
-          }
         }
       },
       IncludeQuery::Aggregate(aggregate_op) => {

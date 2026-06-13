@@ -30,6 +30,8 @@ pub enum UpdateError {
   DeleteError(DeleteError),
   InsertError(InsertError),
   WriteIndexesError(WriteIndexesError),
+  /// Операция над связью пока не реализована (disconnect одиночной связи, $remove элементов списка)
+  Unsupported(&'static str),
   Storage(StorageError)
 }
 

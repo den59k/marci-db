@@ -100,14 +100,22 @@ fn parse_write_op<'a>(
             if matches!(field.location, FieldLocation::Key { .. }) {
                 return Err(EncodeError::MissingIdField(field.full_name.clone()));
             }
-            // TODO: check for required fields here
+            // Non-nullable Body-поле (скаляр/enum/FK-ref) без @default обязательно. Исключены:
+            // списки (опциональны, отсутствие = пусто) и Virtual-связи (back-reference/owned —
+            // заполняются с другой стороны, а не на insert этой модели)
+            if !field.nullable && !matches!(field.location, FieldLocation::Virtual) && !matches!(field.ty, FieldType::PrimitiveList(_, _)) {
+                return Err(EncodeError::MissingRequiredField(field.full_name.clone()));
+            }
             continue;
         };
 
         // mask.set(field_index, true);
 
         if value.is_null() {
-            // TODO: add check not-null here
+            // null допустим для nullable-полей и списков (пусто); иначе — ошибка, а не молчаливый пропуск
+            if !field.nullable && !matches!(field.location, FieldLocation::Virtual) && !matches!(field.ty, FieldType::PrimitiveList(_, _)) {
+                return Err(EncodeError::NullNotAllowed(field.full_name.clone()));
+            }
             continue;
         }
 
@@ -257,6 +265,37 @@ fn write_header(dst: &mut [u8], offset_pos: usize) {
 mod tests {
     use serde_json::json;
     use crate::{json_parsers::{parse_insert, parsers::encode_list}, parse_schema, utils::{get_data, get_end, get_offsets}, write_op::{WriteDefault, WriteDefaultInsert, WriteRelation}};
+
+    /// not-null/required валидация на insert: отсутствующее или null non-nullable поле → ошибка;
+    /// nullable, списки и поля с @default остаются опциональными
+    #[test]
+    fn insert_required_and_null_validation() {
+        use crate::json_parsers::EncodeError;
+        let schema = parse_schema("
+            model User {
+                name        String
+                nickname    String?
+                tags        String[]
+                age         UInt        @default(0)
+            }
+        ");
+        let user = &schema.models[0];
+
+        // отсутствует обязательное name → MissingRequiredField
+        assert!(matches!(
+            parse_insert(&schema, user, &json!({ "nickname": "x" })),
+            Err(EncodeError::MissingRequiredField(f)) if f == "User.name"
+        ));
+        // name: null → NullNotAllowed
+        assert!(matches!(
+            parse_insert(&schema, user, &json!({ "name": null })),
+            Err(EncodeError::NullNotAllowed(f)) if f == "User.name"
+        ));
+        // nullable отсутствует/null — ок; список отсутствует/null — ок; @default подставляется — ок
+        assert!(parse_insert(&schema, user, &json!({ "name": "Alice" })).is_ok());
+        assert!(parse_insert(&schema, user, &json!({ "name": "Alice", "nickname": null })).is_ok());
+        assert!(parse_insert(&schema, user, &json!({ "name": "Alice", "tags": null })).is_ok());
+    }
 
     #[test]
     fn encode_test() {

@@ -43,7 +43,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           }
         },
         UpdateRelationOp::DisconnectAll => {
-          todo!();
+          return Err(UpdateError::Unsupported("disconnecting a relation (set null / $connect on a single ref) is not supported yet"));
         },
         UpdateRelationOp::Create(write_op) => {
           process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
@@ -65,11 +65,13 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
             process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
           }
         },
-        UpdateRelationOp::RemoveItems(_items, _delete_op) => todo!(),
+        UpdateRelationOp::RemoveItems(_items, _delete_op) =>
+          return Err(UpdateError::Unsupported("$remove of specific items from an owned relation list is not supported yet")),
         UpdateRelationOp::Connect(item_ids) => {
           write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?
         },
-        UpdateRelationOp::Disconnect(_items) => todo!(),
+        UpdateRelationOp::Disconnect(_items) =>
+          return Err(UpdateError::Unsupported("$remove (disconnect specific items) from a relation list is not supported yet")),
     }
   }
 
@@ -218,7 +220,7 @@ use crate::{parse_insert, parse_schema, parse_update, update_op::process_update:
 fn test_update_op() {
   let schema = parse_schema("
     model User {
-        name        String
+        name        String?
         age         Int
         info        UserInfo?
     }

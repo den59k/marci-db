@@ -303,7 +303,9 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
               }
             },
             FieldIndex::Custom { .. } => {
-              todo!("Custom indexes are not supported yet")
+              // FieldIndex::Custom — задел под vector-индексы; resolve_indexes их пока не создаёт,
+              // поэтому сюда не попадаем (атрибут @vectorindex не материализуется в индекс)
+              unreachable!("custom/vector indexes are not constructed yet")
             },
         }
       }

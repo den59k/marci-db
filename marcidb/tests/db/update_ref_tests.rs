@@ -164,10 +164,52 @@ fn update_ref_connect_test() {
     update_data(&db, "Post", &post_a, json!({
       "viewers": { "$connect": [ user_c ] }
     }));
-  
+
     assert_eq!(db.count_dev("Post.viewers->User"), 1);
 
-    
+
   }
 
+}
+
+
+/// Пока не реализованные операции над связями → типизированная `UpdateError::Unsupported`,
+/// а не паника `todo!()`. Транзакция откатывается, так что кейсы независимы
+#[test]
+fn update_unsupported_relation_ops() {
+  use marcidb::{UpdateError, parse_id, parse_update};
+
+  let schema_str = "
+    model User {
+      name        String
+      posts       Post[]           @bind(Post.author)
+      postsView   Post[]           @bind(Post.viewers)
+    }
+
+    model Post {
+      title        String
+      author       User?
+      viewers      User[]
+    }
+  ";
+
+  let dir = tempdir().unwrap();
+  let db: MarciDB = MarciDB::new(schema_str, dir.path().to_str().unwrap());
+
+  let user_a = insert_data(&db, "User", json!({ "name": "Alice" }));
+  let post = insert_data(&db, "Post", json!({ "title": "Hi", "author": &user_a, "viewers": [ &user_a ] }));
+
+  let entity = db.get_model("Post").unwrap();
+  let post_id = parse_id(&db.schema, entity, &post).unwrap();
+
+  let cases = [
+    json!({ "author": { "$connect": &user_a } }), // DisconnectAll
+    json!({ "author": null }),                     // DisconnectAll
+    json!({ "viewers": { "$remove": [ &user_a ] } }), // Disconnect
+  ];
+  for upd in cases {
+    let op = parse_update(&db.schema, entity, &upd).unwrap();
+    let res = db.update_item(entity, &post_id, &op);
+    assert!(matches!(res, Err(UpdateError::Unsupported(_))), "upd {} -> {:?}", upd, res);
+  }
 }
