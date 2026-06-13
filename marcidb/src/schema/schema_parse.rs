@@ -2,7 +2,10 @@ use std::{collections::HashMap};
 
 use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}, schema_resolve_bindings::{resolve_bind_refs, resolve_ref_bindings}}};
 
-pub fn parse_schema(input: &str) -> Schema {
+/// Разбирает текст схемы в сырые блоки (модели/структуры/енумы) ДО резолва ссылок,
+/// оффсетов, индексов и т.п. Используется и `parse_schema`, и движком миграций (диффу
+/// удобнее сырые модели: тип ещё `RefUnresolved(name)`, без синтетических struct-моделей)
+pub fn collect_blocks(input: &str) -> (Vec<Entity>, HashMap<String, Entity>, HashMap<String, EnumDef>) {
     let mut models = Vec::new();
     let mut structs: HashMap<String, Entity> = HashMap::new();
     let mut enums: HashMap<String,EnumDef> = HashMap::new();
@@ -13,7 +16,7 @@ pub fn parse_schema(input: &str) -> Schema {
         if !line.starts_with("model ") && !line.starts_with("struct ") && !line.starts_with("enum ") {
             continue;
         }
-        let (kind, rest) = line.trim().split_once(' ').unwrap(); 
+        let (kind, rest) = line.trim().split_once(' ').unwrap();
         let name = rest.trim_end_matches('{').trim().to_string();
 
         match kind.trim() {
@@ -29,6 +32,12 @@ pub fn parse_schema(input: &str) -> Schema {
             _ => {}
         }
     }
+
+    (models, structs, enums)
+}
+
+pub fn parse_schema(input: &str) -> Schema {
+    let (mut models, structs, enums) = collect_blocks(input);
 
     // Добавляем всем моделям обязательный id, если его нет
     for model in models.iter_mut() {

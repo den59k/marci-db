@@ -40,7 +40,7 @@ pub fn process_delete<'a>(
         tree.delete(key)?;
       },
       DeleteIndex::BodyValue { index, offset_pos, field } => {
-        let Some(value) = get_body_data(entity, field, body_value.as_ref().unwrap(), *offset_pos) else {
+        let Some(value) = get_body_data(field, body_value.as_ref().unwrap(), *offset_pos) else {
           continue;
         };
         let mut tree = tx.get_tree(index.tree_name())?.unwrap();

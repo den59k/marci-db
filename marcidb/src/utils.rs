@@ -73,12 +73,26 @@ pub fn get_next_id_value<'a>(field: &Field, id: &'a[u8], schema: &Schema, offset
   return &id[offset..offset+size];
 }
 
-pub fn get_body_data<'a>(entity: &Entity, field: &Field, body: &'a[u8], offset_pos: usize) -> Option<&'a[u8]> {
+/// Длина заголовка строки (таблица оффсетов) — хранится в самой строке (байты 2..4) при записи.
+/// Строки, записанные под схемой с меньшим числом полей, имеют более короткий заголовок;
+/// поле, чей слот за его пределами, считается отсутствующим (добавлено более поздней миграцией).
+/// Так читатель остаётся forward-compatible без переписывания строк.
+#[inline(always)]
+pub fn row_header_len(body: &[u8]) -> usize {
+  u16::from_be_bytes([body[2], body[3]]) as usize
+}
+
+pub fn get_body_data<'a>(field: &Field, body: &'a[u8], offset_pos: usize) -> Option<&'a[u8]> {
+  let header_len = row_header_len(body);
+  // Слот за пределами заголовка этой строки — поле добавлено после её записи
+  if offset_pos + 4 > header_len {
+    return None;
+  }
   let offset_start = get_offset(body, offset_pos);
   if offset_start == 0 {
     return None;
   }
-  let offset_end = get_end_optimized(body, field, offset_start, offset_pos, entity.payload_offset);
+  let offset_end = get_end_optimized(body, field, offset_start, offset_pos, header_len);
   return Some(&body[offset_start..offset_end]);
 }
 
@@ -104,7 +118,7 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
       return None;
     },
     FieldLocation::Body { offset_pos } => {
-      return get_body_data(entity, field, body, offset_pos);
+      return get_body_data(field, body, offset_pos);
     },
     FieldLocation::Virtual => { panic!("Trying to get value from virtual field") }
   }
@@ -165,4 +179,46 @@ pub fn get_offsets(data: &[u8], model: &Entity) -> Vec<usize> {
     arr.push(offset);
   }
   return arr;
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+  use crate::{parse_insert, parse_schema, utils::{get_data, row_header_len}};
+
+  /// Строка, записанная под схемой с меньшим числом полей, корректно читается более новой схемой:
+  /// существующие поля на месте, добавленное позже — отсутствует. Это и есть основа v2-формата:
+  /// читатель использует длину заголовка из самой строки, поэтому миграция add-field не переписывает строки.
+  #[test]
+  fn forward_compatible_short_row() {
+    let old = parse_schema("
+      model User {
+        name String
+        age  UInt
+      }
+    ");
+    let new = parse_schema("
+      model User {
+        name String
+        age  UInt
+        bio  String
+      }
+    ");
+
+    // Строка записана под старой схемой (2 body-поля → короткий заголовок)
+    let user_old = &old.models[0];
+    let row = parse_insert(&old, user_old, &json!({ "name": "Alice", "age": 30 })).unwrap();
+
+    // Новая схема: на одно body-поле больше → её payload_offset длиннее заголовка старой строки
+    let user_new = &new.models[0];
+    assert!(user_new.payload_offset > row_header_len(&row.data));
+
+    let field = |name: &str| user_new.fields.iter().find(|f| f.name == name).unwrap();
+
+    // Существующие поля читаются корректно...
+    assert_eq!(get_data(user_new, field("name"), &row.id, &row.data, &new).unwrap(), b"Alice");
+    assert!(get_data(user_new, field("age"), &row.id, &row.data, &new).is_some());
+    // ...а поле, добавленное позже (слот за пределами заголовка старой строки), — отсутствует
+    assert_eq!(get_data(user_new, field("bio"), &row.id, &row.data, &new), None);
+  }
 }

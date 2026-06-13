@@ -2,6 +2,7 @@ mod schema;
 mod marci_db;
 mod transaction;
 mod batch;
+mod migration;
 mod error;
 mod write_op;
 mod query_op;
@@ -22,6 +23,7 @@ pub use crate::marci_db::MarciDB;
 pub use crate::transaction::MarciTransaction;
 pub use crate::error::StorageError;
 pub use crate::batch::{execute_batch, BatchError, BatchErrorKind};
+pub use crate::migration::{diff, parse_migration, serialize_migration, MigrationOp, MigrationError};
 
 pub use crate::query_op::DecodeCtx;
 pub use crate::update_op::UpdateError;
