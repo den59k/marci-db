@@ -15,6 +15,18 @@ pub async fn parse_json_body(
         .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {}", e)))
 }
 
+/// Читает тело запроса как текст (для `$migrate` — тело является текстом схемы `.marci`)
+pub async fn parse_text_body(
+    req: Request<hyper::body::Incoming>
+) -> Result<String, ApiError> {
+    let body = req.collect().await
+        .map_err(|e| ApiError::BadRequest(format!("Failed to read body: {}", e)))?
+        .to_bytes();
+
+    String::from_utf8(body.to_vec())
+        .map_err(|e| ApiError::BadRequest(format!("Invalid UTF-8 body: {}", e)))
+}
+
 /// Запускает тяжёлую работу в blocking pool
 pub async fn blocking<F, T>(f: F) -> Result<T, ApiError>
 where

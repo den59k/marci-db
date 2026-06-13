@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use canopydb::WriteTransaction;
 
-use crate::{StorageError, index_utils::{encode_full_index, encode_index}, schema::{Attribute, Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema, collect_blocks, parse_field_raw, parse_model_block}, utils::get_data};
+use crate::{StorageError, index_utils::{encode_full_index, encode_index}, schema::{Attribute, Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, Schema, collect_blocks, parse_field_raw, parse_model_block}, utils::get_data};
 
 /// Одна операция миграции. Сериализуется в строку `.mig` DSL и обратно.
 #[derive(Debug, Clone)]
@@ -312,10 +312,12 @@ pub const META_TREE: &[u8] = b"__marci_meta__";
 
 #[derive(Debug)]
 pub enum MigrationApplyError {
-  /// Операция не поддержана в v1 (drop field, create/drop model, смена типа …)
+  /// Операция не поддержана в v1 (drop field, реордер, смена типа …)
   Unsupported(&'static str),
   /// `add unique` нашёл дубликаты в существующих данных
   UniqueViolation { field: String },
+  /// Ошибка вычисления диффа (в `migrate_to`)
+  Diff(MigrationError),
   Storage(StorageError),
 }
 
@@ -324,6 +326,9 @@ impl From<canopydb::Error> for MigrationApplyError {
 }
 impl From<StorageError> for MigrationApplyError {
   fn from(e: StorageError) -> Self { MigrationApplyError::Storage(e) }
+}
+impl From<MigrationError> for MigrationApplyError {
+  fn from(e: MigrationError) -> Self { MigrationApplyError::Diff(e) }
 }
 
 /// Проверяет, что слоты существующих полей не изменились: новые поля должны дописываться
@@ -367,10 +372,44 @@ pub fn apply_ops(tx: &WriteTransaction, ops: &[MigrationOp], old: &Schema, new: 
       MigrationOp::AddField { .. } | MigrationOp::AlterField { .. } => {}
       MigrationOp::AddIndex { model, field, .. } => build_index(tx, new, model, field)?,
       MigrationOp::DropIndex { model, field, .. } => drop_index(tx, old, model, field)?,
+      MigrationOp::CreateModel { name, .. } => create_entity_trees(tx, find_entity(new, name))?,
+      MigrationOp::DropModel { name } => drop_entity_trees(tx, find_entity(old, name))?,
       MigrationOp::DropField { .. } => return Err(MigrationApplyError::Unsupported("drop field (slot tombstone) пока не поддержан")),
-      MigrationOp::CreateModel { .. } | MigrationOp::DropModel { .. } => return Err(MigrationApplyError::Unsupported("create/drop model пока не поддержан")),
     }
   }
+  Ok(())
+}
+
+/// Создаёт деревья сущности: основное + индексные + relation-index. Используется и при инициализации
+/// `MarciDB`, и при apply `CreateModel` (модель пустая, бэкфилл не нужен)
+pub fn create_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(), canopydb::Error> {
+  tx.get_or_create_tree(entity.name.as_bytes())?;
+  for field in entity.fields.iter() {
+    if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
+      if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+        tx.get_or_create_tree(tree_name.as_bytes())?;
+      }
+    }
+    for index in field.indexes.iter() {
+      tx.get_or_create_tree(index.tree_name())?;
+    }
+  }
+  Ok(())
+}
+
+/// Удаляет все деревья сущности (основное + индексные + relation-index)
+fn drop_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(), canopydb::Error> {
+  for field in entity.fields.iter() {
+    if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
+      if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+        tx.delete_tree(tree_name.as_bytes())?;
+      }
+    }
+    for index in field.indexes.iter() {
+      tx.delete_tree(index.tree_name())?;
+    }
+  }
+  tx.delete_tree(entity.name.as_bytes())?;
   Ok(())
 }
 

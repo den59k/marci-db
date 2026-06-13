@@ -2,17 +2,21 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops, create_entity_trees, diff}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
   db: Database,
   pub(crate) counters: Vec<Arc<AtomicU64>>,
-  model_by_name: HashMap<String, usize>
+  model_by_name: HashMap<String, usize>,
+  /// Текущая схема как текст `.marci` — источник для диффа в `migrate_to`; дублируется в `__marci_meta__`
+  schema_text: String,
 }
 
 impl MarciDB {
 
+  /// Создаёт/открывает БД со схемой из текста (schema-first путь, используется встраиванием и тестами).
+  /// Схема пишется в `__marci_meta__`, чтобы её можно было реконструировать через [`MarciDB::open`]
   pub fn new(schema_str: &str, path: &str) -> MarciDB {
     let schema = parse_schema(schema_str);
 
@@ -22,30 +26,43 @@ impl MarciDB {
     let tx = db.begin_write().unwrap();
 
     for model in schema.models.iter() {
-      tx.get_or_create_tree(model.name.as_bytes()).unwrap();
+      create_entity_trees(&tx, model).unwrap();
+    }
 
-      for field in model.fields.iter() {
-        if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
-          if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
-            tx.get_or_create_tree(tree_name.as_bytes()).unwrap();
-          }
-        }
-
-        for index in field.indexes.iter() {
-          tx.get_or_create_tree(index.tree_name()).unwrap();
-        }
-      }
+    {
+      let mut meta = tx.get_or_create_tree(META_TREE).unwrap();
+      meta.insert(b"schema", schema_str.as_bytes()).unwrap();
+      meta.insert(b"version", &1u64.to_be_bytes()).unwrap();
     }
 
     let counters = build_counters(&schema, &tx);
     tx.commit().unwrap();
 
-    MarciDB {
-      db,
-      schema,
-      counters,
-      model_by_name
-    }
+    MarciDB { db, schema, counters, model_by_name, schema_text: schema_str.to_string() }
+  }
+
+  /// Открывает БД, реконструируя схему из `__marci_meta__` (состояние, оставшееся после миграций).
+  /// Для новой/пустой БД схема пустая — модели появятся после первой [`MarciDB::migrate_to`].
+  /// Это open-time self-migrate: миграции переживают рестарт
+  pub fn open(path: &str) -> MarciDB {
+    let db = canopydb::Database::new(path).unwrap();
+
+    let schema_text = {
+      let rx = db.begin_read().unwrap();
+      rx.get_tree(META_TREE).unwrap()
+        .and_then(|meta| meta.get(b"schema").unwrap())
+        .map(|v| String::from_utf8(v.to_vec()).unwrap())
+        .unwrap_or_default()
+    };
+
+    let schema = parse_schema(&schema_text);
+    let model_by_name = schema.build_model_name_map();
+
+    let rx = db.begin_read().unwrap();
+    let counters = build_counters(&schema, &rx);
+    drop(rx);
+
+    MarciDB { db, schema, counters, model_by_name, schema_text }
   }
 
   pub fn get_model(&self, name: &str) -> Option<&Entity> {
@@ -135,6 +152,15 @@ impl MarciDB {
   ///
   /// v1 покрывает add/alter field и add/drop index на существующих моделях (поля только в конец);
   /// drop field, create/drop model и реордер полей пока возвращают `MigrationApplyError::Unsupported`.
+  /// Декларативная миграция к новой схеме: вычисляет дифф от текущей схемы и применяет его.
+  /// Это и есть «push» на сервере — клиент присылает новый текст схемы
+  pub fn migrate_to(&mut self, new_schema_text: &str) -> Result<(), MigrationApplyError> {
+    let ops = diff(&self.schema_text, new_schema_text)?;
+    self.apply_migration(&ops, new_schema_text)
+  }
+
+  /// Применяет заранее вычисленные операции миграции к новой схеме (текст). Атомарно: при ошибке
+  /// транзакция откатывается, версия и in-memory схема не меняются
   pub fn apply_migration(&mut self, ops: &[MigrationOp], new_schema_text: &str) -> Result<(), MigrationApplyError> {
     let new_schema = parse_schema(new_schema_text);
 
@@ -151,7 +177,13 @@ impl MarciDB {
     }
     tx.commit()?;
 
+    // Набор моделей мог измениться (create/drop model) — пересобираем counters и индекс имён
+    let rx = self.db.begin_read().unwrap();
+    self.counters = build_counters(&new_schema, &rx);
+    drop(rx);
+
     self.model_by_name = new_schema.build_model_name_map();
+    self.schema_text = new_schema_text.to_string();
     self.schema = new_schema;
     Ok(())
   }
