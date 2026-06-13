@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
-import fs from "node:fs"
+import fs from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,62 +14,124 @@ const BINS = {
   "win32-x64":    "marci-generate-win32-x64.exe",
 };
 
-const COMMANDS = {
-  generate: cmdGenerate,
-};
+function binPath() {
+  const key = `${os.platform()}-${os.arch()}`;
+  const name = BINS[key];
+  if (!name) {
+    console.error(`marcidb: unsupported platform ${key}`);
+    process.exit(1);
+  }
+  return path.join(__dirname, "bin", name);
+}
+
+// Разбирает позиционные аргументы и флаги (--flag value | --flag)
+function parseArgs(args) {
+  const positional = [];
+  const flags = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      const key = a.slice(2);
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        flags[key] = true;
+      } else {
+        flags[key] = next;
+        i++;
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { positional, flags };
+}
 
 function help() {
   console.log(`
 marcidb <command> [options]
 
 Commands:
-  generate [schema] [output]   Generate TypeScript types from schema
-                               schema  — path to .marci file (default: schema.marci)
-                               output  — output directory  (default: node_modules/marci-db/generated)
+  generate [schema] [output]      Generate TS types (always) and a migration file
+    --migrations <dir>            migrations directory (default: migrations)
+    --name <name>                 migration name (default: migration)
+    --no-migrations               types only, skip the migration file
+
+  migrate push <db> [options]     Push the schema to a running server (creates the db if absent)
+    --url <url>                   server url (default: http://localhost:3000)
+    --schema <path>               schema file (default: schema.marci)
 
 Examples:
   marcidb generate
-  marcidb generate schema.marci
-  marcidb generate schema.marci node_modules/.marcidb/client
-  `);
+  marcidb generate schema.marci --name add_users
+  marcidb migrate push myapp --url http://localhost:3000
+`);
 }
 
 function cmdGenerate(args) {
-  const schema = args[0] ?? "schema.marci";
-  const output = args[1] ?? `${import.meta.dir ?? __dirname}/../.marcidb/client` ;
+  const { positional, flags } = parseArgs(args);
+  const schema = positional[0] ?? "schema.marci";
+  const output = positional[1] ?? path.join(__dirname, "..", ".marcidb", "client");
+  const bin = binPath();
 
-  const key = `${os.platform()}-${os.arch()}`;
-  const name = BINS[key];
-
-  if (!name) {
-    console.error(`marci-db: unsupported platform ${key}`);
-    process.exit(1);
-  }
-
-  const bin = path.join(__dirname, "bin", name);
-
-  // Удаляем папку перед генерацией
+  // 1) TypeScript-типы (всегда — без них миграция бессмысленна)
   if (fs.existsSync(output)) {
     fs.rmSync(output, { recursive: true, force: true });
-    console.log(`Cleared ${output}`);
   }
-
-  console.log(`Generating from ${schema} into ${output}...`);
-
-  try {
-    execFileSync(bin, [schema, output], { stdio: "inherit" });
-
-    fs.writeFileSync(output + "/package.json", `{
+  console.log(`Generating types from ${schema} into ${output}...`);
+  execFileSync(bin, ["types", schema, output], { stdio: "inherit" });
+  fs.writeFileSync(path.join(output, "package.json"), `{
   "name": "marci-client",
   "main": "index.js",
   "types": "index.d.ts"
-}`)
+}`);
 
-    console.log("Done.");
-  } catch (e) {
-    process.exit(e.status ?? 1);
+  // 2) Файл миграции (если не отключено)
+  if (!flags["no-migrations"]) {
+    const dir = flags.migrations ?? "migrations";
+    const name = flags.name ?? "migration";
+    execFileSync(bin, ["migration", schema, dir, name], { stdio: "inherit" });
   }
+
+  console.log("Done.");
 }
+
+async function cmdMigrate(args) {
+  const [sub, ...rest] = args;
+  if (sub !== "push") {
+    console.error(`marcidb migrate: unknown subcommand "${sub ?? ""}" (expected "push")`);
+    help();
+    process.exit(1);
+  }
+
+  const { positional, flags } = parseArgs(rest);
+  const db = positional[0];
+  if (!db) {
+    console.error("marcidb migrate push: <db> name required");
+    process.exit(1);
+  }
+
+  const url = (flags.url ?? "http://localhost:3000").replace(/\/+$/, "");
+  const schemaPath = flags.schema ?? "schema.marci";
+  const schemaText = fs.readFileSync(schemaPath, "utf8");
+
+  const res = await fetch(`${url}/${db}/$migrate`, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: schemaText,
+  });
+
+  if (!res.ok) {
+    console.error(`Migration failed [${res.status}]: ${await res.text()}`);
+    process.exit(1);
+  }
+  console.log(`Migrated '${db}' on ${url}`);
+}
+
+const COMMANDS = {
+  generate: cmdGenerate,
+  migrate: cmdMigrate,
+};
+
 // --- main ---
 
 const [command, ...args] = process.argv.slice(2);
@@ -82,9 +144,9 @@ if (!command || command === "help" || command === "--help" || command === "-h") 
 const fn = COMMANDS[command];
 
 if (!fn) {
-  console.error(`marci: unknown command "${command}"`);
+  console.error(`marcidb: unknown command "${command}"`);
   help();
   process.exit(1);
 }
 
-fn(args);
+await fn(args);
