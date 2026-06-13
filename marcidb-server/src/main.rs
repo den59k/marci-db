@@ -6,7 +6,7 @@ use hyper_util::rt::TokioIo;
 use marcidb::MarciDB;
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_update}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_transaction, handle_update}};
 
 mod handlers;
 mod errors;
@@ -33,6 +33,11 @@ async fn handle_inner(
     req: Request<hyper::body::Incoming>,
     ctx: Arc<ServerContext>,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
+    // Спец-маршрут уровня корня: атомарная batch-транзакция (без модели в пути)
+    if req.method() == Method::POST && req.uri().path().trim_matches('/') == "$transaction" {
+        return handle_transaction(req, ctx).await;
+    }
+
     let (model_name, action, query) = parse_path(req.uri().path())?;
 
     let model = ctx.db.get_model_index(&model_name)

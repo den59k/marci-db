@@ -57,4 +57,13 @@ type AggregateResult<TModel, T> =
   (T extends { $min: infer F } ? { min: (F extends keyof TModel ? TModel[F] : never) | null } : {}) &
   (T extends { $max: infer F } ? { max: (F extends keyof TModel ? TModel[F] : never) | null } : {})
 
+// Лениво-исполняемая операция. `await` выполняет её как одиночный запрос;
+// передача в `db.$transaction([...])` собирает её в одну атомарную транзакцию
+declare const __op: unique symbol
+export type Op<T> = PromiseLike<T> & { readonly [__op]: T }
+
+// Ссылка на результат предыдущей операции внутри $transaction (резолвится сервером).
+// "0.id" — поле id результата операции #0; "1.author.id" — вложенный путь
+export declare function ref(path: string): any
+
 export declare function marcidb(url: string): MarciDB;

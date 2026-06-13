@@ -4,7 +4,7 @@ mod prepare_delete_op;
 pub use process_delete::{process_delete};
 pub use prepare_delete_op::prepare_delete;
 
-use crate::{Field, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
+use crate::{Field, StorageError, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
 
 #[derive(Debug)]
 pub struct DeleteOp<'a> {
@@ -58,5 +58,18 @@ pub enum DependencyActionType<'a> {
 pub enum DeleteError {
   ItemNotFound,
   RestrictConstraints(String,Vec<Vec<u8>>),
-  EncodeError(EncodeError)
+  EncodeError(EncodeError),
+  Storage(StorageError)
+}
+
+impl From<canopydb::Error> for DeleteError {
+  fn from(e: canopydb::Error) -> Self {
+    DeleteError::Storage(StorageError(e))
+  }
+}
+
+impl From<StorageError> for DeleteError {
+  fn from(e: StorageError) -> Self {
+    DeleteError::Storage(e)
+  }
 }

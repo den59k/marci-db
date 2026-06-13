@@ -32,6 +32,7 @@ const posts = await db.post.findMany({
 - **Typed TS client**: result types are inferred from the `select` shape, including discriminated unions for enums
 - **Secondary indexes** with a query planner: range scans, `$order` by index, keyset pagination (`$cursor`)
 - **Aggregations**: `count` / `$sum` / `$avg` / `$min` / `$max`, including aggregates over relations inside a select (`posts: { $count: true }` — counted by index keys, without reading rows)
+- **Atomic batch transactions**: `db.$transaction([...])` applies several operations as all-or-nothing, with `ref("0.id")` to feed a generated id into later operations
 - **Compact binary row format** with zero-copy field access — filters and aggregates read only the bytes they need
 
 ## Quick start

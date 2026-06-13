@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -60,31 +60,25 @@ impl MarciDB {
     return &self.schema.models[index]
   }
 
-  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
-    return process_query_many(query, &mut ctx,None);
+    return process_query_many(query, &mut ctx, None);
   }
 
-  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Result<Option<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
-    return process_query_one(query, &mut ctx,None);
+    return process_query_one(query, &mut ctx, None);
   }
 
-  // pub fn find_unique<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where F: Fn(DecodeCtx<U>) -> U { 
-  //   let rx = self.db.begin_read().unwrap();
-  //   let mut ctx = TransationContext::new(&rx, &self.schema, f);
-  //   return process_query_one(query, &mut ctx,None);
-  // }
-
-  pub fn count(&self, entity: &Entity) -> u64 {
+  pub fn count(&self, entity: &Entity) -> Result<u64, StorageError> {
     let rx = self.db.begin_read().unwrap();
-    let tree = rx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-    return tree.len();
+    let tree = rx.get_tree(entity.name.as_bytes())?.unwrap();
+    return Ok(tree.len());
   }
 
-  pub fn aggregate(&self, op: &AggregateOp) -> AggregateResult {
+  pub fn aggregate(&self, op: &AggregateOp) -> Result<AggregateResult, StorageError> {
     let rx = self.db.begin_read().unwrap();
     // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
     let mut ctx: TransationContext<(), _> = TransationContext::new(&rx, &self.schema, |_: DecodeCtx<()>| ());
@@ -105,32 +99,33 @@ impl MarciDB {
   }
 
   /// Выполняет блок в одной транзакции: при `Ok` — коммит, при `Err` или панике — откат.
-  /// Удобная обёртка над [`MarciDB::begin_write`], когда не нужно ручное управление коммитом
-  pub fn transaction<T, E, F>(&self, f: F) -> Result<T, E> where F: FnOnce(&MarciTransaction) -> Result<T, E> {
+  /// Удобная обёртка над [`MarciDB::begin_write`], когда не нужно ручное управление коммитом.
+  /// Ошибка коммита оборачивается в `E` (поэтому требуется `E: From<StorageError>`)
+  pub fn transaction<T, E, F>(&self, f: F) -> Result<T, E> where F: FnOnce(&MarciTransaction) -> Result<T, E>, E: From<StorageError> {
     let tx = self.begin_write();
     let result = f(&tx)?;
-    tx.commit().unwrap();
+    tx.commit()?;
     Ok(result)
   }
 
   pub fn insert_item(&self, entity: &Entity, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
     let tx = self.begin_write();
     let item_id = tx.insert_item(entity, insert)?;
-    tx.commit().unwrap();
+    tx.commit()?;
     Ok(item_id)
   }
 
   pub fn update_item(&self, entity: &Entity, id: &[u8], update_op: &UpdateOp) -> Result<(), UpdateError> {
     let tx = self.begin_write();
     tx.update_item(entity, id, update_op)?;
-    tx.commit().unwrap();
+    tx.commit()?;
     Ok(())
   }
 
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
     let tx = self.begin_write();
     let is_delete = tx.delete_item(entity, id)?;
-    tx.commit().unwrap();
+    tx.commit()?;
     Ok(is_delete)
   }
 }

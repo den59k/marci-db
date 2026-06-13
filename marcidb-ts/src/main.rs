@@ -520,15 +520,18 @@ fn main() {
   for model in schema.models.iter() {
     if model.name.contains(".") { continue; };
     lines.push(format!("  {}: {{", get_model_small_name(model)));
-    lines.push(format!("    findMany<T extends {}>(select: T): Promise<GetResult<{}, T>[]>", get_model_query_name(model), get_model_name(model)));
-    lines.push(format!("    findFirst<T extends {}>(select: T): Promise<GetResult<{}, T> | null>", get_model_query_name(model), get_model_name(model)));
-    lines.push(format!("    insert(data: {}): Promise<{}>", get_model_insert_name(model), get_model_id_name(model)));
-    lines.push(format!("    update(id: {}, data: {}): Promise<void>", get_model_id_name(model), get_model_update_name(model)));
-    lines.push(format!("    delete(id: {}): Promise<void>", get_model_id_name(model)));
-    lines.push(format!("    count(query?: {{ $where?: {} }}): Promise<number>", get_model_where_name(model)));
-    lines.push(format!("    aggregate<T extends {}>(query: T): Promise<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
+    lines.push(format!("    findMany<T extends {}>(select: T): Op<GetResult<{}, T>[]>", get_model_query_name(model), get_model_name(model)));
+    lines.push(format!("    findFirst<T extends {}>(select: T): Op<GetResult<{}, T> | null>", get_model_query_name(model), get_model_name(model)));
+    lines.push(format!("    insert(data: {}): Op<{}>", get_model_insert_name(model), get_model_id_name(model)));
+    lines.push(format!("    update(id: {}, data: {}): Op<void>", get_model_id_name(model), get_model_update_name(model)));
+    lines.push(format!("    delete(id: {}): Op<void>", get_model_id_name(model)));
+    lines.push(format!("    count(query?: {{ $where?: {} }}): Op<number>", get_model_where_name(model)));
+    lines.push(format!("    aggregate<T extends {}>(query: T): Op<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
     lines.push("  }".to_string());
   }
+  // Атомарная batch-транзакция: операции применяются все или ни одной; результаты —
+  // кортеж по числу операций. Используйте ref("0.id") для ссылок на предыдущие результаты
+  lines.push("  $transaction<P extends readonly Op<any>[]>(ops: [...P]): Promise<{ [K in keyof P]: P[K] extends Op<infer T> ? T : never }>".to_string());
   lines.push("}".to_string());
 
   let prefix = include_str!("prefix.ts").to_string();
@@ -540,13 +543,13 @@ fn main() {
   for model in schema.models.iter() { 
     if model.name.contains(".") { continue; };
     lines.push(format!("{}: {{", get_model_small_name(model)));
-    lines.push(format!("  findMany: (select) => findMany(\"{}\", select),", model.name));
-    lines.push(format!("  findFirst: (select) => findFirst(\"{}\", select),", model.name));
-    lines.push(format!("  insert: (data) => insert(\"{}\", data),", model.name));
-    lines.push(format!("  update: (id,data) => update(\"{}\", id, data),", model.name));
-    lines.push(format!("  delete: (id) => runDelete(\"{}\", id),", model.name));
-    lines.push(format!("  count: (query) => count(\"{}\", query),", model.name));
-    lines.push(format!("  aggregate: (query) => aggregate(\"{}\", query)", model.name));
+    lines.push(format!("  findMany: (select) => op({{ model: \"{0}\", action: \"findMany\", query: select }}, () => findMany(\"{0}\", select)),", model.name));
+    lines.push(format!("  findFirst: (select) => op({{ model: \"{0}\", action: \"findFirst\", query: select }}, () => findFirst(\"{0}\", select)),", model.name));
+    lines.push(format!("  insert: (data) => op({{ model: \"{0}\", action: \"insert\", data }}, () => insert(\"{0}\", data)),", model.name));
+    lines.push(format!("  update: (id, data) => op({{ model: \"{0}\", action: \"update\", id, data }}, () => update(\"{0}\", id, data)),", model.name));
+    lines.push(format!("  delete: (id) => op({{ model: \"{0}\", action: \"delete\", id }}, () => runDelete(\"{0}\", id)),", model.name));
+    lines.push(format!("  count: (query) => op({{ model: \"{0}\", action: \"count\", query: query ?? {{}} }}, () => count(\"{0}\", query)),", model.name));
+    lines.push(format!("  aggregate: (query) => op({{ model: \"{0}\", action: \"aggregate\", query }}, () => aggregate(\"{0}\", query))", model.name));
     lines.push("},".to_string());
   }
 

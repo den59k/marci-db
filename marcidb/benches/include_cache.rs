@@ -49,14 +49,14 @@ fn bench(name: &str, db: &MarciDB, expected: usize) {
 
   // Прогрев
   for _ in 0..3 {
-    let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap());
+    let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap()).unwrap();
     assert_eq!(items.len(), expected);
   }
 
   const ITERS: u32 = 30;
   let start = Instant::now();
   for _ in 0..ITERS {
-    let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap());
+    let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap()).unwrap();
     assert_eq!(items.len(), expected);
   }
   let elapsed = start.elapsed() / ITERS;

@@ -56,21 +56,21 @@ fn delete_cascade_test() {
     insert_data(&db, "Post", json!({ "title": "Second Alice post", "author": user_a }));
     insert_data(&db, "Post", json!({ "title": "Unnamed post" }));
 
-    assert_eq!(db.count(db.get_model("User").unwrap()), 2);
-    assert_eq!(db.count(db.get_model("Project").unwrap()), 3);
-    assert_eq!(db.count(db.get_model("Project.users").unwrap()), 2);
-    assert_eq!(db.count(db.get_model("Post").unwrap()), 3);
-    assert_eq!(db.count(db.get_model("User.info").unwrap()), 1);
+    assert_eq!(db.count(db.get_model("User").unwrap()).unwrap(), 2);
+    assert_eq!(db.count(db.get_model("Project").unwrap()).unwrap(), 3);
+    assert_eq!(db.count(db.get_model("Project.users").unwrap()).unwrap(), 2);
+    assert_eq!(db.count(db.get_model("Post").unwrap()).unwrap(), 3);
+    assert_eq!(db.count(db.get_model("User.info").unwrap()).unwrap(), 1);
 
     assert_eq!(db.count_dev("User.posts->Post"), 2);
 
     {
         delete_data(&db, "User", user_a);
     
-        assert_eq!(db.count(db.get_model("User").unwrap()), 1);
-        assert_eq!(db.count(db.get_model("Project").unwrap()), 3);
-        assert_eq!(db.count(db.get_model("Project.users").unwrap()), 0);
-        assert_eq!(db.count(db.get_model("Post").unwrap()), 3);
+        assert_eq!(db.count(db.get_model("User").unwrap()).unwrap(), 1);
+        assert_eq!(db.count(db.get_model("Project").unwrap()).unwrap(), 3);
+        assert_eq!(db.count(db.get_model("Project.users").unwrap()).unwrap(), 0);
+        assert_eq!(db.count(db.get_model("Post").unwrap()).unwrap(), 3);
         assert_eq!(db.count_dev("User.posts->Post"), 0);
 
         assert_eq!(get_data(&db, "Post", json!({ "title": true, "author": true })), json!([
@@ -82,9 +82,9 @@ fn delete_cascade_test() {
 
     {
         delete_data(&db, "User", user_b);
-        assert_eq!(db.count(db.get_model("User").unwrap()), 0);
+        assert_eq!(db.count(db.get_model("User").unwrap()).unwrap(), 0);
 
-        assert_eq!(db.count(db.get_model("User.info").unwrap()), 0);
+        assert_eq!(db.count(db.get_model("User.info").unwrap()).unwrap(), 0);
     }
 }
 
@@ -135,7 +135,7 @@ fn delete_many_to_many() {
     
     {
         delete_data(&db, "User", user_a);
-        assert_eq!(db.count(db.get_model("User").unwrap()), 2);
+        assert_eq!(db.count(db.get_model("User").unwrap()).unwrap(), 2);
         assert_eq!(db.count_dev("User.chats->Chat"), 3);
         assert_eq!(db.count_dev("Chat.users->User"), 3);
 

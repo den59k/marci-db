@@ -167,6 +167,28 @@ await db.user.findMany({
 - `count` with `{ field: null }` / `{ $not: null }` on an indexed field → difference of tree sizes, O(1)
 - `$min`/`$max` on indexed non-nullable fields without filter → first/last index key, O(log n)
 
+## Transactions
+
+`db.$transaction([...])` runs a list of operations in a single atomic transaction — all commit or none do. The results come back as a tuple, typed per operation:
+
+```ts
+import { marcidb, ref } from "marcidb-client"
+
+const [user, post] = await db.$transaction([
+  db.user.insert({ name: "Alice", email: "a@example.com" }),
+  db.post.insert({ title: "Hi", author: { id: ref("0.id") } }),
+])
+// user: { id: ... }, post: { id: ... }
+```
+
+Methods are **lazy**: `db.<model>.<method>(...)` builds an operation without running it. Awaited on its own it executes as a single request; passed to `$transaction` it is collected into the batch. (So don't both `await` a call and pass it to `$transaction` — that would run it twice.)
+
+`ref("<i>.<path>")` references the result of operation `i`, resolved server-side before that operation runs — typically a generated id: `ref("0.id")`, `ref("1.author.id")`.
+
+Reads inside the transaction see the writes of earlier operations (read-your-writes). On any failure the whole transaction is rolled back and `$transaction` rejects.
+
+Reach for it when several **independent** writes must be atomic (e.g. a balance transfer). The "create parent + children" case doesn't need it — nested writes (`insert({ ..., posts: [...] })`) are already atomic in a single operation.
+
 ## Client setup
 
 ```ts
@@ -185,4 +207,8 @@ db.<model>.update(id, data)       // Promise<void>
 db.<model>.delete(id)             // Promise<void>
 db.<model>.count(query?)          // Promise<number>
 db.<model>.aggregate(query)       // Promise<AggregateResult>
+
+db.$transaction([ ...ops ])       // Promise<[...results]> — atomic, see Transactions
 ```
+
+(The per-model methods return a lazy `Op<T>`, which is awaitable like a `Promise<T>` and can also be passed to `$transaction`.)

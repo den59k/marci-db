@@ -11,6 +11,7 @@ pub mod update_tests;
 pub mod update_ref_tests;
 pub mod companion_id_tests;
 pub mod transaction_tests;
+pub mod batch_tests;
 
 use std::str::FromStr;
 
@@ -38,7 +39,7 @@ pub fn get_data(db: &MarciDB, model: &str, json_query: Value) -> Value {
 
   // println!("{:#?}", query);
 
-  let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap());
+  let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap()).unwrap();
   Value::from_str(&array_to_json(&items)).unwrap()
 }
 
@@ -49,7 +50,7 @@ pub fn get_data_one(db: &MarciDB, model: &str, json_query: Value) -> Value {
 
   // println!("{:#?}", query);
 
-  let item = db.find_first(&query, |ctx| decode_document(ctx).unwrap());
+  let item = db.find_first(&query, |ctx| decode_document(ctx).unwrap()).unwrap();
   if let Some(item) = item {
     Value::from_str(&item).unwrap()
   } else {
@@ -66,6 +67,6 @@ pub fn delete_data(db: &MarciDB, model: &str, data: Value) {
 pub fn get_aggregate(db: &MarciDB, model: &str, json_query: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let op = parse_aggregate(&db.schema, entity, &json_query).unwrap();
-  let result = db.aggregate(&op);
+  let result = db.aggregate(&op).unwrap();
   Value::from_str(&aggregate_to_json(&op, &result)).unwrap()
 }

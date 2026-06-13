@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{Bytes, Transaction, Tree};
 
-use crate::{Field, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, query_op::{IncludeQuery, PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, query_op::{IncludeQuery, PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
 pub type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
@@ -26,22 +26,20 @@ pub fn get_prefix<'a>(prefix_key: &'a PrefixKey, parent: Option<ParentData<'a>>,
   }
 }
 
-pub fn get_ids_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Vec<Vec<u8>> {
+pub fn get_ids_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Result<Vec<Vec<u8>>, canopydb::Error> {
   let item_id_len = item_id.len();
   index_tree
-    .prefix_keys(&item_id)
-    .unwrap()
-    .map(|e| e.unwrap()[item_id_len..].to_vec())
+    .prefix_keys(&item_id)?
+    .map(|e| Ok(e?[item_id_len..].to_vec()))
     .collect()
 }
 
-pub fn get_first_id_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Option<Vec<u8>> {
+pub fn get_first_id_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Result<Option<Vec<u8>>, canopydb::Error> {
   let item_id_len = item_id.len();
-  index_tree
-    .prefix_keys(&item_id)
-    .unwrap()
-    .map(|e| e.unwrap()[item_id_len..].to_vec())
-    .next()
+  match index_tree.prefix_keys(&item_id)?.next() {
+    Some(e) => Ok(Some(e?[item_id_len..].to_vec())),
+    None => Ok(None),
+  }
 }
 
 /// Итератор для опционально-обратного обхода без аллокаций
@@ -72,16 +70,16 @@ pub fn range_keys_iter<'t>(
     start: &Option<Vec<u8>>,
     end: &Option<Vec<u8>>,
     reverse: bool
-) -> impl Iterator<Item = Bytes> + 't {
+) -> Result<impl Iterator<Item = Result<Bytes, canopydb::Error>> + 't, canopydb::Error> {
   let iter = match (start.as_deref(), end.as_deref()) {
       (Some(s), Some(e)) => index_tree.range_keys(s..e),
       (Some(s), None) => index_tree.range_keys(s..),
       (None, Some(e)) => index_tree.range_keys(..e),
       // Полный обход: диапазон от пустого ключа покрывает всё дерево
       (None, None) => index_tree.range_keys((&[] as &[u8])..),
-  };
+  }?;
 
-  maybe_rev(iter.unwrap(), reverse).map(|item| item.unwrap())
+  Ok(maybe_rev(iter, reverse))
 }
 
 #[inline]
@@ -102,13 +100,13 @@ pub fn process_data<'a, 'b, U, F>(
   data: &'b [u8],
   ctx: &mut TransationContext<'a, U, F>,
   query: &'a QueryOp,
-) -> Option<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+) -> Result<Option<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
 
-  if let Some(where_op) = &query.filter && !process_where(id, data, ctx, query.entity, where_op) {
-    return None
+  if let Some(where_op) = &query.filter && !process_where(id, data, ctx, query.entity, where_op)? {
+    return Ok(None)
   }
 
-  Some(decode_row(id, data, ctx, query))
+  Ok(Some(decode_row(id, data, ctx, query)?))
 }
 
 // Декодирует строку вместе с includes. Фильтр должен быть проверен до вызова
@@ -117,7 +115,7 @@ pub fn decode_row<'a, 'b, U, F>(
   data: &'b [u8],
   ctx: &mut TransationContext<'a, U, F>,
   query: &'a QueryOp,
-) -> U where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+) -> Result<U, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
 
   let mut includes: Vec<IncludeResult<U>> = Vec::with_capacity(query.includes.len());
 
@@ -126,14 +124,14 @@ pub fn decode_row<'a, 'b, U, F>(
       IncludeQuery::Query(include_query) => {
         match include.query_type {
           QueryType::One => {
-            if let Some(result) = process_query_one(include_query, ctx, Some((query.entity,id,data))) {
+            if let Some(result) = process_query_one(include_query, ctx, Some((query.entity,id,data)))? {
               includes.push(IncludeResult::One(include.field, result));
             } else {
               includes.push(IncludeResult::None(include.field));
             }
           },
           QueryType::Many => {
-            let result = process_query_many(include_query, ctx, Some((query.entity,id,data)));
+            let result = process_query_many(include_query, ctx, Some((query.entity,id,data)))?;
             includes.push(IncludeResult::Many(include.field, result));
           },
           QueryType::First => {
@@ -142,13 +140,13 @@ pub fn decode_row<'a, 'b, U, F>(
         }
       },
       IncludeQuery::Aggregate(aggregate_op) => {
-        let result = process_aggregate(aggregate_op, ctx, Some((query.entity,id,data)));
+        let result = process_aggregate(aggregate_op, ctx, Some((query.entity,id,data)))?;
         includes.push(IncludeResult::Aggregate(include.field, aggregate_op, result));
       }
     }
   }
 
-  return (ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema });
+  return Ok((ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema }));
 }
 
 /// Кэш include-результатов одного вложенного запроса (id записи → результат декода).
@@ -181,14 +179,13 @@ impl<'a, U, F> TransationContext<'a, U, F> {
   pub fn new(rx: &'a Transaction, schema: &'a Schema, f: F) -> Self {
     Self { trees: HashMap::new(), rx, f, schema, include_cache: HashMap::new() }
   }
-  pub fn get_tree(&mut self, key: &str) -> Arc<Tree<'a>> {
-    self.trees
-        .entry(key.to_string())
-        .or_insert_with(|| {
-          let tree = self.rx.get_tree(key.as_bytes()).unwrap().unwrap();
-          return Arc::new(tree);
-        })
-        .clone()
+  pub fn get_tree(&mut self, key: &str) -> Result<Arc<Tree<'a>>, StorageError> {
+    if let Some(tree) = self.trees.get(key) {
+      return Ok(tree.clone());
+    }
+    let tree = Arc::new(self.rx.get_tree(key.as_bytes())?.unwrap());
+    self.trees.insert(key.to_string(), tree.clone());
+    Ok(tree)
   }
 }
 

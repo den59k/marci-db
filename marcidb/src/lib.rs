@@ -1,6 +1,8 @@
 mod schema;
 mod marci_db;
 mod transaction;
+mod batch;
+mod error;
 mod write_op;
 mod query_op;
 mod aggregate_op;
@@ -18,6 +20,8 @@ pub use crate::aggregate_op::{AggregateOp,AggregateResult,SumValue};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::MarciDB;
 pub use crate::transaction::MarciTransaction;
+pub use crate::error::StorageError;
+pub use crate::batch::{execute_batch, BatchError, BatchErrorKind};
 
 pub use crate::query_op::DecodeCtx;
 pub use crate::update_op::UpdateError;

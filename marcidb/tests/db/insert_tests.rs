@@ -54,10 +54,10 @@ fn base_insert_test() {
   insert_data(&db, "Post", json!({ "title": "Second Alice post", "author": user_a }));
   insert_data(&db, "Post", json!({ "title": "Unnamed post" }));
 
-  assert_eq!(db.count(db.get_model("User").unwrap()), 2);
-  assert_eq!(db.count(db.get_model("Project").unwrap()), 3);
-  assert_eq!(db.count(db.get_model("Project.users").unwrap()), 2);
-  assert_eq!(db.count(db.get_model("Post").unwrap()), 3);
+  assert_eq!(db.count(db.get_model("User").unwrap()).unwrap(), 2);
+  assert_eq!(db.count(db.get_model("Project").unwrap()).unwrap(), 3);
+  assert_eq!(db.count(db.get_model("Project.users").unwrap()).unwrap(), 2);
+  assert_eq!(db.count(db.get_model("Post").unwrap()).unwrap(), 3);
 
   {
     let resp = get_data(&db, "User", json!({

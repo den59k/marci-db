@@ -2,11 +2,32 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update};
+use marcidb::{BatchErrorKind, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update};
+use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body}};
 
 type HandlerResult = Result<Response<Full<Bytes>>, ApiError>;
+
+/// Атомарная batch-транзакция: тело — массив операций `{ model, action, ... }`.
+/// Все применяются в одной транзакции; при ошибке любой — откат всей и индекс упавшей операции
+pub async fn handle_transaction(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+
+    let result = blocking(move || {
+        let ops = json_val.as_array()
+            .ok_or_else(|| ApiError::BadRequest("Transaction body must be an array of operations".to_string()))?;
+
+        match execute_batch(&ctx.db, ops) {
+            Ok(results) => Ok(serde_json::to_string(&Value::Array(results)).unwrap()),
+            // storage/commit-ошибки — 500, остальное (разбор, ограничения, ссылки) — 400
+            Err(e) if matches!(e.kind, BatchErrorKind::Storage(_)) => Err(ApiError::Internal(e.to_string())),
+            Err(e) => Err(ApiError::BadRequest(e.to_string())),
+        }
+    }).await?;
+
+    Ok(ok_response(result))
+}
 
 pub async fn handle_insert(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, model_index: usize) -> HandlerResult {
     let json_val = parse_json_body(req).await?;
@@ -30,7 +51,9 @@ pub async fn handle_find_many(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
         let entity = ctx.db.get_model_by_index(model_index);
         let query_op = parse_query(&ctx.db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
-        Ok(array_to_json(&ctx.db.find_many(&query_op, |ctx| decode_document(ctx).unwrap())))
+        let items = ctx.db.find_many(&query_op, |ctx| decode_document(ctx).unwrap())
+            .map_err(|e| ApiError::Internal(format!("{}", e)))?;
+        Ok(array_to_json(&items))
     }).await?;
 
     Ok(ok_response(result))
@@ -44,7 +67,9 @@ pub async fn handle_find_first(req: Request<hyper::body::Incoming>, ctx: Arc<Ser
         let query_op = parse_query(&ctx.db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
 
-        let Some(item) = &ctx.db.find_first(&query_op, |ctx| decode_document(ctx).unwrap()) else {
+        let item = ctx.db.find_first(&query_op, |ctx| decode_document(ctx).unwrap())
+            .map_err(|e| ApiError::Internal(format!("{}", e)))?;
+        let Some(item) = &item else {
             return Ok("null".to_string())
         };
         Ok(item.clone())
@@ -62,7 +87,8 @@ pub async fn handle_count(req: Request<hyper::body::Incoming>, ctx: Arc<ServerCo
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
         aggregate_op.count = true;
 
-        let result = ctx.db.aggregate(&aggregate_op);
+        let result = ctx.db.aggregate(&aggregate_op)
+            .map_err(|e| ApiError::Internal(format!("{}", e)))?;
         Ok(result.count.to_string())
     }).await?;
 
@@ -80,7 +106,8 @@ pub async fn handle_aggregate(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
             return Err(ApiError::BadRequest("At least one of $count, $sum, $avg, $min, $max is required".to_string()));
         }
 
-        let result = ctx.db.aggregate(&aggregate_op);
+        let result = ctx.db.aggregate(&aggregate_op)
+            .map_err(|e| ApiError::Internal(format!("{}", e)))?;
         Ok(aggregate_to_json(&aggregate_op, &result))
     }).await?;
 

@@ -1,6 +1,6 @@
 use canopydb::WriteTransaction;
 
-use crate::{MarciDB, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
+use crate::{MarciDB, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
 
 /// Открытая write-транзакция уровня API.
 ///
@@ -38,36 +38,37 @@ impl<'db> MarciTransaction<'db> {
     process_delete(&self.tx, id, entity, &action, &self.db.schema, None)
   }
 
-  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Vec<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let mut ctx = TransationContext::new(&self.tx, &self.db.schema, f);
     return process_query_many(query, &mut ctx, None);
   }
 
-  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Option<U> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Result<Option<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let mut ctx = TransationContext::new(&self.tx, &self.db.schema, f);
     return process_query_one(query, &mut ctx, None);
   }
 
-  pub fn aggregate(&self, op: &AggregateOp) -> AggregateResult {
+  pub fn aggregate(&self, op: &AggregateOp) -> Result<AggregateResult, StorageError> {
     // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
     let mut ctx: TransationContext<(), _> = TransationContext::new(&self.tx, &self.db.schema, |_: DecodeCtx<()>| ());
     return process_aggregate(op, &mut ctx, None);
   }
 
-  pub fn count(&self, entity: &Entity) -> u64 {
-    let tree = self.tx.get_tree(entity.name.as_bytes()).unwrap().unwrap();
-    return tree.len();
+  pub fn count(&self, entity: &Entity) -> Result<u64, StorageError> {
+    let tree = self.tx.get_tree(entity.name.as_bytes())?.unwrap();
+    return Ok(tree.len());
   }
 
   /// Фиксирует все изменения транзакции. После коммита они видны новым читателям
-  pub fn commit(self) -> Result<(), canopydb::Error> {
+  pub fn commit(self) -> Result<(), StorageError> {
     self.tx.commit()?;
     Ok(())
   }
 
   /// Явно откатывает транзакцию. Эквивалентно простому `drop`, но возвращает ошибку,
   /// если откат не удался
-  pub fn rollback(self) -> Result<(), canopydb::Error> {
-    self.tx.rollback()
+  pub fn rollback(self) -> Result<(), StorageError> {
+    self.tx.rollback()?;
+    Ok(())
   }
 }

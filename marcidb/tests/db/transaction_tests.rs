@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use marcidb::{MarciDB, MarciTransaction, array_to_json, decode_document, decode_id, parse_insert, parse_query};
+use marcidb::{InsertError, MarciDB, MarciTransaction, array_to_json, decode_document, decode_id, parse_insert, parse_query};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
@@ -34,7 +34,7 @@ fn tx_insert(tx: &MarciTransaction, db: &MarciDB, model: &str, data: Value) -> V
 fn tx_query(tx: &MarciTransaction, db: &MarciDB, model: &str, q: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let query = parse_query(&db.schema, entity, &q).unwrap();
-  let items = tx.find_many(&query, |ctx| decode_document(ctx).unwrap());
+  let items = tx.find_many(&query, |ctx| decode_document(ctx).unwrap()).unwrap();
   Value::from_str(&array_to_json(&items)).unwrap()
 }
 
@@ -50,22 +50,22 @@ fn transaction_commit_test() {
   tx_insert(&tx, &db, "Post", json!({ "title": "Second", "author": alice }));
 
   // Изнутри транзакции изменения видны (read-your-writes)...
-  assert_eq!(tx.count(user), 1);
-  assert_eq!(tx.count(post), 2);
+  assert_eq!(tx.count(user).unwrap(), 1);
+  assert_eq!(tx.count(post).unwrap(), 2);
   assert_eq!(
     tx_query(&tx, &db, "User", json!({ "name": true, "posts": { "title": true } })),
     json!([{ "name": "Alice", "posts": [{ "title": "First" }, { "title": "Second" }] }])
   );
 
   // ...но другим читателям до коммита — нет (изоляция снепшота)
-  assert_eq!(db.count(user), 0);
-  assert_eq!(db.count(post), 0);
+  assert_eq!(db.count(user).unwrap(), 0);
+  assert_eq!(db.count(post).unwrap(), 0);
 
   tx.commit().unwrap();
 
   // После коммита всё видно, связь author→posts тоже на месте
-  assert_eq!(db.count(user), 1);
-  assert_eq!(db.count(post), 2);
+  assert_eq!(db.count(user).unwrap(), 1);
+  assert_eq!(db.count(post).unwrap(), 2);
 }
 
 #[test]
@@ -76,11 +76,11 @@ fn transaction_rollback_on_drop_test() {
   {
     let tx = db.begin_write();
     tx_insert(&tx, &db, "User", json!({ "name": "Ghost" }));
-    assert_eq!(tx.count(user), 1);
+    assert_eq!(tx.count(user).unwrap(), 1);
     // tx выходит из области видимости без commit → откат
   }
 
-  assert_eq!(db.count(user), 0);
+  assert_eq!(db.count(user).unwrap(), 0);
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn transaction_explicit_rollback_test() {
   tx_insert(&tx, &db, "User", json!({ "name": "Bob" }));
   tx.rollback().unwrap();
 
-  assert_eq!(db.count(user), 0);
+  assert_eq!(db.count(user).unwrap(), 0);
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn transaction_closure_commits_on_ok_test() {
   }).unwrap();
 
   assert!(!id.is_empty());
-  assert_eq!(db.count(user), 2);
+  assert_eq!(db.count(user).unwrap(), 2);
 }
 
 #[test]
@@ -115,13 +115,15 @@ fn transaction_closure_rolls_back_on_err_test() {
   let (_dir, db) = make_db();
   let user = db.get_model("User").unwrap();
 
-  // Несколько успешных вставок, затем Err — вся транзакция откатывается атомарно
-  let result: Result<(), &str> = db.transaction(|tx| {
+  // Несколько успешных вставок, затем Err — вся транзакция откатывается атомарно.
+  // Тип ошибки замыкания должен реализовывать From<StorageError> (для проброса ошибки коммита) —
+  // доменные ошибки БД это умеют
+  let result: Result<(), InsertError> = db.transaction(|tx| {
     tx_insert(tx, &db, "User", json!({ "name": "Alice" }));
     tx_insert(tx, &db, "User", json!({ "name": "Bob" }));
-    Err("rollback please")
+    Err(InsertError::ItemNotFound)
   });
 
-  assert_eq!(result, Err("rollback please"));
-  assert_eq!(db.count(user), 0);
+  assert_eq!(result, Err(InsertError::ItemNotFound));
+  assert_eq!(db.count(user).unwrap(), 0);
 }

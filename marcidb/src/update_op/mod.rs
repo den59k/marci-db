@@ -1,6 +1,6 @@
 mod process_update;
 
-use crate::{Field, InsertError, delete_op::{DeleteError, DeleteOp}, num_utils::NumberValue, schema::{Entity, RefInfo}, write_op::{WriteIndexesError, WriteOp}};
+use crate::{Field, InsertError, StorageError, delete_op::{DeleteError, DeleteOp}, num_utils::NumberValue, schema::{Entity, RefInfo}, write_op::{WriteIndexesError, WriteOp}};
 pub use process_update::process_update;
 
 #[derive(Debug)]
@@ -29,7 +29,20 @@ pub enum UpdateError {
   UniqueViolation(String, Vec<u8>),
   DeleteError(DeleteError),
   InsertError(InsertError),
-  WriteIndexesError(WriteIndexesError)
+  WriteIndexesError(WriteIndexesError),
+  Storage(StorageError)
+}
+
+impl From<canopydb::Error> for UpdateError {
+  fn from(e: canopydb::Error) -> Self {
+    UpdateError::Storage(StorageError(e))
+  }
+}
+
+impl From<StorageError> for UpdateError {
+  fn from(e: StorageError) -> Self {
+    UpdateError::Storage(e)
+  }
 }
 
 #[derive(Debug)]

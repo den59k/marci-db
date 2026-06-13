@@ -1,4 +1,4 @@
-use crate::{Field, index_utils::decode_index_key_value, query_op::{FieldCompare, ParentData, PrefixKey, TransationContext, Where, get_id_from_index_key, get_prefix, process_where, range_keys_iter}, schema::{Entity, FieldExistsCondition, FieldIndex, PrimitiveFieldType}, utils::get_data};
+use crate::{Field, StorageError, index_utils::decode_index_key_value, query_op::{FieldCompare, ParentData, PrefixKey, TransationContext, Where, get_id_from_index_key, get_prefix, process_where, range_keys_iter}, schema::{Entity, FieldExistsCondition, FieldIndex, PrimitiveFieldType}, utils::get_data};
 
 #[derive(Debug)]
 pub struct AggregateOp<'a> {
@@ -44,31 +44,31 @@ pub struct AggregateResult {
   pub max: Option<Vec<u8>>,
 }
 
-pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> AggregateResult {
+pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> Result<AggregateResult, StorageError> {
   let mut result = AggregateResult::default();
 
   // Быстрые пути: count по ключам, без чтения и декодирования строк
   if !op.needs_rows() {
     result.count = match &op.prefix_key {
-      None => ctx.get_tree(&op.entity.name).len(),
+      None => ctx.get_tree(&op.entity.name)?.len(),
       Some(PrefixKey::IndexRange { start, end, tree_name, .. }) => {
-        let index_tree = ctx.get_tree(tree_name);
-        range_keys_iter(&index_tree, start, end, false).count() as u64
+        let index_tree = ctx.get_tree(tree_name)?;
+        range_keys_iter(&index_tree, start, end, false)?.try_fold(0u64, |n, k| k.map(|_| n + 1))?
       },
       // Связи родителя: количество детей = количество ключей по префиксу parent_id
       Some(PrefixKey::ParentIndexTree(tree_name)) => {
-        let index_tree = ctx.get_tree(tree_name);
-        index_tree.prefix_keys(&parent.unwrap().1).unwrap().count() as u64
+        let index_tree = ctx.get_tree(tree_name)?;
+        index_tree.prefix_keys(&parent.unwrap().1)?.try_fold(0u64, |n, k| k.map(|_| n + 1))?
       },
       Some(prefix_key) => {
         let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
-          return result;
+          return Ok(result);
         };
-        let tree = ctx.get_tree(&op.entity.name);
-        tree.prefix_keys(&prefix).unwrap().count() as u64
+        let tree = ctx.get_tree(&op.entity.name)?;
+        tree.prefix_keys(&prefix)?.try_fold(0u64, |n, k| k.map(|_| n + 1))?
       },
     };
-    return result;
+    return Ok(result);
   }
 
   // count по null/not-null индексированного поля: sparse-индекс не содержит null-строк,
@@ -78,20 +78,20 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
       && matches!(field.condition, FieldExistsCondition::None)
       && let Some(index) = find_usable_index(field) {
 
-      let index_len = ctx.get_tree(index_tree_name(index)).len();
+      let index_len = ctx.get_tree(index_tree_name(index))?.len();
       result.count = match compare {
         FieldCompare::NeNull => index_len,
-        _ => ctx.get_tree(&op.entity.name).len() - index_len
+        _ => ctx.get_tree(&op.entity.name)?.len() - index_len
       };
-      return result;
+      return Ok(result);
     }
   }
 
   // min/max по крайним ключам индекса: O(log n) вместо скана.
   // Применимо без фильтра и без sum/avg, когда все запрошенные поля индексированы и non-nullable
   if op.filter.is_none() && op.prefix_key.is_none() && op.sum.is_none() && op.avg.is_none() {
-    if let Some(fast_result) = try_minmax_by_index(op, ctx) {
-      return fast_result;
+    if let Some(fast_result) = try_minmax_by_index(op, ctx)? {
+      return Ok(fast_result);
     }
   }
 
@@ -99,42 +99,40 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
 
   match &op.prefix_key {
     Some(PrefixKey::IndexRange { start, end, tree_name, fixed_size }) => {
-      let index_tree = ctx.get_tree(tree_name);
-      let tree = ctx.get_tree(&op.entity.name);
-      let iter = range_keys_iter(&index_tree, start, end, false)
+      let index_tree = ctx.get_tree(tree_name)?;
+      let tree = ctx.get_tree(&op.entity.name)?;
+      let iter = range_keys_iter(&index_tree, start, end, false)?
         .map(|key| {
-          let id = get_id_from_index_key(&key, *fixed_size);
-          let value = tree.get(&id).unwrap().unwrap();
-          (id, value)
+          let id = get_id_from_index_key(&key?, *fixed_size);
+          let value = tree.get(&id)?.unwrap();
+          Ok((id, value))
         });
-      aggregate_rows(iter, ctx, op, &mut acc);
+      aggregate_rows(iter, ctx, op, &mut acc)?;
     },
     Some(PrefixKey::ParentIndexTree(tree_name)) => {
-      let index_tree = ctx.get_tree(tree_name);
-      let tree = ctx.get_tree(&op.entity.name);
+      let index_tree = ctx.get_tree(tree_name)?;
+      let tree = ctx.get_tree(&op.entity.name)?;
       let parent_id = parent.unwrap().1;
       let parent_id_len = parent_id.len();
-      let iter = index_tree.prefix_keys(&parent_id).unwrap()
+      let iter = index_tree.prefix_keys(&parent_id)?
         .map(|item| {
-          let key = item.unwrap();
+          let key = item?;
           let id = key[parent_id_len..].to_vec();
-          let value = tree.get(&id).unwrap().unwrap();
-          (id, value)
+          let value = tree.get(&id)?.unwrap();
+          Ok((id, value))
         });
-      aggregate_rows(iter, ctx, op, &mut acc);
+      aggregate_rows(iter, ctx, op, &mut acc)?;
     },
     Some(prefix_key) => {
       let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
-        return result;
+        return Ok(result);
       };
-      let tree = ctx.get_tree(&op.entity.name);
-      let iter = tree.prefix(&prefix).unwrap().map(|item| item.unwrap());
-      aggregate_rows(iter, ctx, op, &mut acc);
+      let tree = ctx.get_tree(&op.entity.name)?;
+      aggregate_rows(tree.prefix(&prefix)?, ctx, op, &mut acc)?;
     },
     None => {
-      let tree = ctx.get_tree(&op.entity.name);
-      let iter = tree.iter().unwrap().map(|item| item.unwrap());
-      aggregate_rows(iter, ctx, op, &mut acc);
+      let tree = ctx.get_tree(&op.entity.name)?;
+      aggregate_rows(tree.iter()?, ctx, op, &mut acc)?;
     },
   }
 
@@ -143,7 +141,7 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
   result.avg = if acc.avg_count > 0 { Some(acc.avg_sum / acc.avg_count as f64) } else { None };
   result.min = acc.min.map(|(_, value)| value);
   result.max = acc.max.map(|(_, value)| value);
-  result
+  Ok(result)
 }
 
 fn find_usable_index(field: &Field) -> Option<&FieldIndex> {
@@ -170,25 +168,25 @@ fn minmax_index<'a>(field: Option<&'a Field>) -> Option<Option<(&'a Field, &'a F
 }
 
 /// min/max через первый/последний ключ индекса, count через len()
-fn try_minmax_by_index<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>) -> Option<AggregateResult> {
-  let min_index = minmax_index(op.min)?;
-  let max_index = minmax_index(op.max)?;
+fn try_minmax_by_index<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>) -> Result<Option<AggregateResult>, StorageError> {
+  let Some(min_index) = minmax_index(op.min) else { return Ok(None) };
+  let Some(max_index) = minmax_index(op.max) else { return Ok(None) };
 
   let mut result = AggregateResult::default();
   if op.count {
-    result.count = ctx.get_tree(&op.entity.name).len();
+    result.count = ctx.get_tree(&op.entity.name)?.len();
   }
 
   if let Some((field, index)) = min_index {
-    let index_tree = ctx.get_tree(index_tree_name(index));
-    result.min = index_tree.first().unwrap().map(|(key, _)| decode_index_key_value(field, index, &key));
+    let index_tree = ctx.get_tree(index_tree_name(index))?;
+    result.min = index_tree.first()?.map(|(key, _)| decode_index_key_value(field, index, &key));
   }
   if let Some((field, index)) = max_index {
-    let index_tree = ctx.get_tree(index_tree_name(index));
-    result.max = index_tree.last().unwrap().map(|(key, _)| decode_index_key_value(field, index, &key));
+    let index_tree = ctx.get_tree(index_tree_name(index))?;
+    result.max = index_tree.last()?.map(|(key, _)| decode_index_key_value(field, index, &key));
   }
 
-  Some(result)
+  Ok(Some(result))
 }
 
 #[derive(Default)]
@@ -202,12 +200,13 @@ struct Accumulators {
   max: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-fn aggregate_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F>, op: &'a AggregateOp, acc: &mut Accumulators)
-  where I: Iterator<Item = (A, B)>, A: AsRef<[u8]>, B: AsRef<[u8]> {
+fn aggregate_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F>, op: &'a AggregateOp, acc: &mut Accumulators) -> Result<(), StorageError>
+  where I: Iterator<Item = Result<(A, B), canopydb::Error>>, A: AsRef<[u8]>, B: AsRef<[u8]> {
 
-  for (id, data) in iter {
+  for item in iter {
+    let (id, data) = item?;
     let (id, data) = (id.as_ref(), data.as_ref());
-    if let Some(where_op) = &op.filter && !process_where(id, data, ctx, op.entity, where_op) {
+    if let Some(where_op) = &op.filter && !process_where(id, data, ctx, op.entity, where_op)? {
       continue;
     }
     acc.count += 1;
@@ -232,6 +231,7 @@ fn aggregate_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U,
       }
     }
   }
+  Ok(())
 }
 
 /// Байтовый ключ для сравнения min/max — та же кодировка, что в индексах
