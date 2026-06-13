@@ -1,11 +1,11 @@
 use std::{collections::HashMap};
 
-use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}, schema_resolve_bindings::{resolve_bind_refs, resolve_ref_bindings}}};
+use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, SchemaError, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}, schema_resolve_bindings::{resolve_bind_refs, resolve_ref_bindings}}};
 
 /// Разбирает текст схемы в сырые блоки (модели/структуры/енумы) ДО резолва ссылок,
 /// оффсетов, индексов и т.п. Используется и `parse_schema`, и движком миграций (диффу
 /// удобнее сырые модели: тип ещё `RefUnresolved(name)`, без синтетических struct-моделей)
-pub fn collect_blocks(input: &str) -> (Vec<Entity>, HashMap<String, Entity>, HashMap<String, EnumDef>) {
+pub fn collect_blocks(input: &str) -> Result<(Vec<Entity>, HashMap<String, Entity>, HashMap<String, EnumDef>), SchemaError> {
     let mut models = Vec::new();
     let mut structs: HashMap<String, Entity> = HashMap::new();
     let mut enums: HashMap<String,EnumDef> = HashMap::new();
@@ -21,23 +21,26 @@ pub fn collect_blocks(input: &str) -> (Vec<Entity>, HashMap<String, Entity>, Has
 
         match kind.trim() {
             "model" => {
-                models.push(parse_model_block(name, &mut lines));
+                models.push(parse_model_block(name, &mut lines)?);
             },
             "struct" => {
-                structs.insert(name, parse_struct_block(&mut lines));
+                structs.insert(name, parse_struct_block(&mut lines)?);
             },
             "enum" => {
-                enums.insert(name.clone(), parse_enum_block(&mut lines));
+                enums.insert(name.clone(), parse_enum_block(&mut lines)?);
             }
             _ => {}
         }
     }
 
-    (models, structs, enums)
+    Ok((models, structs, enums))
 }
 
-pub fn parse_schema(input: &str) -> Schema {
-    let (mut models, structs, enums) = collect_blocks(input);
+/// Фоллибл-разбор текста схемы: на невалидной схеме возвращает [`SchemaError`] с человекочитаемым
+/// сообщением (→ HTTP 400) вместо паники. Применяйте на НЕдоверенном вводе (схема из `$sync`).
+/// Для уже провалидированного/внутреннего ввода есть инфраструктурный [`parse_schema`]
+pub fn try_parse_schema(input: &str) -> Result<Schema, SchemaError> {
+    let (mut models, structs, enums) = collect_blocks(input)?;
 
     // Добавляем всем моделям обязательный id, если его нет
     for model in models.iter_mut() {
@@ -46,13 +49,13 @@ pub fn parse_schema(input: &str) -> Schema {
 
     let mut model_structs: Vec<Entity> = vec![];
     for model in models.iter_mut() {
-        resolve_structs_and_enums(model, &structs, &enums, &mut model_structs);
+        resolve_structs_and_enums(model, &structs, &enums, &mut model_structs)?;
     }
     models.extend(model_structs);
 
     for model in models.iter_mut() {
         for field in model.fields.iter_mut() {
-            resolve_default_value(field);
+            resolve_default_value(field)?;
         }
     }
 
@@ -62,11 +65,11 @@ pub fn parse_schema(input: &str) -> Schema {
         .collect();
 
     for model in models.iter_mut() {
-        resolve_refs(model, &model_by_name);
+        resolve_refs(model, &model_by_name)?;
     }
 
     for model in models.iter_mut() {
-        resolve_indexes(model);
+        resolve_indexes(model)?;
     }
 
     for model in models.iter_mut() {
@@ -77,31 +80,38 @@ pub fn parse_schema(input: &str) -> Schema {
     for model in models.iter_mut() {
         resolve_counter_idx(model, &mut counter_id);
     }
-    
-    resolve_bind_refs(&mut models);
+
+    resolve_bind_refs(&mut models)?;
     resolve_ref_bindings(&mut models);
 
-    resolve_ref_constraints(&mut models);
+    resolve_ref_constraints(&mut models)?;
 
-    Schema { models }
+    Ok(Schema { models })
 }
 
-pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Entity {
+/// Инфраструктурный разбор схемы: паникует на невалидной схеме. Для внутреннего/доверенного ввода
+/// (тесты, `MarciDB::new`, реконструкция из storage в `open`). Снаружи на недоверенном вводе —
+/// [`try_parse_schema`], который вернёт [`SchemaError`] вместо паники
+pub fn parse_schema(input: &str) -> Schema {
+    try_parse_schema(input).unwrap_or_else(|e| panic!("invalid schema: {}", e))
+}
 
-    let fields = parse_fields(lines);
+pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Result<Entity, SchemaError> {
+
+    let fields = parse_fields(lines)?;
     // update_key_fields(&mut fields);
 
-    return Entity::new(name, fields);
+    return Ok(Entity::new(name, fields));
 }
 
-pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Entity {
-    let fields = parse_fields(lines);
+pub fn parse_struct_block(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Result<Entity, SchemaError> {
+    let fields = parse_fields(lines)?;
     let mut entity = Entity::new(String::new(), fields);
     entity.autoinsert = true;
-    return entity;
+    return Ok(entity);
 }
 
-pub fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Vec<Field> {
+pub fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Result<Vec<Field>, SchemaError> {
     let mut fields = Vec::new();
 
     for line in lines {
@@ -110,11 +120,11 @@ pub fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Vec
             continue;
         }
         if line == "}" { break }
-        if line.is_empty() { continue; }      
-        fields.push(parse_field_raw(line));
+        if line.is_empty() { continue; }
+        fields.push(parse_field_raw(line)?);
     }
 
-    return fields;
+    return Ok(fields);
 }
 
 // Добавляет generated_id для модели, если нет собственного id 
@@ -127,7 +137,7 @@ fn resolve_model_id(entity: &mut Entity) {
 // Находит структуры и превращает их в модели. Также проставляет всем fields field.full_name
 // Поскольку у нас могут быть вложенные enum в struct, а также struct в enum, мы разрешаем сразу оба типа в этой функции
 // В этой функции не назначаются сами структуры, они остаются как RefUnresolved, только с другим названием
-fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Entity>, enums: &HashMap<String, EnumDef>, model_structs: &mut Vec<Entity>) {
+fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Entity>, enums: &HashMap<String, EnumDef>, model_structs: &mut Vec<Entity>) -> Result<(), SchemaError> {
 
     for field in entity.fields.iter_mut(){
         let field_full_name: String = format!("{}.{}", &entity.name, &field.name);
@@ -145,12 +155,12 @@ fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Enti
         match &field.ty {
             FieldType::RefUnresolved(name) | FieldType::RefListUnresolved(name) => {
                 if let Some(st) = structs.get(name) {
-                    let mut entity_model = create_entity_model(field, st, &entity.name); 
+                    let mut entity_model = create_entity_model(field, st, &entity.name);
                     field.location = FieldLocation::Virtual;
                     if let FieldType::RefUnresolved(name) | FieldType::RefListUnresolved(name) = &mut field.ty {
                         *name = entity_model.name.clone();
                     }
-                    resolve_structs_and_enums(&mut entity_model, structs, enums, model_structs);
+                    resolve_structs_and_enums(&mut entity_model, structs, enums, model_structs)?;
                     model_structs.push(entity_model);
                     i += 1;
                     continue;
@@ -158,11 +168,11 @@ fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Enti
 
                 if let Some(enum_def) = enums.get(name) {
                     if matches!(&field.ty, FieldType::RefListUnresolved(_)) {
-                        panic!("{}[]: Enum list is not supported!", field.name)
+                        return Err(SchemaError(format!("{}[]: Enum list is not supported!", field.name)));
                     }
 
                     let field_name = field.name.clone();
-                    let enum_info = create_enum_info(enum_def, entity, &field_name, i);
+                    let enum_info = create_enum_info(enum_def, entity, &field_name, i)?;
 
                     entity.fields[i].ty = FieldType::Enum(enum_info);
 
@@ -175,6 +185,8 @@ fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Enti
 
         i += 1;
     }
+
+    Ok(())
 }
 
 // Создает новую модель из Struct
@@ -198,7 +210,7 @@ fn create_entity_model(field: &Field, st: &Entity, parent_name: &String) -> Enti
 
 /// Добавляет поля из Enum в текущую Entity.
 /// Общее поле нескольких вариантов добавляется один раз — его индекс попадает в списки всех своих вариантов
-fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String, field_index: usize) -> EnumInfo {
+fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String, field_index: usize) -> Result<EnumInfo, SchemaError> {
     let variants_names_map = create_variants_names_map(&enum_def.variants_map);
 
     let mut variants: HashMap<u16,Vec<usize>> = enum_def.variants_map.values().map(|variant| (*variant, vec![])).collect();
@@ -214,7 +226,7 @@ fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String
         field.condition = FieldExistsCondition::EnumValue { field_index, variants: field_def.variants.clone() };
 
         if let Some(exists_field) = entity.fields.iter().find(|f| f.name == field.name) {
-            panic!("Cannot add enum field {} to {}. Field {} already exists", field.name, entity.name, exists_field.full_name);
+            return Err(SchemaError(format!("Cannot add enum field {} to {}. Field {} already exists", field.name, entity.name, exists_field.full_name)));
         }
 
         for variant in field_def.variants.iter() {
@@ -223,11 +235,11 @@ fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String
         entity.fields.push(field);
     }
 
-    EnumInfo {
+    Ok(EnumInfo {
         variants,
         variants_map: enum_def.variants_map.clone(),
         variants_names_map
-    }
+    })
 }
 
 fn create_variants_names_map(variants_map: &HashMap<String,u16>) -> HashMap<u16,String> {
@@ -239,24 +251,25 @@ fn create_variants_names_map(variants_map: &HashMap<String,u16>) -> HashMap<u16,
 }
 
 /// Находит нужные модели и структуры для ссылок RefUnresolved и RefListUnresolved
-fn resolve_refs(entity: &mut Entity, model_by_name: &HashMap<String, usize>) {
+fn resolve_refs(entity: &mut Entity, model_by_name: &HashMap<String, usize>) -> Result<(), SchemaError> {
     for field in entity.fields.iter_mut(){
         match &field.ty {
             FieldType::RefUnresolved(name) => {
                 let Some(model_index) = model_by_name.get(name) else {
-                    panic!("Unknown type {}", name);
+                    return Err(SchemaError(format!("Unknown type {} (field {})", name, field.full_name)));
                 };
                 field.ty = FieldType::Ref(RefInfo::new(*model_index));
             }
             FieldType::RefListUnresolved(name) => {
                 let Some(model_index) = model_by_name.get(name) else {
-                    panic!("Unknown type {}", name)
+                    return Err(SchemaError(format!("Unknown type {} (field {})", name, field.full_name)));
                 };
                 field.ty = FieldType::RefList(RefInfo::new(*model_index));
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 // Назначает корректные index для Key полей и offset для Body полей
@@ -294,7 +307,7 @@ fn resolve_counter_idx(entity: &mut Entity, counter_id: &mut usize) {
 }
 
 /// Проставляет RefConstraints для Ref и RefList
-fn resolve_ref_constraints(models: &mut [Entity]) {
+fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
     let mut refs: Vec<Vec<EntityDependency>> = vec![Vec::new(); models.len()];
 
     for (model_index, entity) in models.iter_mut().enumerate() {
@@ -329,7 +342,7 @@ fn resolve_ref_constraints(models: &mut [Entity]) {
                             continue;
                         },
                         RefBinding::FieldValue => {
-                            panic!("Cannot use RefBinding::FieldValue for FieldType::RefList: {:?}", ref_info.binding);
+                            return Err(SchemaError(format!("Cannot use @bind FieldValue for a list relation: {:?}", ref_info.binding)));
                         },
                         RefBinding::IndexTree(_) => { 
                             refs[ref_info.model_index].push(EntityDependency { 
@@ -345,9 +358,10 @@ fn resolve_ref_constraints(models: &mut [Entity]) {
         }
     }
 
-    for (model_index, deps) in refs.into_iter().enumerate() { 
+    for (model_index, deps) in refs.into_iter().enumerate() {
         models[model_index].rev_dependencies = deps;
     }
+    Ok(())
 }
 
 fn get_delete_constraint(attributes: &[Attribute]) -> Option<&DeleteConstraint> {
@@ -356,7 +370,7 @@ fn get_delete_constraint(attributes: &[Attribute]) -> Option<&DeleteConstraint> 
     })
 }
 
-fn resolve_indexes(model: &mut Entity) {
+fn resolve_indexes(model: &mut Entity) -> Result<(), SchemaError> {
     for field in model.fields.iter_mut() {
         let mut has_index = false;
         let mut unique = false;
@@ -390,15 +404,35 @@ fn resolve_indexes(model: &mut Entity) {
                 FieldType::Ref(ref_info) => {
                     ref_info.is_unique = unique;
                 },
-                _ => panic!("Wrong type for index in field {}", field.full_name)
+                _ => return Err(SchemaError(format!("Wrong type for index in field {}", field.full_name)))
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::schema::{FieldLocation, FieldType, RefBinding, parse_schema};
+    use crate::schema::{FieldLocation, FieldType, RefBinding, parse_schema, try_parse_schema};
+
+    /// Невалидная схема → SchemaError (а не паника). По одному кейсу на каждый резолвер
+    #[test]
+    fn try_parse_schema_rejects_invalid() {
+        assert!(try_parse_schema("model User {\n  name String\n}").is_ok());
+
+        let bad = [
+            "model A {\n  x B\n}",                                   // неизвестный тип
+            "model A {\n  x String @bogus\n}",                      // неизвестный атрибут
+            "model A {\n  x\n}",                                    // нет типа поля
+            "model A {\n  x UInt @default(abc)\n}",                 // плохой default
+            "model A {\n  x Int @index @default(zzz)\n}",           // плохой default у индексируемого
+            "model A {\n  t E\n}\nenum E {\n  a {\n    s String\n  }\n  b {\n    s String\n  }\n}", // дубль enum-поля
+            "model A {\n  b B @bind(B.nope)\n}\nmodel B {\n  x String\n}", // плохой @bind
+        ];
+        for schema in bad {
+            assert!(try_parse_schema(schema).is_err(), "ожидалась ошибка для:\n{}", schema);
+        }
+    }
 
     #[test]
     fn test_parse_schema() {

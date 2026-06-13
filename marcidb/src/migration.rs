@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use canopydb::WriteTransaction;
 
-use crate::{StorageError, index_utils::{encode_full_index, encode_index}, schema::{Attribute, Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, Schema, collect_blocks, parse_field_raw, parse_model_block}, utils::get_data};
+use crate::{StorageError, index_utils::{encode_full_index, encode_index}, schema::{Attribute, Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, Schema, SchemaError, collect_blocks, parse_field_raw, parse_model_block}, utils::get_data};
 
 /// Одна операция миграции. Сериализуется в строку `.mig` DSL и обратно.
 #[derive(Debug, Clone)]
@@ -28,6 +28,24 @@ pub enum MigrationError {
   UnsupportedTypeChange { model: String, field: String, from: String, to: String },
   /// Смена `@id`/ключа требует re-key — в v1 не поддержано
   UnsupportedKeyChange { model: String, field: String },
+  /// Невалидный текст схемы (при разборе одной из сравниваемых схем)
+  Schema(SchemaError),
+}
+
+impl From<SchemaError> for MigrationError {
+  fn from(e: SchemaError) -> Self { MigrationError::Schema(e) }
+}
+
+impl std::fmt::Display for MigrationError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      MigrationError::UnsupportedTypeChange { model, field, from, to } =>
+        write!(f, "unsupported type change on {}.{}: {} -> {} (migrate the data manually)", model, field, from, to),
+      MigrationError::UnsupportedKeyChange { model, field } =>
+        write!(f, "unsupported key change on {}.{}", model, field),
+      MigrationError::Schema(e) => write!(f, "{}", e),
+    }
+  }
 }
 
 // ─────────────────────────────── сериализация поля ───────────────────────────────
@@ -125,7 +143,7 @@ fn index_kw(unique: bool) -> &'static str {
 
 // ─────────────────────────────── парсер миграции ───────────────────────────────
 
-pub fn parse_migration(input: &str) -> Vec<MigrationOp> {
+pub fn parse_migration(input: &str) -> Result<Vec<MigrationOp>, SchemaError> {
   let mut ops = vec![];
   let mut lines = input.lines().peekable();
   while let Some(raw) = lines.next() {
@@ -133,58 +151,60 @@ pub fn parse_migration(input: &str) -> Vec<MigrationOp> {
     if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
       continue;
     }
-    ops.push(parse_op(line, &mut lines));
+    ops.push(parse_op(line, &mut lines)?);
   }
-  ops
+  Ok(ops)
 }
 
-fn parse_op(line: &str, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> MigrationOp {
+fn parse_op(line: &str, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Result<MigrationOp, SchemaError> {
   if let Some(rest) = line.strip_prefix("create model ") {
     let name = rest.trim().trim_end_matches('{').trim().to_string();
-    let entity = parse_model_block(name.clone(), lines);
-    return MigrationOp::CreateModel { name, fields: entity.fields };
+    let entity = parse_model_block(name.clone(), lines)?;
+    return Ok(MigrationOp::CreateModel { name, fields: entity.fields });
   }
   if let Some(rest) = line.strip_prefix("drop model ") {
-    return MigrationOp::DropModel { name: rest.trim().to_string() };
+    return Ok(MigrationOp::DropModel { name: rest.trim().to_string() });
   }
   if let Some(rest) = line.strip_prefix("add field ") {
-    let (model, field) = parse_field_path(rest);
-    return MigrationOp::AddField { model, field };
+    let (model, field) = parse_field_path(rest)?;
+    return Ok(MigrationOp::AddField { model, field });
   }
   if let Some(rest) = line.strip_prefix("alter field ") {
-    let (model, field) = parse_field_path(rest);
-    return MigrationOp::AlterField { model, field };
+    let (model, field) = parse_field_path(rest)?;
+    return Ok(MigrationOp::AlterField { model, field });
   }
   if let Some(rest) = line.strip_prefix("drop field ") {
-    let (model, field) = split_path(rest);
-    return MigrationOp::DropField { model, field };
+    let (model, field) = split_path(rest)?;
+    return Ok(MigrationOp::DropField { model, field });
   }
   for (kw, unique) in [("add unique ", true), ("add index ", false)] {
     if let Some(rest) = line.strip_prefix(kw) {
-      let (model, field) = split_path(rest);
-      return MigrationOp::AddIndex { model, field, unique };
+      let (model, field) = split_path(rest)?;
+      return Ok(MigrationOp::AddIndex { model, field, unique });
     }
   }
   for (kw, unique) in [("drop unique ", true), ("drop index ", false)] {
     if let Some(rest) = line.strip_prefix(kw) {
-      let (model, field) = split_path(rest);
-      return MigrationOp::DropIndex { model, field, unique };
+      let (model, field) = split_path(rest)?;
+      return Ok(MigrationOp::DropIndex { model, field, unique });
     }
   }
-  panic!("Unknown migration op: {}", line);
+  Err(SchemaError(format!("Unknown migration op: {}", line)))
 }
 
 /// `User.bio String?` → ("User", parse_field_raw("bio String?")).
 /// Первая `.` — разделитель model.field: имена моделей/полей её не содержат, а значения идут после типа
-fn parse_field_path(rest: &str) -> (String, Field) {
-  let (model, field_spec) = rest.trim().split_once('.').expect("expected Model.field");
-  (model.to_string(), parse_field_raw(field_spec))
+fn parse_field_path(rest: &str) -> Result<(String, Field), SchemaError> {
+  let (model, field_spec) = rest.trim().split_once('.')
+    .ok_or_else(|| SchemaError(format!("Expected Model.field in: \"{}\"", rest.trim())))?;
+  Ok((model.to_string(), parse_field_raw(field_spec)?))
 }
 
 /// `User.email` → ("User", "email")
-fn split_path(rest: &str) -> (String, String) {
-  let (model, field) = rest.trim().split_once('.').expect("expected Model.field");
-  (model.to_string(), field.trim().to_string())
+fn split_path(rest: &str) -> Result<(String, String), SchemaError> {
+  let (model, field) = rest.trim().split_once('.')
+    .ok_or_else(|| SchemaError(format!("Expected Model.field in: \"{}\"", rest.trim())))?;
+  Ok((model.to_string(), field.trim().to_string()))
 }
 
 // ─────────────────────────────── дифф ───────────────────────────────
@@ -218,8 +238,8 @@ fn format_attr(field: &Field) -> Option<String> {
 /// add/drop/alter field, add/drop index|unique. Смена типа/ключа отклоняется (v1).
 /// Переименования, изменения структур и енумов — будущие итерации.
 pub fn diff(old_text: &str, new_text: &str) -> Result<Vec<MigrationOp>, MigrationError> {
-  let (old_models, _, _) = collect_blocks(old_text);
-  let (new_models, _, _) = collect_blocks(new_text);
+  let (old_models, _, _) = collect_blocks(old_text)?;
+  let (new_models, _, _) = collect_blocks(new_text)?;
 
   let old_by: HashMap<&str, &Entity> = old_models.iter().map(|m| (m.name.as_str(), m)).collect();
   let new_by: HashMap<&str, &Entity> = new_models.iter().map(|m| (m.name.as_str(), m)).collect();
@@ -372,7 +392,8 @@ fn set_index_attr(field: &mut Field, unique: bool, present: bool) {
 /// [`diff`]: имея сохранённую схему и `.mig`, сервер получает схему-после-миграции, не завися от
 /// клиента. Модели пересобираются из сырых полей; struct/enum переносятся verbatim (v1 их не трогает)
 pub fn evolve_schema(old_text: &str, ops: &[MigrationOp]) -> String {
-  let (mut models, _structs, _enums) = collect_blocks(old_text);
+  // old_text — уже сохранённая (провалидированная) схема, поэтому разбор инфраллибл
+  let (mut models, _structs, _enums) = collect_blocks(old_text).expect("evolve_schema on validated schema text");
   let mut dropped: HashSet<String> = HashSet::new();
 
   for op in ops {
@@ -468,11 +489,30 @@ pub enum MigrationApplyError {
   /// Присланная история миграций расходится с применённой на сервере (ledger).
   /// Применённые миграции должны быть префиксом присланных — иначе порядок/содержимое разошлись
   HistoryDiverged { position: usize, applied: String, incoming: String },
+  /// Невалидный текст схемы/миграции (синтаксис поля, неизвестный тип, плохой `.mig` и т.п.)
+  Schema(SchemaError),
   Storage(StorageError),
 }
 
 impl From<canopydb::Error> for MigrationApplyError {
   fn from(e: canopydb::Error) -> Self { MigrationApplyError::Storage(StorageError(e)) }
+}
+impl From<SchemaError> for MigrationApplyError {
+  fn from(e: SchemaError) -> Self { MigrationApplyError::Schema(e) }
+}
+
+impl std::fmt::Display for MigrationApplyError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      MigrationApplyError::Unsupported(s) => write!(f, "{}", s),
+      MigrationApplyError::UniqueViolation { field } => write!(f, "unique violation on {} in existing data", field),
+      MigrationApplyError::Diff(e) => write!(f, "{}", e),
+      MigrationApplyError::HistoryDiverged { position, applied, incoming } =>
+        write!(f, "migration history diverged at #{}: server applied \"{}\", got \"{}\"", position, applied, incoming),
+      MigrationApplyError::Schema(e) => write!(f, "{}", e),
+      MigrationApplyError::Storage(e) => write!(f, "{:?}", e),
+    }
+  }
 }
 impl From<StorageError> for MigrationApplyError {
   fn from(e: StorageError) -> Self { MigrationApplyError::Storage(e) }
@@ -623,7 +663,7 @@ mod tests {
       "author User?",
       "posts Post[] @bind(Post.author)",
     ] {
-      let field = parse_field_raw(spec);
+      let field = parse_field_raw(spec).unwrap();
       assert_eq!(field_to_spec(&field), spec, "spec did not round-trip");
     }
   }
@@ -642,7 +682,16 @@ alter field User.email String
 drop field User.legacy
 drop model Session";
 
-    assert_eq!(serialize_migration(&parse_migration(mig)), mig);
+    assert_eq!(serialize_migration(&parse_migration(mig).unwrap()), mig);
+  }
+
+  /// Плохой `.mig` → SchemaError (а не паника)
+  #[test]
+  fn parse_migration_rejects_invalid() {
+    assert!(parse_migration("bogus command here").is_err());          // неизвестная операция
+    assert!(parse_migration("add field NoDotHere").is_err());         // нет Model.field
+    assert!(parse_migration("create model M {\n  broken\n}").is_err()); // плохое поле в create model
+    assert!(parse_migration("add field User.age UInt").is_ok());      // валидная
   }
 
   #[test]

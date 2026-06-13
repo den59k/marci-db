@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt};
 
-use crate::schema::{schema_attributes::{Attribute, FieldCustomFormat, parse_attribute}, schema_default_value::FieldDefault};
+use crate::schema::{SchemaError, schema_attributes::{Attribute, FieldCustomFormat, parse_attribute}, schema_default_value::FieldDefault};
 
 #[derive(Debug,Clone)]
 pub enum FieldLocation {
@@ -214,21 +214,24 @@ fn is_valid_string(s: &str) -> bool {
     })
 }
 
-pub fn parse_field_raw(line: &str) -> Field {
+pub fn parse_field_raw(line: &str) -> Result<Field, SchemaError> {
     // имя и тип
     let mut parts = line.split_whitespace();
 
-    let name = parts.next().expect("expected field name").to_string();
+    let name = parts.next()
+        .ok_or_else(|| SchemaError(format!("Expected field name in: \"{}\"", line)))?
+        .to_string();
     if !is_valid_string(&name) {
-        panic!("Invalid field name: \"{}\"", name);
+        return Err(SchemaError(format!("Invalid field name: \"{}\"", name)));
     }
 
-    let type_str = parts.next().expect("expected field type");
+    let type_str = parts.next()
+        .ok_or_else(|| SchemaError(format!("Expected type for field \"{}\"", name)))?;
 
-    let ty = parse_type(type_str.strip_suffix("?").unwrap_or(type_str));
+    let ty = parse_type(type_str.strip_suffix("?").unwrap_or(type_str))?;
 
     let nullable = type_str.ends_with('?') || matches!(ty, FieldType::RefListUnresolved(_));
-    
+
     // атрибуты: всё, что осталось в строке, интерпретируем как атрибуты
     // Каждое слово, начинающееся с '@', — отдельный атрибут
     let attributes: Vec<Attribute> = line
@@ -237,7 +240,7 @@ pub fn parse_field_raw(line: &str) -> Field {
         .map(str::trim)  // убираем пробелы
         .filter(|s| !s.is_empty())
         .map(parse_attribute)
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let is_id = attributes.iter().any(|attr| matches!(attr, Attribute::Id));
 
@@ -250,7 +253,7 @@ pub fn parse_field_raw(line: &str) -> Field {
 
     let format = attributes.iter().find_map(|attr| if let Attribute::Format(fmt) = attr { Some(fmt.clone()) } else { None });
 
-    Field {
+    Ok(Field {
       name,
       full_name: String::new(),
       ty,
@@ -261,33 +264,33 @@ pub fn parse_field_raw(line: &str) -> Field {
       condition: FieldExistsCondition::None,
       indexes: vec![],
       format
-    }
+    })
 }
 
-fn parse_type(s: &str) -> FieldType {
+fn parse_type(s: &str) -> Result<FieldType, SchemaError> {
     if let Some((ty, bracket)) = s.strip_suffix(']').and_then(|s| s.split_once('[')) {
         let bracket = bracket.trim();
         if bracket.is_empty() {
             if let Some(prim) = get_primitive_type(ty) {
-                return FieldType::PrimitiveList(prim, None);
+                return Ok(FieldType::PrimitiveList(prim, None));
             }
-            return FieldType::RefListUnresolved(ty.to_string());
+            return Ok(FieldType::RefListUnresolved(ty.to_string()));
         }
 
         if let Ok(len) = bracket.parse::<usize>() {
             if let Some(prim) = get_primitive_type(ty) {
-                return FieldType::PrimitiveList(prim, Some(len));
+                return Ok(FieldType::PrimitiveList(prim, Some(len)));
             }
-            panic!("Fixed list is allowed only for primitive types: {}", s);
+            return Err(SchemaError(format!("Fixed list is allowed only for primitive types: {}", s)));
         }
-        panic!("Invalid array syntax: {}", s);
+        return Err(SchemaError(format!("Invalid array syntax: {}", s)));
     }
 
     if let Some(prim) = get_primitive_type(s) {
-        return FieldType::Primitive(prim);
+        return Ok(FieldType::Primitive(prim));
     }
 
-    FieldType::RefUnresolved(s.to_string())
+    Ok(FieldType::RefUnresolved(s.to_string()))
 }
 
 

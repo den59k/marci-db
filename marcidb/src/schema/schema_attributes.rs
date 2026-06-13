@@ -1,4 +1,6 @@
 
+use crate::schema::SchemaError;
+
 #[derive(Debug,Clone)]
 pub enum Attribute {
     Index,
@@ -32,58 +34,58 @@ pub enum VectorIndexType {
     Cosine
 }
 
-pub fn parse_attribute(s: &str) -> Attribute {
+pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
     if s.starts_with("index") {
-        return Attribute::Index
+        return Ok(Attribute::Index)
     }
 
     if s.starts_with("unique") {
-        return Attribute::Unique
+        return Ok(Attribute::Unique)
     }
-    
+
     if s.starts_with("id") {
-        return Attribute::Id
+        return Ok(Attribute::Id)
     }
 
     if let Some(inside) = s.strip_prefix("default(").and_then(|x| x.strip_suffix(')')) {
-        return Attribute::Default(inside.to_string())
+        return Ok(Attribute::Default(inside.to_string()))
     }
 
     if s.starts_with("vectorindex") {
         let opt = s.strip_prefix("vectorindex(").and_then(|x| x.strip_suffix(')')).map(|f|f.to_uppercase());
-        return match opt.as_deref() {
+        return Ok(match opt.as_deref() {
             Some("COSINE") => Attribute::VectorIndex(VectorIndexType::Cosine),
             _ => Attribute::VectorIndex(VectorIndexType::Euclidean)
-        }
+        })
     }
 
     if let Some(inside) = s.strip_prefix("bind(").and_then(|x| x.strip_suffix(')')) {
-        return Attribute::BindUnresolved(inside.to_string())
+        return Ok(Attribute::BindUnresolved(inside.to_string()))
     }
 
     if let Some(inside) = s.strip_prefix("inject(").and_then(|x| x.strip_suffix(')')) {
-        return Attribute::InjectUnresolved(parse_inject_attrs(inside));
+        return Ok(Attribute::InjectUnresolved(parse_inject_attrs(inside)));
     }
 
     if let Some(inside) = s.strip_prefix("format(").and_then(|x| x.strip_suffix(')')) {
-        return Attribute::Format(match inside.to_lowercase().as_str() {
+        return Ok(Attribute::Format(match inside.to_lowercase().as_str() {
             "uuid" => FieldCustomFormat::Uuid,
             "hex" => FieldCustomFormat::Hex,
-            _ => panic!("Unknown onDelete constraint: {}", inside)
-        });
+            _ => return Err(SchemaError(format!("Unknown format: {}", inside)))
+        }));
     }
 
     if let Some(inside) = s.strip_prefix("onDelete(").and_then(|x| x.strip_suffix(')')) {
-        return Attribute::OnDelete(match inside.to_uppercase().as_str() {
+        return Ok(Attribute::OnDelete(match inside.to_uppercase().as_str() {
             "CASCADE" => DeleteConstraint::Cascade,
             "RESTRICT" => DeleteConstraint::Restrict,
             "SETNULL" => DeleteConstraint::SetNull,
             "SET_NULL" => DeleteConstraint::SetNull,
-            _ => panic!("Unknown onDelete constraint: {}", inside)
-        });
+            _ => return Err(SchemaError(format!("Unknown onDelete constraint: {}", inside)))
+        }));
     }
 
-    panic!("Unknown attribute {}", s)
+    Err(SchemaError(format!("Unknown attribute: {}", s)))
 }
 
 pub fn parse_inject_attrs(s: &str) -> Vec<(String,String)> {

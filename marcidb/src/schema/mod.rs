@@ -9,8 +9,21 @@ mod schema_resolve_bindings;
 
 pub use crate::schema::schema_attributes::{Attribute,DeleteConstraint,FieldCustomFormat};
 pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition,FieldIndex,FieldIndexNum,parse_field_raw};
-pub use crate::schema::{schema_parse::{parse_schema,collect_blocks,parse_model_block}};
+pub use crate::schema::{schema_parse::{parse_schema,try_parse_schema,collect_blocks,parse_model_block}};
 pub use crate::schema::schema_default_value::FieldDefault;
+
+/// Ошибка разбора/валидации текста схемы. Сообщение пригодно для показа пользователю (→ HTTP 400).
+/// Возвращается фоллибл-путём ([`try_parse_schema`]); инфраструктурный [`parse_schema`] на ней паникует
+#[derive(Debug, PartialEq)]
+pub struct SchemaError(pub String);
+
+impl std::fmt::Display for SchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SchemaError {}
 
 #[derive(Debug,Clone)]
 pub struct Schema {

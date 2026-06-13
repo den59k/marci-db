@@ -269,7 +269,10 @@ pub enum EncodeError {
     UnsupportedOperation(String),
     NotAnArray,
     OnlyBodyKeyAvailableToEdit(String),
-    RevFieldRequired(String)
+    RevFieldRequired(String),
+    /// `$set`/`$ensure` (вложенная запись) применены к ref-полю, хранящемуся в body (FK):
+    /// создание вложенной записи поддержано только для owned/struct-связей — используйте `$connect`
+    NestedWriteNotSupported { field: String, op: String },
 }
 
 

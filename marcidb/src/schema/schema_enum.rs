@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::{Field, schema::{schema_parse::parse_fields}};
+use crate::{Field, schema::{SchemaError, schema_parse::parse_fields}};
 
 /// Поле enum вместе со списком вариантов, которым оно принадлежит.
 /// Общее поле (`admin | creator { ... }`) — одно физическое поле с несколькими вариантами
@@ -21,7 +21,7 @@ pub struct EnumDef {
 // Блок присоединяет свои поля ко всем перечисленным вариантам
 pub fn parse_enum_block(
     lines: &mut std::iter::Peekable<std::str::Lines<'_>>,
-) -> EnumDef {
+) -> Result<EnumDef, SchemaError> {
     let mut fields: Vec<EnumFieldDef> = Vec::new();
     let mut variants_map = HashMap::new();
 
@@ -52,31 +52,31 @@ pub fn parse_enum_block(
         for name in names_part.split('|') {
             let name = name.trim();
             if name.is_empty() {
-                panic!("Empty variant name in enum line: \"{}\"", line);
+                return Err(SchemaError(format!("Empty variant name in enum line: \"{}\"", line)));
             }
             let next_index = variants_map.len() as u16;
             let variant = *variants_map.entry(name.to_string()).or_insert(next_index);
             if line_variants.contains(&variant) {
-                panic!("Duplicate variant {} in enum line: \"{}\"", name, line);
+                return Err(SchemaError(format!("Duplicate variant {} in enum line: \"{}\"", name, line)));
             }
             line_variants.push(variant);
         }
 
         if has_block {
             // Offsets in enum has pre_header_size 4 bytes: 2 bytes - enum variant, 2 bytes - payload_offset
-            for field in parse_fields(lines) {
+            for field in parse_fields(lines)? {
                 if fields.iter().any(|f| f.field.name == field.name) {
-                    panic!("Duplicate enum field {}. To share a field between variants use `a | b {{ ... }}`", field.name);
+                    return Err(SchemaError(format!("Duplicate enum field {}. To share a field between variants use `a | b {{ ... }}`", field.name)));
                 }
                 fields.push(EnumFieldDef { variants: line_variants.clone(), field });
             }
         }
     }
 
-    EnumDef {
+    Ok(EnumDef {
         fields,
         variants_map,
-    }
+    })
 }
 
 
@@ -88,7 +88,7 @@ mod tests {
         let mut lines = input.lines().peekable();
         lines.next();
         lines.next();
-        parse_enum_block(&mut lines)
+        parse_enum_block(&mut lines).unwrap()
     }
 
     #[test]

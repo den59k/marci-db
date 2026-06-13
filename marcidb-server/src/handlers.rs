@@ -33,7 +33,7 @@ pub async fn handle_sync(req: Request<hyper::body::Incoming>, ctx: Arc<ServerCon
         let mut db = db.write().unwrap_or_else(|e| e.into_inner());
         db.migrate_to(&schema_text).map_err(|e| match e {
             MigrationApplyError::Storage(_) => ApiError::Internal(format!("{:?}", e)),
-            _ => ApiError::BadRequest(format!("{:?}", e)),
+            _ => ApiError::BadRequest(format!("{}", e)),
         })?;
         Ok::<_, ApiError>(String::new())
     }).await?;
@@ -53,7 +53,7 @@ pub async fn handle_migrate(req: Request<hyper::body::Incoming>, ctx: Arc<Server
         let mut db = db.write().unwrap_or_else(|e| e.into_inner());
         db.apply_migrations(&migrations).map_err(|e| match e {
             MigrationApplyError::Storage(_) => ApiError::Internal(format!("{:?}", e)),
-            _ => ApiError::BadRequest(format!("{:?}", e)),
+            _ => ApiError::BadRequest(format!("{}", e)),
         })
     }).await?;
 

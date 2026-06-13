@@ -172,6 +172,26 @@ fn migrations_ledger_persists_across_reopen() {
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
 }
 
+/// Невалидная схема через migrate_to ($sync) — ошибка, а не паника
+#[test]
+fn migrate_to_rejects_invalid_schema() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+  assert!(db.migrate_to("model A {\n  x Undefined\n}").is_err());      // неизвестный тип
+  assert!(db.migrate_to("model A {\n  x String @bogus\n}").is_err());  // плохой атрибут
+}
+
+/// Невалидная миграция через apply_migrations ($migrate) — ошибка, а не паника
+#[test]
+fn apply_migrations_rejects_invalid_mig() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+  // битый синтаксис .mig
+  assert!(db.apply_migrations(&[("0000_bad".to_string(), "totally bogus line".to_string())]).is_err());
+  // синтаксис ok, но поле ссылается на неизвестный тип — ловится при разборе итоговой схемы
+  assert!(db.apply_migrations(&[("0000_x".to_string(), "create model M {\n  ref Nope\n}".to_string())]).is_err());
+}
+
 /// Разошедшаяся история (другой id на уже применённой позиции) отклоняется
 #[test]
 fn migrations_history_diverged_rejected() {

@@ -61,13 +61,13 @@ fn parse_update_op<'a>(
                         }
                         "$ensure" => {
                             if matches!(field.location, FieldLocation::Body { .. } | FieldLocation::Key { .. }) {
-                                todo!();
+                                return Err(EncodeError::NestedWriteNotSupported { field: field.full_name.clone(), op: key.clone() });
                             }
                             UpdateRelationOp::Create(parse_insert_nested(schema, ref_info, value)?)
                         },
                         "$set" => {
                             if matches!(field.location, FieldLocation::Body { .. } | FieldLocation::Key { .. }) {
-                                todo!();
+                                return Err(EncodeError::NestedWriteNotSupported { field: field.full_name.clone(), op: key.clone() });
                             }
                             let delete_op = prepare_delete(schema, entity, None, rev_field);
                             update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::Remove(delete_op), ref_info, rev_ref_info });
@@ -236,5 +236,24 @@ where F: Fn(&Value) -> Result<T, EncodeError> {
         arr.iter().map(|v| f(v)).collect()
     } else {
         Err(EncodeError::type_mismatch(field, "array"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use crate::{json_parsers::EncodeError, parse_schema, parse_update};
+
+    /// `$set`/`$ensure` на ref-поле в body (FK) — типизированная ошибка, а не паника (`todo!()`)
+    #[test]
+    fn update_nested_write_on_body_ref_errors() {
+        let schema = parse_schema("model User {\n  name String\n}\nmodel Post {\n  title String\n  author User?\n}");
+        let post = &schema.models[1];
+
+        let set = parse_update(&schema, post, &json!({ "author": { "$set": { "name": "x" } } }));
+        assert!(matches!(set, Err(EncodeError::NestedWriteNotSupported { .. })), "got {:?}", set);
+
+        let ensure = parse_update(&schema, post, &json!({ "author": { "$ensure": { "name": "x" } } }));
+        assert!(matches!(ensure, Err(EncodeError::NestedWriteNotSupported { .. })), "got {:?}", ensure);
     }
 }

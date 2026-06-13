@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops, create_entity_trees, diff, evolve_schema, parse_migration}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops, create_entity_trees, diff, evolve_schema, parse_migration}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, try_parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -162,7 +162,7 @@ impl MarciDB {
   /// Применяет заранее вычисленные операции миграции к новой схеме (текст). Атомарно: при ошибке
   /// транзакция откатывается, версия и in-memory схема не меняются
   pub fn apply_migration(&mut self, ops: &[MigrationOp], new_schema_text: &str) -> Result<(), MigrationApplyError> {
-    let new_schema = parse_schema(new_schema_text);
+    let new_schema = try_parse_schema(new_schema_text)?;
 
     let tx = self.db.begin_write().unwrap();
     apply_ops(&tx, ops, &self.schema, &new_schema)?;
@@ -218,10 +218,10 @@ impl MarciDB {
     let tx = self.db.begin_write().unwrap();
     let mut cur_text = self.schema_text.clone();
     for (_, ops_text) in pending.iter() {
-      let ops = parse_migration(ops_text);
+      let ops = parse_migration(ops_text)?;
       let new_text = evolve_schema(&cur_text, &ops);
-      let old_schema = parse_schema(&cur_text);
-      let new_schema = parse_schema(&new_text);
+      let old_schema = parse_schema(&cur_text);            // cur_text уже провалидирован
+      let new_schema = try_parse_schema(&new_text)?;       // ловим плохой тип/синтаксис из .mig
       apply_ops(&tx, &ops, &old_schema, &new_schema)?;
       cur_text = new_text;
     }
