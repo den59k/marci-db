@@ -141,25 +141,25 @@ pub fn array_to_json(arr: &[String]) -> String {
 
 pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     let DecodeCtx { data, entity, id, mask, includes, schema } = ctx;
-    if !data.is_empty() {
+
+    // Длину заголовка берём из самой строки (байты 2..4), а не из схемы: строки, записанные
+    // под схемой с меньшим числом полей, короче — недостающие поля декодируются как отсутствующие.
+    // Так миграция add-field не требует переписывания старых строк (forward-compatible reader)
+    let row_header = if data.is_empty() {
+        0
+    } else {
         if data.len() < 4 {
             return Err(DecodeError::BufferTooSmall);
         }
-    
-        let version = data[0];
-        if version != 1 {
+        if data[0] != 1 {
             return Err(DecodeError::WrongVersion);
         }
-    
-        if u16::from_be_bytes([data[2], data[3]]) != entity.payload_offset as u16 {
-            let offset = u16::from_be_bytes([data[2], data[3]]);
-            return Err(DecodeError::TypeMismatch(format!("payload offset mismatch; Expected: {}, Get {}", entity.payload_offset, offset)));
-        }
-    
-        if data.len() < entity.payload_offset {
+        let row_header = u16::from_be_bytes([data[2], data[3]]) as usize;
+        if data.len() < row_header {
             return Err(DecodeError::BufferTooSmall);
         }
-    }
+        row_header
+    };
 
     // let mut obj = Map::new();
     let mut str = String::with_capacity(256);
@@ -183,7 +183,7 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
                 if !check_exists_condition(entity, &field.condition, &id, &data, schema) {
                     continue;
                 }
-                decode_body_field(data, offset_pos, field, &mut str, entity.payload_offset)?
+                decode_body_field(data, offset_pos, field, &mut str, row_header)?
             },
             FieldLocation::Virtual => {}
         }
@@ -286,6 +286,11 @@ fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut
 
 // Декодирует в JSON значение из Body
 fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: &mut String, payload_offset: usize) -> Result<(), DecodeError> {
+    // Слот за пределами заголовка строки — поле добавлено более поздней миграцией → отсутствует
+    if offset_pos + 4 > payload_offset {
+        insert_null(obj, field);
+        return Ok(())
+    }
     let offset_start = get_offset_checked(data, offset_pos)?;
     if offset_start == 0 {
         insert_null(obj, field);

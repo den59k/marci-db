@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::schema::{Attribute, Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, collect_blocks, parse_field_raw, parse_model_block};
+use canopydb::WriteTransaction;
+
+use crate::{StorageError, index_utils::{encode_full_index, encode_index}, schema::{Attribute, Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema, collect_blocks, parse_field_raw, parse_model_block}, utils::get_data};
 
 /// Одна операция миграции. Сериализуется в строку `.mig` DSL и обратно.
 #[derive(Debug, Clone)]
@@ -300,6 +302,118 @@ fn diff_fields(model: &str, old_m: &Entity, new_m: &Entity, ops: &mut Vec<Migrat
     }
   }
 
+  Ok(())
+}
+
+// ─────────────────────────────── apply (исполнение против БД) ───────────────────────────────
+
+/// Служебное дерево с состоянием миграций: ключи `schema` (текст .marci) и `version` (u64 BE)
+pub const META_TREE: &[u8] = b"__marci_meta__";
+
+#[derive(Debug)]
+pub enum MigrationApplyError {
+  /// Операция не поддержана в v1 (drop field, create/drop model, смена типа …)
+  Unsupported(&'static str),
+  /// `add unique` нашёл дубликаты в существующих данных
+  UniqueViolation { field: String },
+  Storage(StorageError),
+}
+
+impl From<canopydb::Error> for MigrationApplyError {
+  fn from(e: canopydb::Error) -> Self { MigrationApplyError::Storage(StorageError(e)) }
+}
+impl From<StorageError> for MigrationApplyError {
+  fn from(e: StorageError) -> Self { MigrationApplyError::Storage(e) }
+}
+
+/// Проверяет, что слоты существующих полей не изменились: новые поля должны дописываться
+/// в КОНЕЦ модели. Формат требует «порядок payload == порядок слотов», поэтому перестановка
+/// или вставка поля в середину сдвинула бы оффсеты существующих полей и сломала старые строки.
+/// Безопасный гард вместо молчаливой порчи; полная поддержка реордера — следующий шаг.
+fn check_layout_stable(old: &Schema, new: &Schema) -> Result<(), MigrationApplyError> {
+  let old_by: HashMap<&str, &Entity> = old.models.iter().map(|m| (m.name.as_str(), m)).collect();
+
+  for model in new.models.iter() {
+    let Some(old_model) = old_by.get(model.name.as_str()) else { continue };
+
+    let old_slot: HashMap<&str, usize> = old_model.fields.iter()
+      .filter_map(|f| if let FieldLocation::Body { offset_pos } = f.location { Some((f.name.as_str(), offset_pos)) } else { None })
+      .collect();
+
+    for f in model.fields.iter() {
+      if let FieldLocation::Body { offset_pos } = f.location {
+        if let Some(&old_off) = old_slot.get(f.name.as_str()) {
+          if old_off != offset_pos {
+            return Err(MigrationApplyError::Unsupported(
+              "поле переставлено/вставлено в середину модели — в v1 добавляйте новые поля в конец"));
+          }
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Исполняет физические операции миграции в открытой write-транзакции.
+/// add/alter field — только метаданные (формат v2, без переписывания строк);
+/// add index — строит дерево из существующих строк; drop index — удаляет дерево.
+pub fn apply_ops(tx: &WriteTransaction, ops: &[MigrationOp], old: &Schema, new: &Schema) -> Result<(), MigrationApplyError> {
+  // Слоты существующих полей должны сохраниться — иначе старые строки сломаются
+  check_layout_stable(old, new)?;
+
+  for op in ops {
+    match op {
+      // Метаданные: новый слот уже в `new`, старые строки читаются forward-compatible reader'ом
+      MigrationOp::AddField { .. } | MigrationOp::AlterField { .. } => {}
+      MigrationOp::AddIndex { model, field, .. } => build_index(tx, new, model, field)?,
+      MigrationOp::DropIndex { model, field, .. } => drop_index(tx, old, model, field)?,
+      MigrationOp::DropField { .. } => return Err(MigrationApplyError::Unsupported("drop field (slot tombstone) пока не поддержан")),
+      MigrationOp::CreateModel { .. } | MigrationOp::DropModel { .. } => return Err(MigrationApplyError::Unsupported("create/drop model пока не поддержан")),
+    }
+  }
+  Ok(())
+}
+
+fn find_entity<'a>(schema: &'a Schema, name: &str) -> &'a Entity {
+  schema.models.iter().find(|m| m.name == name).unwrap_or_else(|| panic!("model {} not found", name))
+}
+
+fn find_field<'a>(entity: &'a Entity, name: &str) -> &'a Field {
+  entity.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("field {}.{} not found", entity.name, name))
+}
+
+/// Строит индексное дерево поля из всех существующих строк модели (бэкфилл).
+/// Для уже добавленного только что поля старые строки дают `None` (поле отсутствует) — корректно
+fn build_index(tx: &WriteTransaction, schema: &Schema, model: &str, field_name: &str) -> Result<(), MigrationApplyError> {
+  let entity = find_entity(schema, model);
+  let field = find_field(entity, field_name);
+  if field.indexes.is_empty() {
+    return Err(MigrationApplyError::Unsupported("индекс по полю такого типа пока не поддержан"));
+  }
+
+  let model_tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
+  for index in field.indexes.iter() {
+    let mut index_tree = tx.get_or_create_tree(index.tree_name())?;
+    for row in model_tree.iter()? {
+      let (id, body) = row?;
+      let Some(value) = get_data(entity, field, &id, &body, schema) else { continue };
+      if index.is_unique() {
+        let encoded = encode_index(field, index, value);
+        if index_tree.prefix_keys(&encoded)?.next().transpose()?.is_some() {
+          return Err(MigrationApplyError::UniqueViolation { field: field.full_name.clone() });
+        }
+      }
+      index_tree.insert(&encode_full_index(field, index, &id, value), &[])?;
+    }
+  }
+  Ok(())
+}
+
+fn drop_index(tx: &WriteTransaction, old: &Schema, model: &str, field_name: &str) -> Result<(), MigrationApplyError> {
+  let field = find_field(find_entity(old, model), field_name);
+  for index in field.indexes.iter() {
+    tx.delete_tree(index.tree_name())?;
+  }
   Ok(())
 }
 

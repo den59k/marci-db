@@ -12,6 +12,7 @@ pub mod update_ref_tests;
 pub mod companion_id_tests;
 pub mod transaction_tests;
 pub mod batch_tests;
+pub mod migration_tests;
 
 use std::str::FromStr;
 

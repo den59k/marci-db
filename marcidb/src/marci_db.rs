@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -127,6 +127,33 @@ impl MarciDB {
     let is_delete = tx.delete_item(entity, id)?;
     tx.commit()?;
     Ok(is_delete)
+  }
+
+  /// Применяет миграцию: исполняет операции против БД атомарно, сохраняет новую схему и версию
+  /// в `__marci_meta__` и переключает in-memory схему. Новые поля дописываются в конец модели —
+  /// слоты существующих полей не меняются, поэтому старые строки не переписываются (формат v2).
+  ///
+  /// v1 покрывает add/alter field и add/drop index на существующих моделях (поля только в конец);
+  /// drop field, create/drop model и реордер полей пока возвращают `MigrationApplyError::Unsupported`.
+  pub fn apply_migration(&mut self, ops: &[MigrationOp], new_schema_text: &str) -> Result<(), MigrationApplyError> {
+    let new_schema = parse_schema(new_schema_text);
+
+    let tx = self.db.begin_write().unwrap();
+    apply_ops(&tx, ops, &self.schema, &new_schema)?;
+
+    {
+      let mut meta = tx.get_or_create_tree(META_TREE)?;
+      let version = meta.get(b"version")?
+        .map(|v| u64::from_be_bytes(v.as_ref().try_into().unwrap()))
+        .unwrap_or(0) + 1;
+      meta.insert(b"schema", new_schema_text.as_bytes())?;
+      meta.insert(b"version", &version.to_be_bytes())?;
+    }
+    tx.commit()?;
+
+    self.model_by_name = new_schema.build_model_name_map();
+    self.schema = new_schema;
+    Ok(())
   }
 }
 
