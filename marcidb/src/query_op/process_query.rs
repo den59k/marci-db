@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bitvec::vec::BitVec;
-use canopydb::{Bytes, ReadTransaction, Tree};
+use canopydb::{Bytes, Transaction, Tree};
 
 use crate::{Field, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, query_op::{IncludeQuery, PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
@@ -167,7 +167,10 @@ impl<U> Default for IncludeCache<U> {
 
 pub struct TransationContext<'a, U, F> {
   pub trees: HashMap<String, Arc<Tree<'a>>>,
-  pub rx: &'a ReadTransaction,
+  /// Любая транзакция, поддерживающая чтение. ReadTransaction и WriteTransaction
+  /// разыменовываются в &Transaction, поэтому запросы работают и внутри write-транзакции
+  /// (видят её незакоммиченные изменения — read-your-writes)
+  pub rx: &'a Transaction,
   pub schema: &'a Schema,
   pub f: F,
   /// Кэши include-результатов на время одного запроса, по идентичности вложенного запроса
@@ -175,7 +178,7 @@ pub struct TransationContext<'a, U, F> {
 }
 
 impl<'a, U, F> TransationContext<'a, U, F> {
-  pub fn new(rx: &'a ReadTransaction, schema: &'a Schema, f: F) -> Self {
+  pub fn new(rx: &'a Transaction, schema: &'a Schema, f: F) -> Self {
     Self { trees: HashMap::new(), rx, f, schema, include_cache: HashMap::new() }
   }
   pub fn get_tree(&mut self, key: &str) -> Arc<Tree<'a>> {

@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp, process_update}, utils::get_data, write_op::{InsertError, WriteOp, process_write}};
+use crate::{Field, MarciTransaction, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, FieldType, RefBinding, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -97,24 +97,39 @@ impl MarciDB {
     return tree.len();
   }
 
+  /// Открывает write-транзакцию уровня API. Несколько операций внутри неё применяются
+  /// атомарно; для фиксации нужно вызвать [`MarciTransaction::commit`], иначе при `drop`
+  /// произойдёт откат. Пока транзакция открыта, она держит эксклюзивную write-блокировку
+  pub fn begin_write(&self) -> MarciTransaction<'_> {
+    MarciTransaction::new(self, self.db.begin_write().unwrap())
+  }
+
+  /// Выполняет блок в одной транзакции: при `Ok` — коммит, при `Err` или панике — откат.
+  /// Удобная обёртка над [`MarciDB::begin_write`], когда не нужно ручное управление коммитом
+  pub fn transaction<T, E, F>(&self, f: F) -> Result<T, E> where F: FnOnce(&MarciTransaction) -> Result<T, E> {
+    let tx = self.begin_write();
+    let result = f(&tx)?;
+    tx.commit().unwrap();
+    Ok(result)
+  }
+
   pub fn insert_item(&self, entity: &Entity, insert: &WriteOp) -> Result<Vec<u8>, InsertError> {
-    let tx = self.db.begin_write().unwrap();
-    let item_id = process_write(&tx, entity, insert,  &self, None)?;
+    let tx = self.begin_write();
+    let item_id = tx.insert_item(entity, insert)?;
     tx.commit().unwrap();
     Ok(item_id)
   }
 
   pub fn update_item(&self, entity: &Entity, id: &[u8], update_op: &UpdateOp) -> Result<(), UpdateError> {
-    let tx = self.db.begin_write().unwrap();
-    process_update(&tx, entity, id, update_op, &self)?;
+    let tx = self.begin_write();
+    tx.update_item(entity, id, update_op)?;
     tx.commit().unwrap();
     Ok(())
   }
 
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
-    let action = prepare_delete(&self.schema, entity, Some(id), None);
-    let tx = self.db.begin_write().unwrap();
-    let is_delete = process_delete(&tx, &id, entity, &action, &self.schema, None)?;
+    let tx = self.begin_write();
+    let is_delete = tx.delete_item(entity, id)?;
     tx.commit().unwrap();
     Ok(is_delete)
   }

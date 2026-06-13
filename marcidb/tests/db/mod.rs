@@ -10,6 +10,7 @@ pub mod unique_tests;
 pub mod update_tests;
 pub mod update_ref_tests;
 pub mod companion_id_tests;
+pub mod transaction_tests;
 
 use std::str::FromStr;
 
