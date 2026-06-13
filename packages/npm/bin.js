@@ -56,9 +56,9 @@ Commands:
     --name <name>                 migration name (default: migration)
     --no-migrations               types only, skip the migration file
 
-  migrate push <db> [options]     Push the schema to a running server (creates the db if absent)
+  migrate push <db> [options]     Push migration files (.mig) to a server; it applies the new ones
     --url <url>                   server url (default: http://localhost:3000)
-    --schema <path>               schema file (default: schema.marci)
+    --migrations <dir>            migrations directory (default: migrations)
 
 Examples:
   marcidb generate
@@ -97,12 +97,14 @@ function cmdGenerate(args) {
 
 async function cmdMigrate(args) {
   const [sub, ...rest] = args;
-  if (sub !== "push") {
-    console.error(`marcidb migrate: unknown subcommand "${sub ?? ""}" (expected "push")`);
-    help();
-    process.exit(1);
-  }
+  if (sub === "push") return migratePush(rest);
+  console.error(`marcidb migrate: unknown subcommand "${sub ?? ""}" (expected "push")`);
+  help();
+  process.exit(1);
+}
 
+// Императивный push: отправляет .mig-файлы; сервер по ledger'у применяет только новые
+async function migratePush(rest) {
   const { positional, flags } = parseArgs(rest);
   const db = positional[0];
   if (!db) {
@@ -111,20 +113,40 @@ async function cmdMigrate(args) {
   }
 
   const url = (flags.url ?? "http://localhost:3000").replace(/\/+$/, "");
-  const schemaPath = flags.schema ?? "schema.marci";
-  const schemaText = fs.readFileSync(schemaPath, "utf8");
+  const dir = flags.migrations ?? "migrations";
+
+  if (!fs.existsSync(dir)) {
+    console.error(`marcidb migrate push: migrations directory "${dir}" not found — run "marcidb generate" first`);
+    process.exit(1);
+  }
+
+  // Все .mig по порядку имён → [{ id, ops }]; id — имя файла без расширения
+  const migrations = fs.readdirSync(dir)
+    .filter((f) => f.endsWith(".mig"))
+    .sort()
+    .map((f) => ({ id: f.replace(/\.mig$/, ""), ops: fs.readFileSync(path.join(dir, f), "utf8") }));
+
+  if (migrations.length === 0) {
+    console.log("No migration files — nothing to push");
+    return;
+  }
 
   const res = await fetch(`${url}/${db}/$migrate`, {
     method: "POST",
-    headers: { "Content-Type": "text/plain" },
-    body: schemaText,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(migrations),
   });
 
   if (!res.ok) {
     console.error(`Migration failed [${res.status}]: ${await res.text()}`);
     process.exit(1);
   }
-  console.log(`Migrated '${db}' on ${url}`);
+  const { applied } = await res.json();
+  if (applied && applied.length) {
+    console.log(`Applied ${applied.length} migration(s) to '${db}': ${applied.join(", ")}`);
+  } else {
+    console.log(`'${db}' is up to date — no new migrations`);
+  }
 }
 
 const COMMANDS = {

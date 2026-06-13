@@ -106,48 +106,81 @@ fn migrate_drop_field_unsupported() {
   assert!(matches!(result, Err(MigrationApplyError::Unsupported(_))));
 }
 
-/// $init (reinit): полный сброс — старые данные стираются, применяется ЛЮБАЯ новая схема,
-/// даже несовместимая с прежней (смена типа поля + новая модель — migrate_to бы их отклонил)
+// ─────────────────────────────── императивные миграции (ledger + replay) ───────────────────────────────
+
+/// Императивный реплей: применяет .mig по ledger'у. Повторный пуш того же списка — no-op
 #[test]
-fn init_resets_data_and_schema() {
+fn migrations_replay_and_idempotent() {
   let dir = tempdir().unwrap();
-  let mut db = MarciDB::new("model User {\n  name String\n  age  UInt\n}", dir.path().to_str().unwrap());
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+
+  let m0 = ("0000_init".to_string(), "create model User {\n  name String\n}".to_string());
+  let m1 = ("0001_age".to_string(), "add field User.age UInt".to_string());
+
+  let applied = db.apply_migrations(&[m0.clone(), m1.clone()]).unwrap();
+  assert_eq!(applied, vec!["0000_init", "0001_age"]);
 
   insert_data(&db, "User", json!({ "name": "Alice", "age": 30 }));
-  insert_data(&db, "User", json!({ "name": "Bob", "age": 40 }));
+  assert_eq!(get_data_one(&db, "User", json!({ "name": true, "age": true })), json!({ "name": "Alice", "age": 30 }));
 
-  // age сменил тип UInt→String, добавлена модель Post — migrate_to отклонил бы смену типа
-  db.reinit("model User {\n  name String\n  age  String\n}\nmodel Post {\n  title String\n}").unwrap();
-
-  // Старые данные стёрты
-  assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([]));
-
-  // Новая схема работает: age теперь String, появилась модель Post
-  insert_data(&db, "User", json!({ "name": "Carol", "age": "old" }));
-  assert_eq!(
-    get_data_one(&db, "User", json!({ "name": true, "age": true })),
-    json!({ "name": "Carol", "age": "old" })
-  );
-  insert_data(&db, "Post", json!({ "title": "Hi" }));
-  assert_eq!(get_data(&db, "Post", json!({ "title": true })), json!([{ "title": "Hi" }]));
+  // Повторный пуш — ничего не применяется, данные целы
+  let applied2 = db.apply_migrations(&[m0.clone(), m1.clone()]).unwrap();
+  assert!(applied2.is_empty());
+  assert_eq!(get_data_one(&db, "User", json!({ "name": true, "age": true })), json!({ "name": "Alice", "age": 30 }));
 }
 
-/// Сброс через reinit переживает рестарт: open() реконструирует НОВую схему из __marci_meta__,
-/// а деревья старой модели физически снесены (модель не воскресает)
+/// Инкрементальный пуш: применяется только новая миграция, старые данные сохраняются
 #[test]
-fn init_persists_across_reopen() {
+fn migrations_incremental_push() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+
+  let m0 = ("0000_init".to_string(), "create model User {\n  name String\n}".to_string());
+  db.apply_migrations(&[m0.clone()]).unwrap();
+  insert_data(&db, "User", json!({ "name": "Alice" }));
+
+  let m1 = ("0001_age".to_string(), "add field User.age UInt".to_string());
+  let applied = db.apply_migrations(&[m0.clone(), m1.clone()]).unwrap();
+  assert_eq!(applied, vec!["0001_age"]);
+
+  // Старая строка читается (age отсутствует), новая пишется с age
+  assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
+  insert_data(&db, "User", json!({ "name": "Bob", "age": 5 }));
+  assert_eq!(
+    get_data_one(&db, "User", json!({ "name": true, "age": true, "$where": { "name": "Bob" } })),
+    json!({ "name": "Bob", "age": 5 })
+  );
+}
+
+/// Ledger переживает рестарт: повторное открытие видит схему, повторный пуш всё ещё no-op
+#[test]
+fn migrations_ledger_persists_across_reopen() {
   let dir = tempdir().unwrap();
   let path = dir.path().to_str().unwrap().to_string();
+  let m0 = ("0000_init".to_string(), "create model User {\n  name String\n}".to_string());
 
   {
-    let mut db = MarciDB::new("model User {\n  name String\n}", &path);
+    let mut db = MarciDB::open(&path);
+    db.apply_migrations(&[m0.clone()]).unwrap();
     insert_data(&db, "User", json!({ "name": "Alice" }));
-    db.reinit("model Account {\n  email String\n}").unwrap();
-    insert_data(&db, "Account", json!({ "email": "a@x.com" }));
   }
 
-  let db = MarciDB::open(&path);
-  assert!(db.get_model("User").is_none());     // старая модель ушла
-  assert!(db.get_model("Account").is_some());  // новая на месте
-  assert_eq!(get_data(&db, "Account", json!({ "email": true })), json!([{ "email": "a@x.com" }]));
+  let mut db = MarciDB::open(&path);
+  assert!(db.get_model("User").is_some());
+  let applied = db.apply_migrations(&[m0.clone()]).unwrap();
+  assert!(applied.is_empty());
+  assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
 }
+
+/// Разошедшаяся история (другой id на уже применённой позиции) отклоняется
+#[test]
+fn migrations_history_diverged_rejected() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+
+  db.apply_migrations(&[("0000_init".to_string(), "create model User {\n  name String\n}".to_string())]).unwrap();
+
+  let result = db.apply_migrations(&[("0000_other".to_string(), "create model User {\n  name String\n}".to_string())]);
+  assert!(matches!(result, Err(MigrationApplyError::HistoryDiverged { .. })));
+}
+

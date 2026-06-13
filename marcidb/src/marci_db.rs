@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops, create_entity_trees, diff}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migration::{META_TREE, MigrationApplyError, MigrationOp, apply_ops, create_entity_trees, diff, evolve_schema, parse_migration}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -188,47 +188,76 @@ impl MarciDB {
     Ok(())
   }
 
-  /// Полный сброс БД к новой схеме (hard reset). В отличие от [`MarciDB::migrate_to`] —
-  /// декларативного диффа, сохраняющего данные, — `reinit` СНОСИТ все данные и индексы и
-  /// пересоздаёт деревья с нуля под любую схему. Это bootstrap без файлов миграций (эндпоинт
-  /// `$init`): удобно, когда нет возможности гонять CLI — из CI, скрипта или прямого HTTP.
+  /// Императивная миграция: применяет присланные `.mig`-файлы по ledger'у. `incoming` — ВСЕ
+  /// миграции клиента в порядке: `(id, текст ops)`. Сервер хранит ledger применённых id в
+  /// `__marci_meta__/applied` и применяет только те, что идут ПОСЛЕ уже применённых.
   ///
-  /// Атомарно: всё в одной write-транзакции. `list_trees` видит всё, что физически есть в файле
-  /// (старые модели, индексы, `__marci_meta__`, любые осиротевшие деревья) — поэтому сброс полный
-  /// и не зависит от того, какой была прежняя схема. Версия миграций сбрасывается на 1.
-  pub fn reinit(&mut self, new_schema_text: &str) -> Result<(), MigrationApplyError> {
-    let new_schema = parse_schema(new_schema_text);
+  /// Применённые миграции должны быть префиксом присланных (иначе история разошлась →
+  /// [`MigrationApplyError::HistoryDiverged`]). Весь пуш — одна атомарная транзакция: каждая
+  /// миграция парсится, схема эволюционирует ([`evolve_schema`]), физический [`apply_ops`]
+  /// исполняется против БД. Возвращает id применённых в этом пуше миграций (пустой вектор — нечего)
+  pub fn apply_migrations(&mut self, incoming: &[(String, String)]) -> Result<Vec<String>, MigrationApplyError> {
+    let applied = read_ledger(&self.db)?;
 
+    // Применённые миграции должны быть префиксом присланных
+    for (i, applied_id) in applied.iter().enumerate() {
+      let incoming_id = incoming.get(i).map(|(id, _)| id.as_str()).unwrap_or("<missing>");
+      if incoming_id != applied_id {
+        return Err(MigrationApplyError::HistoryDiverged {
+          position: i, applied: applied_id.clone(), incoming: incoming_id.to_string(),
+        });
+      }
+    }
+
+    let pending = &incoming[applied.len()..];
+    if pending.is_empty() {
+      return Ok(vec![]);
+    }
+
+    // Реплей всех новых миграций в одной транзакции
     let tx = self.db.begin_write().unwrap();
-
-    // Сносим всё. delete_tree помечает дерево Deleted, поэтому повторный get_or_create_tree того же
-    // имени ниже создаёт пустое — данные общих со старой схемой моделей тоже стираются
-    for name in tx.list_trees()? {
-      tx.delete_tree(&name)?;
+    let mut cur_text = self.schema_text.clone();
+    for (_, ops_text) in pending.iter() {
+      let ops = parse_migration(ops_text);
+      let new_text = evolve_schema(&cur_text, &ops);
+      let old_schema = parse_schema(&cur_text);
+      let new_schema = parse_schema(&new_text);
+      apply_ops(&tx, &ops, &old_schema, &new_schema)?;
+      cur_text = new_text;
     }
 
-    // Пустые деревья новой схемы
-    for model in new_schema.models.iter() {
-      create_entity_trees(&tx, model)?;
-    }
-
-    // meta заново: схема + версия с 1
+    let all_ids: Vec<&str> = applied.iter().map(String::as_str)
+      .chain(pending.iter().map(|(id, _)| id.as_str())).collect();
     {
       let mut meta = tx.get_or_create_tree(META_TREE)?;
-      meta.insert(b"schema", new_schema_text.as_bytes())?;
-      meta.insert(b"version", &1u64.to_be_bytes())?;
+      meta.insert(b"schema", cur_text.as_bytes())?;
+      meta.insert(b"applied", all_ids.join("\n").as_bytes())?;
+      meta.insert(b"version", &(all_ids.len() as u64).to_be_bytes())?;
     }
     tx.commit()?;
 
+    let new_schema = parse_schema(&cur_text);
     let rx = self.db.begin_read().unwrap();
     self.counters = build_counters(&new_schema, &rx);
     drop(rx);
-
     self.model_by_name = new_schema.build_model_name_map();
-    self.schema_text = new_schema_text.to_string();
+    self.schema_text = cur_text;
     self.schema = new_schema;
-    Ok(())
+
+    Ok(pending.iter().map(|(id, _)| id.clone()).collect())
   }
+}
+
+/// Читает ledger применённых миграций (`__marci_meta__/applied`, id через `\n`)
+fn read_ledger(db: &Database) -> Result<Vec<String>, MigrationApplyError> {
+  let rx = db.begin_read().unwrap();
+  let applied = rx.get_tree(META_TREE)?
+    .and_then(|m| m.get(b"applied").unwrap())
+    .map(|v| String::from_utf8(v.to_vec()).unwrap())
+    .filter(|s| !s.is_empty())
+    .map(|s| s.split('\n').map(String::from).collect())
+    .unwrap_or_default();
+  Ok(applied)
 }
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {

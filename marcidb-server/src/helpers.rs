@@ -15,7 +15,7 @@ pub async fn parse_json_body(
         .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {}", e)))
 }
 
-/// Читает тело запроса как текст (для `$migrate` — тело является текстом схемы `.marci`)
+/// Читает тело запроса как текст (для `$sync` — тело является текстом схемы `.marci`)
 pub async fn parse_text_body(
     req: Request<hyper::body::Incoming>
 ) -> Result<String, ApiError> {

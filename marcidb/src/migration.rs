@@ -4,7 +4,7 @@
 //!
 //! `apply` (исполнение против БД, слоты, `__marci_meta__`) и CLI — следующие шаги.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use canopydb::WriteTransaction;
 
@@ -305,9 +305,156 @@ fn diff_fields(model: &str, old_m: &Entity, new_m: &Entity, ops: &mut Vec<Migrat
   Ok(())
 }
 
+// ─────────────────────────────── evolve (replay ops → текст схемы) ───────────────────────────────
+
+/// Верхнеуровневый блок схемы с исходным текстом (для verbatim-переноса struct/enum)
+struct SchemaBlock {
+  kind: String,
+  name: String,
+  text: String,
+}
+
+/// Баланс фигурных скобок в строке (`{` минус `}`)
+fn brace_delta(line: &str) -> i32 {
+  line.bytes().filter(|&b| b == b'{').count() as i32 - line.bytes().filter(|&b| b == b'}').count() as i32
+}
+
+/// Разбивает текст схемы на блоки `model|struct|enum Name { … }`, сохраняя исходный текст каждого.
+/// Конец блока — по балансу скобок (enum c payload-вариантами имеет вложенные `{ }`)
+fn split_blocks(text: &str) -> Vec<SchemaBlock> {
+  let mut blocks = vec![];
+  let mut lines = text.lines();
+  while let Some(line) = lines.next() {
+    let t = line.trim();
+    if !(t.starts_with("model ") || t.starts_with("struct ") || t.starts_with("enum ")) {
+      continue;
+    }
+    let (kind, rest) = t.split_once(' ').unwrap();
+    let name = rest.trim_end_matches('{').trim().to_string();
+    let mut block_text = format!("{}\n", line);
+    let mut depth = brace_delta(line);
+    while depth > 0 {
+      let Some(l) = lines.next() else { break };
+      block_text.push_str(l);
+      block_text.push('\n');
+      depth += brace_delta(l);
+    }
+    blocks.push(SchemaBlock { kind: kind.to_string(), name, text: block_text });
+  }
+  blocks
+}
+
+/// Сериализует модель в синтаксис схемы из сырых полей (collect_blocks-форма)
+fn serialize_model_block(entity: &Entity) -> String {
+  let mut s = format!("model {} {{\n", entity.name);
+  for field in entity.fields.iter() {
+    s.push_str("  ");
+    s.push_str(&field_to_spec(field));
+    s.push('\n');
+  }
+  s.push('}');
+  s
+}
+
+fn find_model<'a>(models: &'a mut [Entity], name: &str) -> Option<&'a mut Entity> {
+  models.iter_mut().find(|m| m.name == name)
+}
+
+/// Выставляет/снимает index|unique-атрибут поля (хранятся отдельными ops, не в самом поле)
+fn set_index_attr(field: &mut Field, unique: bool, present: bool) {
+  field.attributes.retain(|a| !matches!(a, Attribute::Index | Attribute::Unique));
+  if present {
+    field.attributes.push(if unique { Attribute::Unique } else { Attribute::Index });
+  }
+}
+
+/// Применяет операции миграции к ТЕКСТУ схемы → новый текст. Структурный «replay», обратный к
+/// [`diff`]: имея сохранённую схему и `.mig`, сервер получает схему-после-миграции, не завися от
+/// клиента. Модели пересобираются из сырых полей; struct/enum переносятся verbatim (v1 их не трогает)
+pub fn evolve_schema(old_text: &str, ops: &[MigrationOp]) -> String {
+  let (mut models, _structs, _enums) = collect_blocks(old_text);
+  let mut dropped: HashSet<String> = HashSet::new();
+
+  for op in ops {
+    match op {
+      MigrationOp::CreateModel { name, fields } => {
+        if !models.iter().any(|m| &m.name == name) {
+          models.push(Entity::new(name.clone(), fields.clone()));
+        }
+        dropped.remove(name);
+      }
+      MigrationOp::DropModel { name } => { dropped.insert(name.clone()); }
+      MigrationOp::AddField { model, field } => {
+        if let Some(m) = find_model(&mut models, model) {
+          if !m.fields.iter().any(|f| f.name == field.name) {
+            m.fields.push(field.clone());
+          }
+        }
+      }
+      MigrationOp::AlterField { model, field } => {
+        if let Some(m) = find_model(&mut models, model) {
+          if let Some(existing) = m.fields.iter_mut().find(|f| f.name == field.name) {
+            // index/unique — отдельные ops; переносим их со старого поля на новое
+            let idx_attrs: Vec<Attribute> = existing.attributes.iter()
+              .filter(|a| matches!(a, Attribute::Index | Attribute::Unique)).cloned().collect();
+            *existing = field.clone();
+            existing.attributes.extend(idx_attrs);
+          }
+        }
+      }
+      MigrationOp::DropField { model, field } => {
+        if let Some(m) = find_model(&mut models, model) {
+          m.fields.retain(|f| &f.name != field);
+        }
+      }
+      MigrationOp::AddIndex { model, field, unique } => {
+        if let Some(m) = find_model(&mut models, model) {
+          if let Some(f) = m.fields.iter_mut().find(|f| &f.name == field) {
+            set_index_attr(f, *unique, true);
+          }
+        }
+      }
+      MigrationOp::DropIndex { model, field, .. } => {
+        if let Some(m) = find_model(&mut models, model) {
+          if let Some(f) = m.fields.iter_mut().find(|f| &f.name == field) {
+            set_index_attr(f, false, false);
+          }
+        }
+      }
+    }
+  }
+
+  // Сборка нового текста: struct/enum — verbatim, модели — пересериализованы, в исходном порядке
+  let blocks = split_blocks(old_text);
+  let mut emitted: HashSet<String> = HashSet::new();
+  let mut out: Vec<String> = vec![];
+
+  for block in blocks.iter() {
+    if block.kind == "model" {
+      if dropped.contains(&block.name) { continue; }
+      if let Some(m) = models.iter().find(|m| m.name == block.name) {
+        out.push(serialize_model_block(m));
+        emitted.insert(block.name.clone());
+      }
+    } else {
+      out.push(block.text.trim_end().to_string());
+    }
+  }
+
+  // Новые модели (CreateModel), которых не было в исходном тексте — в конец
+  for m in models.iter() {
+    if !emitted.contains(&m.name) && !dropped.contains(&m.name) {
+      out.push(serialize_model_block(m));
+    }
+  }
+
+  out.join("\n\n")
+}
+
 // ─────────────────────────────── apply (исполнение против БД) ───────────────────────────────
 
-/// Служебное дерево с состоянием миграций: ключи `schema` (текст .marci) и `version` (u64 BE)
+/// Служебное дерево с состоянием миграций: ключи `schema` (текст .marci), `version` (u64 BE)
+/// и `applied` (ledger применённых миграций — id через `\n`)
 pub const META_TREE: &[u8] = b"__marci_meta__";
 
 #[derive(Debug)]
@@ -318,6 +465,9 @@ pub enum MigrationApplyError {
   UniqueViolation { field: String },
   /// Ошибка вычисления диффа (в `migrate_to`)
   Diff(MigrationError),
+  /// Присланная история миграций расходится с применённой на сервере (ledger).
+  /// Применённые миграции должны быть префиксом присланных — иначе порядок/содержимое разошлись
+  HistoryDiverged { position: usize, applied: String, incoming: String },
   Storage(StorageError),
 }
 
@@ -566,5 +716,38 @@ drop model Session";
     let old = "model User {\n age UInt \n}";
     let new = "model User {\n age String \n}";
     assert!(matches!(diff(old, new), Err(MigrationError::UnsupportedTypeChange { .. })));
+  }
+
+  /// evolve — обратная к diff: применив дифф к старой схеме, получаем текст,
+  /// структурно эквивалентный новой (повторный diff пуст)
+  #[test]
+  fn evolve_is_inverse_of_diff() {
+    let cases = [
+      ("model User {\n  name String\n}",
+       "model User {\n  name String\n  age UInt @index\n}"),
+      ("model A {\n  x String\n}\nmodel Old {\n  y Int\n}",
+       "model A {\n  x String?\n}\nmodel New {\n  z String\n}"),
+      ("model P {\n  slug String @index\n}",
+       "model P {\n  slug String @unique\n}"),
+    ];
+    for (old, new) in cases {
+      let ops = diff(old, new).unwrap();
+      let evolved = evolve_schema(old, &ops);
+      assert!(diff(&evolved, new).unwrap().is_empty(),
+        "evolve(old, diff(old,new)) != new.\nevolved:\n{}", evolved);
+    }
+  }
+
+  /// enum переносится evolve verbatim (вложенные `{ }` payload-варианта не рвут блок),
+  /// миграция поля модели его не задевает
+  #[test]
+  fn evolve_preserves_enum_block() {
+    let old = "model Account {\n  name String\n  type AccountType\n}\nenum AccountType {\n  basic\n  pro {\n    sign String\n  }\n}";
+    let new = "model Account {\n  name String\n  type AccountType\n  active Bool\n}\nenum AccountType {\n  basic\n  pro {\n    sign String\n  }\n}";
+    let ops = diff(old, new).unwrap();
+    let evolved = evolve_schema(old, &ops);
+    assert!(evolved.contains("enum AccountType"), "enum потерян:\n{}", evolved);
+    assert!(evolved.contains("sign String"), "payload-вариант потерян:\n{}", evolved);
+    assert!(diff(&evolved, new).unwrap().is_empty(), "evolved:\n{}", evolved);
   }
 }

@@ -32,7 +32,7 @@ const posts = await db.post.findMany({
 - **Secondary indexes** with a query planner: range scans, `$order` by index, keyset pagination (`$cursor`)
 - **Aggregations**: `count` / `$sum` / `$avg` / `$min` / `$max`, including aggregates over relations inside a select (`posts: { $count: true }` — counted by index keys, without reading rows)
 - **Atomic batch transactions**: `db.$transaction([...])` applies several operations as all-or-nothing, with `ref("0.id")` to feed a generated id into later operations
-- **Declarative migrations**: edit the schema, `marcidb generate` diffs it into a migration file; the server applies it on push — adding fields and indexes without rewriting existing rows
+- **Migrations as files**: `marcidb generate` diffs the schema into a `.mig` file; `marcidb migrate push` ships your migrations and the server replays the new ones, tracking an applied ledger — adding fields and indexes without rewriting existing rows
 - **Compact binary row format** with zero-copy field access — filters and aggregates read only the bytes they need
 
 ## Quick start
@@ -82,14 +82,12 @@ docker run -d --name marcidb -p 3000:3000 -v marcidb-data:/app/data den59k/marci
 
 ```bash
 npx marcidb migrate push myapp --url http://localhost:3000
-# equivalently, over raw HTTP:
-curl -X POST http://localhost:3000/myapp/\$migrate --data-binary @schema.marci
 ```
 
-No Node toolchain at all? `$init` applies a schema directly from plain text — a one-shot bootstrap that **wipes any existing data** and recreates the database to match (accepts any schema, no migration files):
+No Node toolchain? The `$sync` endpoint applies a `schema.marci` directly over plain HTTP — the server diffs and applies it, creating the database if absent (for databases not managed by migration files):
 
 ```bash
-curl -X POST http://localhost:3000/myapp/\$init --data-binary @schema.marci
+curl -X POST http://localhost:3000/myapp/\$sync --data-binary @schema.marci
 ```
 
 ## Documentation

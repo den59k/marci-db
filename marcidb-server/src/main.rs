@@ -6,7 +6,7 @@ use hyper_util::rt::TokioIo;
 use marcidb::MarciDB;
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_init, handle_insert, handle_migrate, handle_transaction, handle_update}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_sync, handle_transaction, handle_update}};
 
 mod handlers;
 mod errors;
@@ -65,7 +65,7 @@ pub async fn handle(
     Ok(response)
 }
 
-// "/{db}/$migrate" | "/{db}/$transaction" | "/{db}/{model}/{action}[/{id}]"
+// "/{db}/$migrate" | "/{db}/$sync" | "/{db}/$transaction" | "/{db}/{model}/{action}[/{id}]"
 async fn handle_inner(
     req: Request<hyper::body::Incoming>,
     ctx: Arc<ServerContext>,
@@ -80,7 +80,7 @@ async fn handle_inner(
     if method == Method::POST {
         match rest {
             "$migrate" => return handle_migrate(req, ctx, db_name).await,
-            "$init" => return handle_init(req, ctx, db_name).await,
+            "$sync" => return handle_sync(req, ctx, db_name).await,
             "$transaction" => return handle_transaction(req, ctx, db_name).await,
             _ => {}
         }

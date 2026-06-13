@@ -16,12 +16,12 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:lates
 
 ## Endpoints
 
-Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate`; data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$migrate`, whose body is the schema text). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
+Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
 
 | Endpoint | Body | Response |
 |---|---|---|
-| `POST /:db/$migrate` | schema text (`.marci`) | empty — applies the schema, creating the db if absent |
-| `POST /:db/$init` | schema text (`.marci`) | empty — **resets** the db to the schema, wiping all data (creates it if absent) |
+| `POST /:db/$migrate` | JSON `[{ id, ops }]` — migration files | `{ "applied": [...ids] }` — replays new migrations, creating the db if absent |
+| `POST /:db/$sync` | schema text (`.marci`) | empty — diffs & applies the schema directly, creating the db if absent |
 | `POST /:db/:model/findMany` | query object | JSON array |
 | `POST /:db/:model/findFirst` | query object | object or `null` |
 | `POST /:db/:model/insert` | insert object | id object |
@@ -80,27 +80,39 @@ returns `"posts": { "count": 3, "max": 25 }` instead of an array.
 
 ## Migrations
 
-`POST /:db/$migrate` applies a schema to the database. The body is the **schema text** (the contents of `schema.marci`), not JSON. The server diffs it against the database's current schema and applies the change atomically; if the database does not exist, it is created.
+A database evolves through **migration files**. Locally, `marcidb generate` diffs `schema.marci` against the last snapshot and writes a `NNNN_name.mig` file describing the change. `POST /:db/$migrate` ships those files to the server, which replays the ones it hasn't applied yet.
 
-```bash
-curl -X POST http://localhost:3000/myapp/\$migrate --data-binary @schema.marci
+The body is a JSON array of the migration files, in order — each `{ "id", "ops" }`, where `id` is the file name (without `.mig`) and `ops` is its text. The server keeps a **ledger** of applied ids in its own storage and applies only the new ones, in a single atomic transaction. The response lists what it applied this push:
+
+```jsonc
+// POST /myapp/$migrate
+[
+  { "id": "0000_init",    "ops": "create model User {\n  name String\n}" },
+  { "id": "0001_add_age", "ops": "add field User.age UInt" }
+]
+// → { "applied": ["0001_add_age"] }   — 0000_init was already applied
 ```
 
-The server reconstructs each database's schema from its own storage on open, so migrations survive restarts. v1 supports adding fields, adding/dropping indexes and creating/dropping models; dropping a field, renaming, or reordering fields is rejected with `400`. Usually you push via the CLI rather than raw curl:
+Properties:
+- **Idempotent** — re-pushing the same list applies nothing (`{ "applied": [] }`).
+- **Ordered & verified** — the applied ledger must be a prefix of what you push; a mismatched id (rewritten history) is rejected with `400` (`HistoryDiverged`).
+- **Survives restarts** — ledger and schema live in the database, reconstructed on open.
+
+v1 ops cover adding fields, adding/dropping indexes and creating/dropping models; dropping a field, renaming, or reordering fields is rejected with `400`. Normally the CLI does this, not raw curl:
 
 ```bash
 npx marcidb migrate push myapp --url http://localhost:3000
 ```
 
-### Resetting a database — `$init`
+### Bootstrapping from a schema — `$sync`
 
-`POST /:db/$init` is a destructive alternative to `$migrate` for when you can't run the CLI (CI, a shell script, a bare HTTP client). The body is the same **schema text**, but instead of diffing, it **drops all data and indexes and recreates the database from scratch** to match the schema exactly. Because nothing is preserved it accepts any schema — including changes `$migrate` rejects (type changes, renames, reordering, dropped fields). The database is created if absent.
+`POST /:db/$sync` is an **HTTP-only** escape hatch for when you have no migration files (a fresh setup, CI, a bare HTTP client). The body is the **schema text** (the contents of `schema.marci`), not JSON. Instead of replaying migrations, the server diffs its stored schema against the pushed one and applies the difference, creating the database if absent.
 
 ```bash
-curl -X POST http://localhost:3000/myapp/\$init --data-binary @schema.marci
+curl -X POST http://localhost:3000/myapp/\$sync --data-binary @schema.marci
 ```
 
-Use `$migrate` to evolve a database while keeping its data; use `$init` to (re)create one from a schema when the data is disposable.
+It is deliberately **not** in the CLI — it doesn't touch the migration ledger, so mixing it with `$migrate` on one database desyncs the bookkeeping, and a schema that omits a model diffs to a `drop model` (data loss). Use it only for databases that aren't managed by migration files. It accepts the same changes as `$migrate` and rejects the same ones with `400`.
 
 ## Transactions
 
@@ -151,7 +163,7 @@ Errors are returned as plain-text messages with a status code:
 
 | Status | When |
 |---|---|
-| `400 Bad Request` | invalid JSON, unknown field, malformed query/insert/update, bad `:id` syntax, missing aggregate keys, unsupported migration |
+| `400 Bad Request` | invalid JSON, unknown field, malformed query/insert/update, bad `:id` syntax, missing aggregate keys, unsupported or diverged migration |
 | `404 Not Found` | unknown database, model or action |
 | `500 Internal Server Error` | internal failures |
 
