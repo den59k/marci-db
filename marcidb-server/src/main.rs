@@ -112,10 +112,13 @@ async fn handle_inner(
 
 #[tokio::main]
 async fn main() {
-    fs::create_dir_all("./data").await.unwrap();
-    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(PathBuf::from("./data")));
+    let data_dir = std::env::var("MARCI_DATA").unwrap_or_else(|_| "./data".to_string());
+    fs::create_dir_all(&data_dir).await.unwrap();
+    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(PathBuf::from(data_dir)));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    // 0.0.0.0 — чтобы сервер был доступен снаружи контейнера; порт из env PORT
+    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await.unwrap();
 
     println!("MarciDB is running on http://{}", addr);

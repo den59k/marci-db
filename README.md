@@ -23,7 +23,6 @@ const posts = await db.post.findMany({
   $order: { views: "desc" },
   $limit: 20,
 })
-// тип результата выведен из запроса — без кодогенерации моделей вручную
 ```
 
 ## Features
@@ -33,29 +32,58 @@ const posts = await db.post.findMany({
 - **Secondary indexes** with a query planner: range scans, `$order` by index, keyset pagination (`$cursor`)
 - **Aggregations**: `count` / `$sum` / `$avg` / `$min` / `$max`, including aggregates over relations inside a select (`posts: { $count: true }` — counted by index keys, without reading rows)
 - **Atomic batch transactions**: `db.$transaction([...])` applies several operations as all-or-nothing, with `ref("0.id")` to feed a generated id into later operations
+- **Declarative migrations**: edit the schema, `marcidb generate` diffs it into a migration file; the server applies it on push — adding fields and indexes without rewriting existing rows
 - **Compact binary row format** with zero-copy field access — filters and aggregates read only the bytes they need
 
 ## Quick start
 
-1. Create `schema.marci` in your project root
-2. Generate the typed client:
+1. Create `schema.marci` in your project root.
+
+2. Generate the typed client **and** a migration file from the schema:
 
 ```bash
 npm install marcidb-client
 npx marcidb generate
 ```
 
-3. Start the server (reads `schema.marci`, stores data in `./data`, listens on `127.0.0.1:3000`):
+3. Run the server. It is schema-agnostic and hosts multiple databases — the schema is applied via migrations, not read from a file:
 
 ```bash
-cargo run -p marcidb-server --release
+docker run -d -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
+# or, from the repo: cargo run -p marcidb-server --release
 ```
 
-4. Connect:
+4. Push your schema to a database (created on first push):
+
+```bash
+npx marcidb migrate push myapp
+```
+
+5. Connect — the database name is part of the URL:
 
 ```ts
 import { marcidb } from "marcidb-client"
-const db = marcidb("http://localhost:3000")
+const db = marcidb("http://localhost:3000/myapp")
+
+const posts = await db.post.findMany({ title: true, author: { name: true } })
+```
+
+## Docker
+
+The server is published as [`den59k/marcidb-server`](https://hub.docker.com/r/den59k/marcidb-server):
+
+```bash
+docker run -d --name marcidb -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
+```
+
+- listens on `0.0.0.0:$PORT` (default `3000`)
+- stores databases under `/app/data` — mount a volume to persist them across container recreation
+- schema-agnostic and multi-database; a database is created on its first migration push:
+
+```bash
+npx marcidb migrate push myapp --url http://localhost:3000
+# equivalently, over raw HTTP:
+curl -X POST http://localhost:3000/myapp/\$migrate --data-binary @schema.marci
 ```
 
 ## Documentation
@@ -67,7 +95,7 @@ const db = marcidb("http://localhost:3000")
 
 ## Status
 
-Experimental. The storage format is not stabilized yet and there is no schema migration mechanism — do not use for data you cannot regenerate.
+Experimental. The storage format is not stabilized yet — do not use for data you cannot regenerate. Migrations cover adding fields, adding/dropping indexes and creating/dropping models; dropping fields, renames and field reordering are not supported yet.
 
 ## License
 

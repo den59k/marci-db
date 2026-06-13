@@ -1,0 +1,7 @@
+target/
+.git/
+data/
+**/node_modules/
+packages/
+docs/
+*.md

@@ -194,10 +194,11 @@ Reach for it when several **independent** writes must be atomic (e.g. a balance 
 ```ts
 import { marcidb } from "marcidb-client"
 
-const db = marcidb("http://localhost:3000")
+// the database name is the last path segment of the URL
+const db = marcidb("http://localhost:3000/myapp")
 ```
 
-The client is generated from `schema.marci` by `npx marcidb generate` and talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same set of methods:
+`npx marcidb generate` produces both the typed client (from `schema.marci`) and a migration file; `npx marcidb migrate push myapp` applies the schema to the server, creating the database on first push. The client talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same set of methods:
 
 ```ts
 db.<model>.findMany(query)        // Promise<Result[]>
