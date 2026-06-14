@@ -1,12 +1,12 @@
-//! Migration diff between two materialized schemas: `diff` (compute ops), `reconcile` (carry slots +
-//! enum ids from history, canonicalize field order), and `serialize_migration` (render self-contained
-//! `.march` actions). Operates only on the flat `Schema`; the physical apply lives in the engine.
+//! Migration diff between two materialized schemas: `diff` (compute ops) and `reconcile` (carry slots +
+//! enum ids from history, canonicalize field order). Operates only on the flat `Schema`; the physical
+//! apply lives in the engine, and rendering ops to `.march` text lives in `march.rs`.
 
 use std::collections::HashMap;
 
 use marcidb::{
     Attribute, Entity, EnumInfo, Field, FieldDefault, FieldExistsCondition, FieldLocation, FieldType,
-    MigrateError, MigrateOp, RefBinding, Schema, serialize_field, serialize_type,
+    MigrateError, MigrateOp, RefBinding, Schema, serialize_type,
 };
 
 /// Size of the row "pre-header" (the first Body slot starts at this byte offset)
@@ -348,48 +348,10 @@ fn format_attr(field: &Field) -> Option<String> {
     field.attributes.iter().find_map(|a| if let Attribute::Format(fmt) = a { Some(format!("{:?}", fmt)) } else { None })
 }
 
-// ─────────────────────── migration file (self-contained actions) ───────────────────────
-
-/// Serializes the operations into migration-file text — one action per line.
-pub fn serialize_migration(ops: &[MigrateOp], schema: &Schema) -> String {
-    ops.iter().map(|op| serialize_op(op, schema)).collect::<Vec<_>>().join("\n")
-}
-
-fn serialize_op(op: &MigrateOp, schema: &Schema) -> String {
-    match op {
-        MigrateOp::CreateEntity { name } => format!("create entity {}", name),
-        MigrateOp::DropEntity { name } => format!("drop entity {}", name),
-        MigrateOp::AddField { entity, field } => format!("add field {}.{}", entity, field_spec(schema, entity, field)),
-        MigrateOp::AlterField { entity, field } => format!("alter field {}.{}", entity, field_spec(schema, entity, field)),
-        MigrateOp::DropField { entity, field } => format!("drop field {}.{}", entity, field),
-        MigrateOp::AddIndex { entity, field, unique } => format!("add {} {}.{}", index_kw(*unique), entity, field),
-        MigrateOp::DropIndex { entity, field, unique } => format!("drop {} {}.{}", index_kw(*unique), entity, field),
-    }
-}
-
-fn index_kw(unique: bool) -> &'static str { if unique { "unique" } else { "index" } }
-
-/// Field spec = the snapshot line without the leading name — the name is already in `E.field`
-fn field_spec(schema: &Schema, entity: &str, field: &str) -> String {
-    let e = find_entity(schema, entity);
-    let f = find_field(e, field);
-    let line = serialize_field(schema, e, f);
-    let prefix = format!("{} ", field);
-    format!("{} {}", field, line.strip_prefix(&prefix).unwrap_or(&line))
-}
-
-fn find_entity<'a>(schema: &'a Schema, name: &str) -> &'a Entity {
-    schema.models.iter().find(|m| m.name == name).unwrap_or_else(|| panic!("entity {} not found", name))
-}
-
-fn find_field<'a>(entity: &'a Entity, name: &str) -> &'a Field {
-    entity.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("field {}.{} not found", entity.name, name))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{diff, reconcile, serialize_migration};
-    use marcidb::{FieldLocation, MigrateError, MigrateOp, Schema, evolve, migration_ops, parse_schema, parse_snapshot, serialize_snapshot};
+    use super::{diff, reconcile};
+    use marcidb::{FieldLocation, MigrateError, MigrateOp, Schema, parse_schema};
 
     fn diff_text(old: &str, new: &str) -> Result<Vec<MigrateOp>, MigrateError> {
         diff(&parse_schema(old), &parse_schema(new))
@@ -399,7 +361,6 @@ mod tests {
     fn diff_create_and_drop_entity() {
         let old = "model User {\n  name String\n}";
         let new = "model User {\n  name String\n}\nmodel Post {\n  title String\n}";
-        // a new entity = CreateEntity + an AddField per field (id is inserted first); drop is a single op
         assert_eq!(diff_text(old, new).unwrap(), vec![
             MigrateOp::CreateEntity { name: "Post".into() },
             MigrateOp::AddField { entity: "Post".into(), field: "id".into() },
@@ -520,50 +481,5 @@ mod tests {
 
         reconcile(&mut new, &old);
         assert!(diff(&old, &new).unwrap().is_empty());
-    }
-
-    /// Normalizes snapshot text to canonical form (for comparison)
-    fn canon(snapshot_text: &str) -> String {
-        serialize_snapshot(&parse_snapshot(snapshot_text).unwrap())
-    }
-
-    #[test]
-    fn migration_file_is_self_contained() {
-        let new = parse_schema("model User {\n  name String\n  email String @unique\n}");
-        let file = serialize_migration(&diff(&parse_schema(""), &new).unwrap(), &new);
-
-        assert!(file.contains("create entity User"), "file:\n{}", file);
-        assert!(file.contains("add field User.email String @slot(8) @unique"), "file:\n{}", file);
-        assert!(!file.contains("--- snapshot ---"));
-        assert!(!file.contains('{'), "block syntax is gone:\n{}", file);
-        let ops = migration_ops(&file).unwrap();
-        assert!(ops.contains(&MigrateOp::CreateEntity { name: "User".into() }), "ops: {:?}", ops);
-        assert!(ops.contains(&MigrateOp::AddField { entity: "User".into(), field: "email".into() }), "ops: {:?}", ops);
-    }
-
-    #[test]
-    fn evolve_from_empty_equals_target() {
-        let new = parse_schema("model User {\n  name String\n  email String @unique\n}\nmodel Post {\n  title String\n  author User?\n}");
-        let file = serialize_migration(&diff(&parse_schema(""), &new).unwrap(), &new);
-        let evolved = evolve("", &file).unwrap();
-        assert_eq!(canon(&evolved), serialize_snapshot(&new));
-    }
-
-    #[test]
-    fn evolve_incremental() {
-        let v0 = parse_schema("model User {\n  name String\n}");
-        let m0 = serialize_migration(&diff(&parse_schema(""), &v0).unwrap(), &v0);
-        let snap0 = evolve("", &m0).unwrap();
-
-        let mut v1 = parse_schema("model User {\n  name String\n  email String @unique\n  age UInt\n}");
-        reconcile(&mut v1, &parse_snapshot(&snap0).unwrap());
-        let prev = parse_snapshot(&snap0).unwrap();
-        let m1 = serialize_migration(&diff(&prev, &v1).unwrap(), &v1);
-
-        assert!(m1.contains("add field User.email"), "m1:\n{}", m1);
-        assert!(m1.contains("add index User.email") || m1.contains("add unique User.email"), "m1:\n{}", m1);
-
-        let snap1 = evolve(&snap0, &m1).unwrap();
-        assert_eq!(canon(&snap1), serialize_snapshot(&v1));
     }
 }

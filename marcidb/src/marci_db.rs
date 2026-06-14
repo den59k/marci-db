@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, evolve, migration_ops}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -46,8 +46,8 @@ impl MarciDB {
   }
 
   /// Opens a DB, reconstructing the schema from `__marci_meta__` (the state left after migrations).
-  /// For a new/empty DB the schema is empty — models appear after the first migration ([`MarciDB::apply_migration`]
-  /// / `$sync`). The reconstructed state survives a restart
+  /// For a new/empty DB the schema is empty — models appear after the first migration ([`MarciDB::commit_schema`],
+  /// driven by `$migrate` / `$sync`). The reconstructed state survives a restart
   pub fn open(path: &str) -> MarciDB {
     let db = canopydb::Database::new(path).unwrap();
 
@@ -151,24 +151,12 @@ impl MarciDB {
     Ok(is_delete)
   }
 
-  /// Imperative migration (`$migrate`): takes the text of a migration file (self-contained actions),
-  /// applies it onto its current state via [`evolve`] and applies it physically.
-  ///
-  /// A dumb executor: NO ledger and no decisions about "what to apply" — whatever was sent is executed.
-  /// Which actions exactly to send (the tail of unapplied ones) is decided by the `marci-migrate` client,
-  /// checking against `GET /:db/$snapshot`. An incompatible action (creating an existing entity, etc.) → error,
-  /// the transaction is rolled back.
-  pub fn apply_migration(&mut self, migration_text: &str) -> Result<(), MigrateApplyError> {
-    let cur_text = serialize_snapshot(&self.schema);
-    let new_text = evolve(&cur_text, migration_text)?;       // actions → new snapshot text
-    let new_schema = parse_snapshot(&new_text)?;             // → resolved schema
-    let ops = migration_ops(migration_text)?;                // physical operations from the actions
-    self.commit_schema(new_schema, &ops)
-  }
-
   /// Atomically applies ops to the DB, writes the new snapshot+version to `__marci_meta__` and switches
   /// the in-memory schema. On error the transaction is rolled back and state is unchanged.
-  /// Public so the declarative `$sync` path (compute ops in the authoring layer, then commit) can reuse it.
+  ///
+  /// This is the engine's single migration entry point. The caller (server `$sync`/`$migrate`, or the
+  /// `marcidb-schema` authoring layer) computes `(new_schema, ops)` — by diffing a `.marci` schema, or by
+  /// `evolve`-ing a `.march` action file — and hands the result here to apply + persist.
   pub fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::migrate::MigrateOp]) -> Result<(), MigrateApplyError> {
     let tx = self.db.begin_write().unwrap();
     apply(&tx, &self.schema, &new_schema, ops)?;

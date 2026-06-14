@@ -1,7 +1,8 @@
-//! Migration RUNTIME on top of the materialized snapshot (see [`crate::snapshot`]): the operation set
-//! (`MigrateOp`), the physical `apply` against the DB, and the file/snapshot text manipulation (`evolve`,
-//! `migration_ops`) used by the dumb `$migrate` path. The "smart" side — computing a diff between two
-//! schemas and rendering migration files — lives in the `marcidb-schema` crate (the authoring layer).
+//! Migration RUNTIME: the operation set (`MigrateOp`) and the physical `apply` of those ops against the DB
+//! (create/drop entity trees, build/drop index trees). This is all the engine needs — given a target
+//! `Schema` and a list of ops, make the storage match. Everything "smart" (computing the ops via `diff`,
+//! and the `.march` file/snapshot text format via `serialize_migration`/`evolve`/`migration_ops`) lives in
+//! the `marcidb-schema` crate (the authoring layer).
 
 use canopydb::WriteTransaction;
 
@@ -69,10 +70,8 @@ pub enum MigrateApplyError {
   Unsupported(&'static str),
   /// `add unique` found duplicates in existing data
   UniqueViolation { field: String },
-  /// Error computing the diff
+  /// Error computing the diff (carried from the authoring layer)
   Diff(MigrateError),
-  /// The supplied migration history diverges from the applied one (ledger): the applied part must be a prefix
-  HistoryDiverged { position: usize, applied: String, incoming: String },
   /// Invalid snapshot/schema
   Schema(SchemaError),
   Storage(StorageError),
@@ -84,8 +83,6 @@ impl std::fmt::Display for MigrateApplyError {
       MigrateApplyError::Unsupported(s) => write!(f, "{}", s),
       MigrateApplyError::UniqueViolation { field } => write!(f, "unique violation on {} in existing data", field),
       MigrateApplyError::Diff(e) => write!(f, "{}", e),
-      MigrateApplyError::HistoryDiverged { position, applied, incoming } =>
-        write!(f, "migration history diverged at #{}: server applied \"{}\", got \"{}\"", position, applied, incoming),
       MigrateApplyError::Schema(e) => write!(f, "{}", e),
       MigrateApplyError::Storage(e) => write!(f, "{:?}", e),
     }
@@ -189,206 +186,4 @@ fn drop_index(tx: &WriteTransaction, old: &Schema, entity: &str, field_name: &st
     tx.delete_tree(index.tree_name())?;
   }
   Ok(())
-}
-
-// ─────────────────────── migration file (self-contained actions) ───────────────────────
-//
-// A migration file is a list of SELF-CONTAINED actions, ONE PER LINE: each carries its definition (a
-// snapshot line), so the whole snapshot isn't put into the file. `create entity X` is a bare line — the
-// entity's fields follow as `add field X.f` actions, so a field has a single definition surface everywhere.
-// The developer sees the CHANGES (this is what gets reviewed) and looks at the full schema in schema.marci.
-// The server is dumb: `evolve` applies the actions to its current snapshot → new snapshot → parse_snapshot;
-// the physics is determined by the actions themselves (create entity/add field/add index/...).
-// Migration FILES are rendered by `serialize_migration` in the `marcidb-schema` crate (the authoring layer).
-
-/// An action from a migration file. Field actions carry the definition text (snapshot line) for `evolve`
-#[derive(Debug, Clone)]
-enum FileOp {
-  CreateEntity { name: String },
-  DropEntity { name: String },
-  AddField { entity: String, field: String, line: String },
-  AlterField { entity: String, field: String, line: String },
-  DropField { entity: String, field: String },
-  AddIndex { entity: String, field: String, unique: bool },
-  DropIndex { entity: String, field: String, unique: bool },
-}
-
-impl FileOp {
-  /// The physical operation (without definitions) for `apply`
-  fn to_migrate_op(&self) -> MigrateOp {
-    match self {
-      FileOp::CreateEntity { name } => MigrateOp::CreateEntity { name: name.clone() },
-      FileOp::DropEntity { name } => MigrateOp::DropEntity { name: name.clone() },
-      FileOp::AddField { entity, field, .. } => MigrateOp::AddField { entity: entity.clone(), field: field.clone() },
-      FileOp::AlterField { entity, field, .. } => MigrateOp::AlterField { entity: entity.clone(), field: field.clone() },
-      FileOp::DropField { entity, field } => MigrateOp::DropField { entity: entity.clone(), field: field.clone() },
-      FileOp::AddIndex { entity, field, unique } => MigrateOp::AddIndex { entity: entity.clone(), field: field.clone(), unique: *unique },
-      FileOp::DropIndex { entity, field, unique } => MigrateOp::DropIndex { entity: entity.clone(), field: field.clone(), unique: *unique },
-    }
-  }
-}
-
-/// The physical operations from migration-file text (for `apply`)
-pub fn migration_ops(text: &str) -> Result<Vec<MigrateOp>, SchemaError> {
-  Ok(parse_migration(text)?.iter().map(FileOp::to_migrate_op).collect())
-}
-
-/// Applies migration actions to a snapshot → new snapshot text. Used both by the server (apply)
-/// and by the client `marci-migrate` (computing prev / planning). Actions are self-contained, so
-/// slots/definitions are taken from them; the result is a snapshot that `parse_snapshot` parses next.
-pub fn evolve(old_snapshot_text: &str, migration_text: &str) -> Result<String, SchemaError> {
-  let mut blocks = snapshot_blocks(old_snapshot_text);
-  for op in parse_migration(migration_text)? {
-    apply_file_op(&mut blocks, op)?;
-  }
-  Ok(emit_blocks(&blocks))
-}
-
-fn apply_file_op(blocks: &mut Vec<(String, Vec<String>)>, op: FileOp) -> Result<(), SchemaError> {
-  let find = |blocks: &mut Vec<(String, Vec<String>)>, name: &str| -> Option<usize> {
-    blocks.iter().position(|(n, _)| n == name)
-  };
-  match op {
-    FileOp::CreateEntity { name } => {
-      if find(blocks, &name).is_some() {
-        return Err(SchemaError(format!("evolve: entity {} already exists", name)));
-      }
-      blocks.push((name, vec![]));   // empty entity; fields arrive as subsequent AddField actions
-    }
-    FileOp::DropEntity { name } => { blocks.retain(|(n, _)| n != &name); }
-    FileOp::AddField { entity, field, line } => {
-      let i = find(blocks, &entity).ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
-      if blocks[i].1.iter().any(|l| field_name_of(l) == field) {
-        return Err(SchemaError(format!("evolve: field {}.{} already exists", entity, field)));
-      }
-      blocks[i].1.push(line);
-    }
-    FileOp::AlterField { entity, field, line } => {
-      let i = find(blocks, &entity).ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
-      let f = blocks[i].1.iter_mut().find(|l| field_name_of(l) == field)
-        .ok_or_else(|| SchemaError(format!("evolve: unknown field {}.{}", entity, field)))?;
-      *f = line;
-    }
-    FileOp::DropField { entity, field } => {
-      let i = find(blocks, &entity).ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
-      blocks[i].1.retain(|l| field_name_of(l) != field);
-    }
-    FileOp::AddIndex { entity, field, unique } => set_field_index(blocks, &entity, &field, Some(unique))?,
-    FileOp::DropIndex { entity, field, .. } => set_field_index(blocks, &entity, &field, None)?,
-  }
-  Ok(())
-}
-
-/// Changes the index attribute in a field line (None — remove; Some(true) — `@unique`; Some(false) — `@index`)
-fn set_field_index(blocks: &mut [(String, Vec<String>)], entity: &str, field: &str, idx: Option<bool>) -> Result<(), SchemaError> {
-  let block = blocks.iter_mut().find(|(n, _)| n == entity)
-    .ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
-  let line = block.1.iter_mut().find(|l| field_name_of(l) == field)
-    .ok_or_else(|| SchemaError(format!("evolve: unknown field {}.{}", entity, field)))?;
-  let mut toks: Vec<&str> = line.split_whitespace().filter(|t| *t != "@index" && *t != "@unique").collect();
-  match idx {
-    Some(true) => toks.push("@unique"),
-    Some(false) => toks.push("@index"),
-    None => {}
-  }
-  *line = toks.join(" ");
-  Ok(())
-}
-
-fn field_name_of(line: &str) -> &str {
-  line.split_whitespace().next().unwrap_or("")
-}
-
-/// Splits snapshot text into blocks `(entity name, field lines)`, preserving order.
-/// The snapshot is flat (fields are single-line), so the parser is simple, with no brace balancing.
-fn snapshot_blocks(text: &str) -> Vec<(String, Vec<String>)> {
-  let mut blocks = vec![];
-  let mut lines = text.lines();
-  while let Some(line) = lines.next() {
-    let t = line.trim();
-    let Some(rest) = t.strip_prefix("Entity ") else { continue };
-    let name = rest.trim_end_matches('{').trim().to_string();
-    let mut fields = vec![];
-    for l in lines.by_ref() {
-      let lt = l.trim();
-      if lt == "}" { break; }
-      if lt.is_empty() { continue; }
-      fields.push(lt.to_string());
-    }
-    blocks.push((name, fields));
-  }
-  blocks
-}
-
-fn emit_blocks(blocks: &[(String, Vec<String>)]) -> String {
-  let mut out = String::new();
-  for (i, (name, fields)) in blocks.iter().enumerate() {
-    if i > 0 { out.push('\n'); }
-    out.push_str(&format!("Entity {} {{\n", name));
-    for f in fields { out.push_str(&format!("  {}\n", f)); }
-    out.push_str("}\n");
-  }
-  out
-}
-
-/// Parses migration-file text into actions — strictly one action per line.
-fn parse_migration(text: &str) -> Result<Vec<FileOp>, SchemaError> {
-  let mut ops = vec![];
-  for raw in text.lines() {
-    let line = raw.trim();
-    if line.is_empty() || line.starts_with('#') || line.starts_with("//") { continue; }
-    ops.push(parse_line_op(line)?);
-  }
-  Ok(ops)
-}
-
-fn parse_line_op(line: &str) -> Result<FileOp, SchemaError> {
-  if let Some(rest) = line.strip_prefix("create entity ") {
-    return Ok(FileOp::CreateEntity { name: rest.trim().to_string() });
-  }
-  if let Some(rest) = line.strip_prefix("drop entity ") {
-    return Ok(FileOp::DropEntity { name: rest.trim().to_string() });
-  }
-  if let Some(rest) = line.strip_prefix("add field ") {
-    let (entity, field, fline) = parse_field_action(rest)?;
-    return Ok(FileOp::AddField { entity, field, line: fline });
-  }
-  if let Some(rest) = line.strip_prefix("alter field ") {
-    let (entity, field, fline) = parse_field_action(rest)?;
-    return Ok(FileOp::AlterField { entity, field, line: fline });
-  }
-  if let Some(rest) = line.strip_prefix("drop field ") {
-    let (entity, field) = split_path(rest.trim())?;
-    return Ok(FileOp::DropField { entity, field });
-  }
-  for (kw, unique) in [("add unique ", true), ("add index ", false)] {
-    if let Some(rest) = line.strip_prefix(kw) {
-      let (entity, field) = split_path(rest.trim())?;
-      return Ok(FileOp::AddIndex { entity, field, unique });
-    }
-  }
-  for (kw, unique) in [("drop unique ", true), ("drop index ", false)] {
-    if let Some(rest) = line.strip_prefix(kw) {
-      let (entity, field) = split_path(rest.trim())?;
-      return Ok(FileOp::DropIndex { entity, field, unique });
-    }
-  }
-  Err(SchemaError(format!("unknown migration action: {}", line)))
-}
-
-/// `Entity.field String @slot(8) @unique` → (entity, field, "field String @slot(8) @unique")
-fn parse_field_action(rest: &str) -> Result<(String, String, String), SchemaError> {
-  let rest = rest.trim();
-  let (path, spec) = rest.split_once(char::is_whitespace)
-    .ok_or_else(|| SchemaError(format!("expected Entity.field <spec> in: \"{}\"", rest)))?;
-  let (entity, field) = split_path(path)?;
-  let line = format!("{} {}", field, spec.trim());
-  Ok((entity, field, line))
-}
-
-/// `Entity.field` → ("Entity", "field"). The entity name may contain dots (`User.info`) — split on the last one
-fn split_path(path: &str) -> Result<(String, String), SchemaError> {
-  let (entity, field) = path.rsplit_once('.')
-    .ok_or_else(|| SchemaError(format!("expected Entity.field in: \"{}\"", path)))?;
-  Ok((entity.to_string(), field.to_string()))
 }

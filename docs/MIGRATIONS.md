@@ -6,13 +6,17 @@ and the CLI.
 
 **Crate layering.** The work is split between the runtime engine and the authoring layer:
 
-- **`marcidb`** (engine) — loads the schema from the snapshot, runs CRUD, and *applies* migrations:
-  `snapshot.rs` (`serialize_snapshot`/`parse_snapshot`) and `migrate.rs` (`apply`, `evolve`,
-  `migration_ops`, the dumb `$migrate` executor). It only ever deals with the materialized snapshot.
-- **`marcidb-schema`** (authoring) — the "smart" build-time tooling: `diff`, `reconcile`,
-  `serialize_migration`. Used by the CLI (`marcidb-migrate`) and by the server for `$sync`.
+- **`marcidb`** (engine) — loads the schema from the snapshot, runs CRUD, and *applies* a precomputed
+  migration: `snapshot.rs` (`serialize_snapshot`/`parse_snapshot`) + `migrate.rs` (`apply` — the physical
+  create/drop trees + build/drop indexes — and the `MigrateOp`/error types). The single entry point is
+  `MarciDB::commit_schema(new_schema, ops)`. The engine only ever deals with the materialized snapshot.
+- **`marcidb-schema`** (authoring) — everything "smart": `diff`/`reconcile` (schema → ops, in `diff.rs`)
+  and the `.march` file format `serialize_migration`/`evolve`/`migration_ops` (in `march.rs`). Used by the
+  CLI (`marcidb-migrate`) and by the server (`$sync` and `$migrate`).
 
-(The `.marci` DSL parser `parse_schema` lives in `marcidb` — the engine's own tests depend on it.)
+The engine has **no `migrate_to`/`apply_migration` methods** — both frontends are orchestrated in the
+server handler: compute `(new_schema, ops)` via `marcidb-schema`, then call `commit_schema`. (The `.marci`
+DSL parser `parse_schema` does live in `marcidb` — the engine's own tests depend on it.)
 
 ## The materialized snapshot
 
@@ -234,9 +238,9 @@ Both wrap the same engine. The split is **smart `$sync` vs dumb `$migrate`**: th
   (`marcidb::try_parse_schema`), reconciles/diffs against its stored snapshot (`marcidb-schema`), and
   commits (`MarciDB::commit_schema`). For databases not managed by migration files (CI, direct HTTP). The
   engine has no declarative method of its own — the "smartness" lives in the server handler + authoring crate.
-- **`POST /:db/$migrate`** (imperative, dumb) — body is the text of migration actions. The server lays them
-  onto its current state and applies — **no ledger**, no deciding what to skip. `MarciDB::apply_migration`.
-  Coordination lives in the client:
+- **`POST /:db/$migrate`** (imperative, dumb) — body is the text of migration actions. The server handler
+  `evolve`s them onto its current snapshot (`marcidb-schema`), parses the result, extracts the ops, and
+  `commit_schema`s — **no ledger**, no deciding what to skip. Coordination lives in the client:
   - **`GET /:db/$snapshot`** returns the server's current materialized snapshot.
   - **`marci-migrate plan`** replays the local `.march` history from empty until a step matches the
     server's snapshot, then emits the unapplied tail. `marcidb migrate push` sends that tail to `$migrate`;

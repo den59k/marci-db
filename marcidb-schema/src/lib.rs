@@ -7,5 +7,7 @@
 //! depend on it, and a dev-dependency cycle can't share types across the `--test` boundary.
 
 mod diff;
+mod march;
 
-pub use crate::diff::{diff, reconcile, serialize_migration};
+pub use crate::diff::{diff, reconcile};
+pub use crate::march::{evolve, migration_ops, serialize_migration};

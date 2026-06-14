@@ -60,7 +60,18 @@ pub async fn handle_migrate(req: Request<hyper::body::Incoming>, ctx: Arc<Server
     blocking(move || {
         let db = ctx.get_db(&db_name, true)?; // create-if-absent
         let mut db = db.write().unwrap_or_else(|e| e.into_inner());
-        db.apply_migration(&migration_text).map_err(|e| match e {
+
+        // Dumb `$migrate`: lay the self-contained actions onto the current snapshot (`evolve`), parse the
+        // result, extract the physical ops, and commit. The engine just applies — the `.march` text format
+        // lives in `marcidb-schema`.
+        let cur = marcidb::serialize_snapshot(&db.schema);
+        let new_text = marcidb_schema::evolve(&cur, &migration_text)
+            .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        let new_schema = marcidb::parse_snapshot(&new_text)
+            .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        let ops = marcidb_schema::migration_ops(&migration_text)
+            .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        db.commit_schema(new_schema, &ops).map_err(|e| match e {
             MigrateApplyError::Storage(_) => ApiError::Internal(format!("{:?}", e)),
             _ => ApiError::BadRequest(format!("{}", e)),
         })?;

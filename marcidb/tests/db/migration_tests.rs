@@ -1,5 +1,5 @@
-use marcidb::{MarciDB, MigrateApplyError, parse_schema, try_parse_schema};
-use marcidb_schema::{diff, reconcile, serialize_migration};
+use marcidb::{MarciDB, MigrateApplyError, parse_schema, parse_snapshot, serialize_snapshot, try_parse_schema};
+use marcidb_schema::{diff, evolve, migration_ops, reconcile, serialize_migration};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -12,6 +12,17 @@ fn migrate_to(db: &mut MarciDB, schema_text: &str) -> Result<(), MigrateApplyErr
   let mut new_schema = try_parse_schema(schema_text)?;
   reconcile(&mut new_schema, &db.schema);
   let ops = diff(&db.schema, &new_schema)?;
+  db.commit_schema(new_schema, &ops)
+}
+
+/// Imperative `$migrate` against a live DB: lay the `.march` actions onto the current snapshot (`evolve`),
+/// parse the result, extract the ops, commit. This is what the server's `$migrate` does; the engine no
+/// longer has an `apply_migration` method (the `.march` text format moved to `marcidb-schema`).
+fn apply_migration(db: &mut MarciDB, migration_text: &str) -> Result<(), MigrateApplyError> {
+  let cur = serialize_snapshot(&db.schema);
+  let new_text = evolve(&cur, migration_text)?;
+  let new_schema = parse_snapshot(&new_text)?;
+  let ops = migration_ops(migration_text)?;
   db.commit_schema(new_schema, &ops)
 }
 
@@ -155,10 +166,10 @@ fn migrate_apply_sequential() {
 
   let v0 = "model User {\n  name String\n}";
   let v1 = "model User {\n  name String\n  age UInt\n}";
-  db.apply_migration(&mig("", v0)).unwrap();
+  apply_migration(&mut db,&mig("", v0)).unwrap();
   insert_data(&db, "User", json!({ "name": "Alice" }));
 
-  db.apply_migration(&mig(v0, v1)).unwrap();   // only adding age
+  apply_migration(&mut db,&mig(v0, v1)).unwrap();   // only adding age
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
   insert_data(&db, "User", json!({ "name": "Bob", "age": 5 }));
   assert_eq!(
@@ -173,8 +184,8 @@ fn migrate_reapply_fails_no_ledger() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
   let m0 = mig("", "model User {\n  name String\n}");
-  db.apply_migration(&m0).unwrap();
-  assert!(db.apply_migration(&m0).is_err()); // create entity User again → error
+  apply_migration(&mut db,&m0).unwrap();
+  assert!(apply_migration(&mut db,&m0).is_err()); // create entity User again → error
 }
 
 /// State after an imperative migration survives a restart (snapshot in __marci_meta__)
@@ -184,7 +195,7 @@ fn migrate_imperative_persists_across_reopen() {
   let path = dir.path().to_str().unwrap().to_string();
   {
     let mut db = MarciDB::open(&path);
-    db.apply_migration(&mig("", "model User {\n  name String\n}")).unwrap();
+    apply_migration(&mut db,&mig("", "model User {\n  name String\n}")).unwrap();
     insert_data(&db, "User", json!({ "name": "Alice" }));
   }
   let db = MarciDB::open(&path);
@@ -207,9 +218,9 @@ fn apply_migration_rejects_invalid() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
   // unknown action
-  assert!(db.apply_migration("totally bogus line").is_err());
+  assert!(apply_migration(&mut db,"totally bogus line").is_err());
   // actions parse fine, but the field references an unknown model — caught during name resolution
-  assert!(db.apply_migration("create entity M\nadd field M.ref Nope @slot(4)").is_err());
+  assert!(apply_migration(&mut db,"create entity M\nadd field M.ref Nope @slot(4)").is_err());
 }
 
 /// Enum end-to-end via the imperative path ($migrate): self-contained actions with the enum baked in
@@ -219,7 +230,7 @@ fn migrate_enum_end_to_end_via_mig() {
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
   let schema = "enum ChatType {\n  direct {\n    uniqueId String\n  }\n  group {\n    name String\n  }\n}\n\nmodel Chat {\n  type ChatType\n}";
-  db.apply_migration(&mig("", schema)).unwrap();
+  apply_migration(&mut db,&mig("", schema)).unwrap();
 
   insert_data(&db, "Chat", json!({ "type": "group", "name": "General" }));
   assert_eq!(
