@@ -51,6 +51,7 @@ type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
 // Module-index search (@custom): $near/$search hand a raw payload to the field's index provider.
 type VectorSearch = { vector: number[], k?: number, threshold?: number }      // @custom(vector, …)
+type FullTextSearch = string | { query: string, limit?: number }             // @custom(fulltext, …)
 type CustomSearch = Record<string, any>                                       // other providers
 type CustomSearchValue<P> = { "$near": P } | { "$search": P }
 

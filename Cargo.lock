@@ -599,6 +599,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98c23545df7ecf1b16c303910a69b079e8e251d60f7dd2cc9b4177f2afaf1746"
 
 [[package]]
+name = "marci_fulltext_index"
+version = "0.1.0"
+dependencies = [
+ "marcidb",
+ "rust-stemmers",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "marci_vector"
 version = "0.1.0"
 dependencies = [
@@ -652,6 +662,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "marci_fulltext_index",
  "marci_vector_index",
  "marcidb",
  "marcidb-schema",
@@ -1018,6 +1029,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "rust-stemmers"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
+dependencies = [
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]

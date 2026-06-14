@@ -59,6 +59,8 @@ fn build_providers() -> Arc<ProviderRegistry> {
     let mut reg = ProviderRegistry::new();
     #[cfg(feature = "vector")]
     reg.register(Box::new(marci_vector_index::VectorIndexProvider::new()));
+    #[cfg(feature = "fulltext")]
+    reg.register(Box::new(marci_fulltext_index::FullTextProvider::new()));
     Arc::new(reg)
 }
 

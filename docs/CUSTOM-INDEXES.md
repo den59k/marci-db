@@ -102,14 +102,34 @@ the default build stays dependency-light. The HTTP surface is generic — no new
 - `POST /:db/:model/findMany` with `{ "$where": { "<field>": { "$near": <payload> } } }` — ranked search;
   the `<payload>` is handed verbatim to your provider's `search`.
 
-## The vector module (reference)
+## Bundled modules
 
-`marci_vector_index::VectorIndexProvider` (`name = "vector"`) indexes a `Float[N]` field.
+### Vector — `marci_vector_index::VectorIndexProvider` (`name = "vector"`)
+
+Indexes a `Float[N]` field for approximate nearest-neighbour search.
 
 - Args: `euclidean` (default) or `cosine` (cosine L2-normalizes points at index and query time).
 - `$near` payload: `{ "vector": [..N floats..], "k": 10, "threshold": 0.0 }`.
-- Enable in the server with `cargo run -p marcidb-server --features vector` (pulls in `marci_vector`, which
-  needs the nightly `portable_simd` feature).
+- Enable with `cargo run -p marcidb-server --features vector` (pulls in `marci_vector`, which needs the
+  nightly `portable_simd` feature).
+
+### Full-text — `marci_fulltext_index::FullTextProvider` (`name = "fulltext"`)
+
+Indexes a `String` field for ranked text search (inverted index + tf·idf), with Snowball stemming.
+
+- Args (language): `multi` (default), `english`, or `russian`. `multi` stems each token by script —
+  Cyrillic → Russian, otherwise English — so one field handles mixed Russian/English text.
+- `$search`/`$near` payload: a plain string `"quick brown fox"`, or `{ "query": "...", "limit": 50 }`.
+- OR semantics over query terms; results ranked best-first; the query's `$limit` further trims them.
+- Enable with `cargo run -p marcidb-server --features fulltext` (stable toolchain — no nightly).
+
+```
+body String @custom(fulltext)            # auto RU+EN
+note String @custom(fulltext, russian)   # force Russian stemming
+```
+
+It is also the worked example of a non-vector module: a `String` field, batch-reindexed, with the provider
+owning its own key layout (posting list + a doc-count stats key, multiplexed by a tag byte in one tree).
 
 ## v1 limitations
 
@@ -119,3 +139,5 @@ the default build stays dependency-light. The HTTP surface is generic — no new
   `$order` (results stay in rank order) and is rejected inside `$or`/`$not`.
 - One index spans a single field; a multi-field index (e.g. full-text over title+body) needs a row-level
   hook and is a later extension.
+- The full-text module has no stop-word list (common words are down-weighted by idf instead) and stems via
+  Snowball (English + Russian); other languages / analyzers are straightforward additions.

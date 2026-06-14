@@ -13,8 +13,12 @@ marcidb = { path = "../marcidb" }
 marcidb-schema = { path = "../marcidb-schema" }
 # Vector index module — opt-in (pulls in `marci_vector`, which needs nightly portable_simd).
 marci_vector_index = { path = "../marci-vector-index", optional = true }
+# Full-text search module — opt-in (stable toolchain).
+marci_fulltext_index = { path = "../marci-fulltext-index", optional = true }
 chrono = "0.4.42"
 
 [features]
 # Enable `@custom(vector, …)` indexes: `cargo run -p marcidb-server --features vector`
 vector = ["dep:marci_vector_index"]
+# Enable `@custom(fulltext, …)` indexes: `cargo run -p marcidb-server --features fulltext`
+fulltext = ["dep:marci_fulltext_index"]

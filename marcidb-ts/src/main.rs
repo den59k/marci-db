@@ -304,6 +304,7 @@ fn get_custom_search_str(field: &Field) -> Option<String> {
   })?;
   let payload = match name {
     "vector" => "VectorSearch",
+    "fulltext" => "FullTextSearch",
     _ => "CustomSearch",
   };
   Some(format!(" | CustomSearchValue<{}>", payload))

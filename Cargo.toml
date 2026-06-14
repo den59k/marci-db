@@ -5,6 +5,7 @@ members = [
     "marcidb",
     "marci-vector",
     "marci-vector-index",
+    "marci-fulltext-index",
     "marcidb-schema",
     "marcidb-server",
     "marcidb-ts",
