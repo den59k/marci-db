@@ -87,6 +87,20 @@ pub fn process_delete<'a>(
   }
 
   for ref_to_delete in &action.refs_to_delete {
+    // An owned (CurrentId) collection whose children carry their OWN dependencies/indexes can't be
+    // bulk-removed by prefix — each child must be deleted individually so its cleanup runs. Children
+    // are stored under this row's key prefix. (When a Cascade dependency already deleted them above,
+    // this prefix scan simply finds nothing.)
+    if let RefToDelete::ChildEntity { entity: child, delete_op } = ref_to_delete && !delete_op.is_empty() {
+      let child_ids: Vec<Vec<u8>> = {
+        let tree = tx.get_tree(child.name.as_bytes())?.unwrap();
+        tree.prefix_keys(&id)?.map(|e| Ok(e?.to_vec())).collect::<Result<Vec<_>, canopydb::Error>>()?
+      };
+      for child_id in child_ids.iter() {
+        process_delete(tx, child_id, child, delete_op, schema, None)?;
+      }
+      continue;
+    }
     delete_ref_data(tx, ref_to_delete, id)?;
   }
 
@@ -149,7 +163,22 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
           }
           item_ids
         },
-        RefBinding::IndexTree(_) => return Err(DeleteError::Unsupported("delete dependency with IndexTree reverse-binding and no forward binding is not supported")),
+        RefBinding::IndexTree(tree_name) => {
+          // No forward field to locate index entries directly. The index maps `parent_id ++ item_id`,
+          // so scan it and match the deleted item's id as the suffix; RemoveIndex then deletes
+          // `parent_id ++ id`. Yields nothing for an index that was never maintained (no forward binding),
+          // which is exactly the composite-key case where children are reached by key prefix instead.
+          let id_len = id.len();
+          let index_tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+          let mut item_ids = vec![];
+          for entry in index_tree.iter()? {
+            let (key, _) = entry?;
+            if key.len() >= id_len && &key[key.len() - id_len..] == id {
+              item_ids.push(key[..key.len() - id_len].to_vec());
+            }
+          }
+          item_ids
+        },
       }
     },
   };

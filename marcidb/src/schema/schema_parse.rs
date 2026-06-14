@@ -427,6 +427,14 @@ fn resolve_indexes(model: &mut Entity) -> Result<(), SchemaError> {
                     field.indexes.push(FieldIndex::Value { tree_name: format!("index_{}", field.full_name), unique });
                 }
                 FieldType::Ref(ref_info) => {
+                    // @unique on a relation is the one-to-one constraint; a plain @index on a relation
+                    // is not supported — a relation is indexed through its reverse side, not a value tree.
+                    if !unique {
+                        return Err(SchemaError(format!(
+                            "@index on relation field '{}' is not supported. Index a relation through its reverse collection (declare the back-reference list with @bind on the target), or use @unique for a one-to-one relation.",
+                            field.full_name
+                        )));
+                    }
                     ref_info.is_unique = unique;
                 },
                 _ => return Err(SchemaError(format!("Wrong type for index in field {}", field.full_name)))

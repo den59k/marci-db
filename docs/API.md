@@ -55,17 +55,18 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 ### Attributes
 
 - `@id` — primary key field (composite keys: several `@id` fields)
-- `@unique` — unique secondary index
-- `@index` — secondary index (used by `$where`, `$order` and aggregations)
+- `@unique` — unique secondary index on a scalar; on a relation field it is the one-to-one constraint
+- `@index` — secondary index on a scalar/enum/list (used by `$where`, `$order` and aggregations). **Not** valid on a relation field — index a relation through its reverse collection (`@bind`) instead
 - `@default(value)` — also `autoincrement()`, `now()`
 - `@bind(Model.field)` — declares the reverse side of a relation
 - `@format(uuid | hex)` — JSON representation of byte fields
-- `@onDelete(...)` — delete constraint for relations
+- `@onDelete(...)` — delete constraint for relations (`Cascade`, `SetNull`, `Restrict`)
 
 ### Structs, relations, enums
 
 - `struct` — nested entity stored under the parent's key prefix; inserted/updated inline with the parent.
 - `Model` / `Model[]` fields — relations by id; lists require a `@bind` on the opposite side.
+- **Composite-key relations** — a join table (`model ChatUser { chat Chat @id  user User @id }`) or a child keyed by `parent + autoincrement` (`model Message { chat Chat @id  id UInt @id @default(autoincrement()) }`) is fully supported, including `@onDelete(Cascade)`: deleting the parent removes the owned children (and their children), while merely-referenced rows are left untouched. The composite-key ref must carry `@onDelete(Cascade)` (a key cannot be set null).
 - `enum` variants may carry **payload fields** which are injected into the model itself. In TS this is a discriminated union: `{ role: "viewer" } | { role: "admin", level: number, sign: string } | { role: "moderator", sign: string }`. Switching the variant on update requires the full payload of the new variant and clears fields of the old one.
 - Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
 

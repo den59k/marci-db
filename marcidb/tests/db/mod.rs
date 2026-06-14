@@ -13,6 +13,7 @@ pub mod companion_id_tests;
 pub mod transaction_tests;
 pub mod batch_tests;
 pub mod migration_tests;
+pub mod composite_delete_tests;
 
 use std::str::FromStr;
 

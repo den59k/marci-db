@@ -40,6 +40,10 @@ pub enum MigrateError {
   UnsupportedLayoutChange { entity: String, field: String },
   /// Destructive enum change (variant removed or id reassigned) — requires data migration
   UnsupportedEnumChange { entity: String, field: String, detail: String },
+  /// A relation's storage binding changed (current_id / field_value / index_tree) — e.g. adding @bind to a
+  /// composite-key relation flips index_tree → current_id. That moves where the relation lives, so it can't
+  /// be applied as an in-place migration.
+  UnsupportedBindingChange { entity: String, field: String, from: String, to: String },
 }
 
 impl std::fmt::Display for MigrateError {
@@ -53,6 +57,8 @@ impl std::fmt::Display for MigrateError {
         write!(f, "field slot moved on {}.{} — existing rows would break (slots must be carried from the snapshot)", entity, field),
       MigrateError::UnsupportedEnumChange { entity, field, detail } =>
         write!(f, "unsupported enum change on {}.{}: {}", entity, field, detail),
+      MigrateError::UnsupportedBindingChange { entity, field, from, to } =>
+        write!(f, "relation binding changed on {}.{}: {} -> {} (a relation's storage layout can't be migrated in place — recreate the relation, or apply the schema to a fresh database via $sync)", entity, field, from, to),
     }
   }
 }
@@ -132,6 +138,15 @@ fn diff_fields(
           entity: entity.to_string(), field: f.name.clone(),
           from: serialize_type(old_schema, old_f), to: serialize_type(new_schema, f),
         }),
+    }
+
+    // A relation's storage binding changing (e.g. adding @bind flips index_tree → current_id) moves the
+    // relation's physical home — not an in-place migration. Catch it so it never becomes a silent no-op.
+    if let (Some(a), Some(b)) = (ref_binding(old_f), ref_binding(f)) && a != b {
+      return Err(MigrateError::UnsupportedBindingChange {
+        entity: entity.to_string(), field: f.name.clone(),
+        from: binding_kind(a).to_string(), to: binding_kind(b).to_string(),
+      });
     }
 
     // Metadata: nullable / default / format
@@ -373,6 +388,22 @@ fn enum_cmp(old: &EnumInfo, new: &EnumInfo) -> TypeCmp {
 
 fn is_key(field: &Field) -> bool {
   matches!(field.location, FieldLocation::Key { .. })
+}
+
+/// The storage binding of a relation field (None for non-relations)
+fn ref_binding(field: &Field) -> Option<&RefBinding> {
+  match &field.ty {
+    FieldType::Ref(ri) | FieldType::RefList(ri) => Some(&ri.binding),
+    _ => None,
+  }
+}
+
+fn binding_kind(binding: &RefBinding) -> &'static str {
+  match binding {
+    RefBinding::CurrentId => "current_id",
+    RefBinding::FieldValue => "field_value",
+    RefBinding::IndexTree(_) => "index_tree",
+  }
 }
 
 /// None — no index, Some(false) — `@index`, Some(true) — `@unique`

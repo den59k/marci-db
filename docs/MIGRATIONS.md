@@ -146,7 +146,10 @@ rebuilds the computed caches (default bytes, index trees, counters, reverse-depe
 **Rejected by `diff`** (need data transformation, not done): a field **type** change
 (`UnsupportedTypeChange`), an `@id`/key change (`UnsupportedKeyChange`), a slot that moved without being
 reconciled (`UnsupportedLayoutChange`), removing or renumbering an enum variant
-(`UnsupportedEnumChange`).
+(`UnsupportedEnumChange`), and a change to a relation's **storage binding**
+(`UnsupportedBindingChange`) — e.g. adding `@bind` to a composite-key relation flips it from `index_tree`
+to `current_id`, which moves where the relation lives. These surface as an explicit error rather than a
+silent no-op; apply the schema to a fresh database via `$sync` instead.
 
 ## Frontends
 
