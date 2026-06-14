@@ -107,8 +107,19 @@ Each op is a JSON object `{ "op": "...", ... }`. "Rewrite?" assumes the v2 forma
 | `drop index M.f` / `drop unique M.f` | delete the index tree | no | no |
 | `add relation M.f -> T.r` | create relation index tree(s), backfill from existing refs | scan | no |
 | `drop relation M.f` | delete the relation index tree(s) | no | no |
-| `add variant E.v` | update the discriminant map in schema | no | no |
-| `drop variant E.v` | update schema; rows of that variant are gated | no | **yes** |
+| `create enum E { … }` | add the enum definition to the schema text | no | no |
+| `drop enum E` | remove the enum definition from the schema text | no | no |
+
+An enum injects its variant fields directly into the model, so an enum carries **no tree of its own** —
+`create enum` / `drop enum` are pure metadata (the definition lives in the schema text; payload fields
+arrive via the `create model` / `add field` of the models that use it). The diff emits `create enum`
+before, and `drop enum` after, the models that reference it.
+
+**Variant-level changes (`add variant` / `drop variant`) and any other change to an *existing* enum are
+deferred** — they touch the injected payload-field layout (slot positions) and so belong with
+`changeFieldType` / re-key in the heavy-change bucket. Today a changed enum emits no op: via `push`
+(declarative `$sync`) it still takes effect because the full schema text is stored; via migration files it
+is not yet reflected.
 
 **Rejected by `generate` in v1** (clear "edit manually" message): a field **type** change (needs a
 transform), `@id` / key changes (re-key), field-slot `vacuum`.
@@ -174,9 +185,10 @@ drop unique <Model>.<field>
 add  relation <Model>.<field> -> <Target>.<reverseField>
 drop relation <Model>.<field>
 
-# enum variants
-add  variant <Enum>.<variant>
-drop variant <Enum>.<variant>
+# enums  (block carries the verbatim `enum Name { … }` body, nested payload braces and all)
+create enum <Enum> { <schema-style variant block> }
+drop   enum <Enum>
+# changing the variants of an existing enum (add/drop variant) is deferred — see the op-set notes
 ```
 
 The format carries **semantic actions, not byte offsets** — `apply` computes the byte mechanics at run
@@ -222,7 +234,8 @@ generate(name):
 `diff(old, new)` per element:
 - model in new not in old → `createModel`; in old not in new → `dropModel` (destructive, gated).
 - field added / removed / default / format / nullable change → the matching op.
-- index/relation/enum-variant added or removed → the matching op.
+- index/relation added or removed → the matching op.
+- enum added or removed → `createEnum` / `dropEnum` (whole block); a *changed* enum emits no op (deferred).
 - v1 has **no rename detection**: a removed+added pair is emitted as drop+add (destructive). v2 adds the
   interactive "renamed `a`→`b`?" prompt that rewrites the pair into a `renameField`/`renameModel`.
 

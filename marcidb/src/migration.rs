@@ -20,6 +20,11 @@ pub enum MigrationOp {
   DropField { model: String, field: String },
   AddIndex { model: String, field: String, unique: bool },
   DropIndex { model: String, field: String, unique: bool },
+  /// Создание enum-типа. `body` — verbatim-текст блока `enum Name { … }` (с балансом скобок).
+  /// Enum инжектит поля в модель, поэтому физической работы нет — определение живёт в тексте схемы,
+  /// а payload-поля приходят через `CreateModel`/`AddField` использующих enum моделей
+  CreateEnum { name: String, body: String },
+  DropEnum { name: String },
 }
 
 #[derive(Debug, PartialEq)]
@@ -134,6 +139,9 @@ fn serialize_op(op: &MigrationOp) -> String {
     MigrationOp::DropField { model, field } => format!("drop field {}.{}", model, field),
     MigrationOp::AddIndex { model, field, unique } => format!("add {} {}.{}", index_kw(*unique), model, field),
     MigrationOp::DropIndex { model, field, unique } => format!("drop {} {}.{}", index_kw(*unique), model, field),
+    // body уже содержит `enum Name { … }` — префиксуем DSL-командой
+    MigrationOp::CreateEnum { name: _, body } => format!("create {}", body.trim_end()),
+    MigrationOp::DropEnum { name } => format!("drop enum {}", name),
   }
 }
 
@@ -164,6 +172,15 @@ fn parse_op(line: &str, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) ->
   }
   if let Some(rest) = line.strip_prefix("drop model ") {
     return Ok(MigrationOp::DropModel { name: rest.trim().to_string() });
+  }
+  if let Some(rest) = line.strip_prefix("create enum ") {
+    let name = rest.trim().trim_end_matches('{').trim().to_string();
+    // line здесь уже без ведущих пробелов (parse_migration их срезает) — собираем блок до баланса скобок
+    let body = collect_block_text(line.strip_prefix("create ").unwrap(), lines);
+    return Ok(MigrationOp::CreateEnum { name, body });
+  }
+  if let Some(rest) = line.strip_prefix("drop enum ") {
+    return Ok(MigrationOp::DropEnum { name: rest.trim().to_string() });
   }
   if let Some(rest) = line.strip_prefix("add field ") {
     let (model, field) = parse_field_path(rest)?;
@@ -244,7 +261,17 @@ pub fn diff(old_text: &str, new_text: &str) -> Result<Vec<MigrationOp>, Migratio
   let old_by: HashMap<&str, &Entity> = old_models.iter().map(|m| (m.name.as_str(), m)).collect();
   let new_by: HashMap<&str, &Entity> = new_models.iter().map(|m| (m.name.as_str(), m)).collect();
 
+  let old_enums = enum_blocks(old_text);
+  let new_enums = enum_blocks(new_text);
+
   let mut ops = vec![];
+
+  // Новые enum'ы — перед моделями, которые на них ссылаются (изменение существующих enum, alter, пока не диффится)
+  for (name, body) in new_enums.iter() {
+    if !old_enums.contains_key(name) {
+      ops.push(MigrationOp::CreateEnum { name: name.clone(), body: body.clone() });
+    }
+  }
 
   // Новые модели
   for m in new_models.iter() {
@@ -267,7 +294,22 @@ pub fn diff(old_text: &str, new_text: &str) -> Result<Vec<MigrationOp>, Migratio
     }
   }
 
+  // Удалённые enum'ы — после моделей, которые могли на них ссылаться
+  for name in old_enums.keys() {
+    if !new_enums.contains_key(name) {
+      ops.push(MigrationOp::DropEnum { name: name.clone() });
+    }
+  }
+
   Ok(ops)
+}
+
+/// Verbatim-тексты enum-блоков схемы по имени (для диффа enum). Хвостовые пробелы срезаны.
+fn enum_blocks(text: &str) -> HashMap<String, String> {
+  split_blocks(text).into_iter()
+    .filter(|b| b.kind == "enum")
+    .map(|b| (b.name.clone(), b.text.trim_end().to_string()))
+    .collect()
 }
 
 fn diff_fields(model: &str, old_m: &Entity, new_m: &Entity, ops: &mut Vec<MigrationOp>) -> Result<(), MigrationError> {
@@ -339,6 +381,20 @@ fn brace_delta(line: &str) -> i32 {
   line.bytes().filter(|&b| b == b'{').count() as i32 - line.bytes().filter(|&b| b == b'}').count() as i32
 }
 
+/// Собирает многострочный блок `{ … }` из `first_line` + последующих строк итератора до баланса скобок.
+/// Возвращает verbatim-текст блока (для `create enum` в `.mig`-парсере). Хвостовые пробелы срезаются.
+fn collect_block_text(first_line: &str, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> String {
+  let mut text = first_line.to_string();
+  let mut depth = brace_delta(first_line);
+  while depth > 0 {
+    let Some(l) = lines.next() else { break };
+    text.push('\n');
+    text.push_str(l);
+    depth += brace_delta(l);
+  }
+  text.trim_end().to_string()
+}
+
 /// Разбивает текст схемы на блоки `model|struct|enum Name { … }`, сохраняя исходный текст каждого.
 /// Конец блока — по балансу скобок (enum c payload-вариантами имеет вложенные `{ }`)
 fn split_blocks(text: &str) -> Vec<SchemaBlock> {
@@ -395,6 +451,8 @@ pub fn evolve_schema(old_text: &str, ops: &[MigrationOp]) -> String {
   // old_text — уже сохранённая (провалидированная) схема, поэтому разбор инфраллибл
   let (mut models, _structs, _enums) = collect_blocks(old_text).expect("evolve_schema on validated schema text");
   let mut dropped: HashSet<String> = HashSet::new();
+  let mut dropped_enums: HashSet<String> = HashSet::new();
+  let mut created_enums: Vec<(String, String)> = vec![];  // (name, verbatim body), порядок сохраняется
 
   for op in ops {
     match op {
@@ -405,6 +463,13 @@ pub fn evolve_schema(old_text: &str, ops: &[MigrationOp]) -> String {
         dropped.remove(name);
       }
       MigrationOp::DropModel { name } => { dropped.insert(name.clone()); }
+      MigrationOp::CreateEnum { name, body } => {
+        if !created_enums.iter().any(|(n, _)| n == name) {
+          created_enums.push((name.clone(), body.clone()));
+        }
+        dropped_enums.remove(name);
+      }
+      MigrationOp::DropEnum { name } => { dropped_enums.insert(name.clone()); }
       MigrationOp::AddField { model, field } => {
         if let Some(m) = find_model(&mut models, model) {
           if !m.fields.iter().any(|f| f.name == field.name) {
@@ -448,6 +513,7 @@ pub fn evolve_schema(old_text: &str, ops: &[MigrationOp]) -> String {
   // Сборка нового текста: struct/enum — verbatim, модели — пересериализованы, в исходном порядке
   let blocks = split_blocks(old_text);
   let mut emitted: HashSet<String> = HashSet::new();
+  let mut emitted_enums: HashSet<String> = HashSet::new();
   let mut out: Vec<String> = vec![];
 
   for block in blocks.iter() {
@@ -457,8 +523,19 @@ pub fn evolve_schema(old_text: &str, ops: &[MigrationOp]) -> String {
         out.push(serialize_model_block(m));
         emitted.insert(block.name.clone());
       }
-    } else {
+    } else if block.kind == "enum" {
+      if dropped_enums.contains(&block.name) { continue; }
       out.push(block.text.trim_end().to_string());
+      emitted_enums.insert(block.name.clone());
+    } else {
+      out.push(block.text.trim_end().to_string());  // struct — verbatim
+    }
+  }
+
+  // Новые enum'ы (CreateEnum), которых не было в исходном тексте — перед новыми моделями
+  for (name, body) in created_enums.iter() {
+    if !emitted_enums.contains(name) && !dropped_enums.contains(name) {
+      out.push(body.trim_end().to_string());
     }
   }
 
@@ -560,6 +637,8 @@ pub fn apply_ops(tx: &WriteTransaction, ops: &[MigrationOp], old: &Schema, new: 
     match op {
       // Метаданные: новый слот уже в `new`, старые строки читаются forward-compatible reader'ом
       MigrationOp::AddField { .. } | MigrationOp::AlterField { .. } => {}
+      // Enum-определение живёт в тексте схемы; payload-поля приходят через CreateModel/AddField моделей
+      MigrationOp::CreateEnum { .. } | MigrationOp::DropEnum { .. } => {}
       MigrationOp::AddIndex { model, field, .. } => build_index(tx, new, model, field)?,
       MigrationOp::DropIndex { model, field, .. } => drop_index(tx, old, model, field)?,
       MigrationOp::CreateModel { name, .. } => create_entity_trees(tx, find_entity(new, name))?,
@@ -798,5 +877,56 @@ drop model Session";
     assert!(evolved.contains("enum AccountType"), "enum потерян:\n{}", evolved);
     assert!(evolved.contains("sign String"), "payload-вариант потерян:\n{}", evolved);
     assert!(diff(&evolved, new).unwrap().is_empty(), "evolved:\n{}", evolved);
+  }
+
+  /// Новый enum (со скретча) попадает в .mig как `create enum …` с verbatim-телом и переживает round-trip
+  #[test]
+  fn diff_create_enum() {
+    let new = "enum ChatType {\n  direct {\n    uniqueId String\n  }\n  group {\n    name String\n  }\n}\n\nmodel Chat {\n  type ChatType\n}";
+    let ops = diff("", new).unwrap();
+
+    assert!(ops.iter().any(|o| matches!(o, MigrationOp::CreateEnum { name, .. } if name == "ChatType")));
+    // CreateEnum идёт перед CreateModel, который на него ссылается
+    let enum_pos = ops.iter().position(|o| matches!(o, MigrationOp::CreateEnum { .. })).unwrap();
+    let model_pos = ops.iter().position(|o| matches!(o, MigrationOp::CreateModel { .. })).unwrap();
+    assert!(enum_pos < model_pos);
+
+    let mig = serialize_migration(&ops);
+    assert!(mig.contains("create enum ChatType {"), "mig:\n{}", mig);
+
+    // serialize → parse round-trip даёт те же ops (по сериализации)
+    let reparsed = parse_migration(&mig).unwrap();
+    assert_eq!(serialize_migration(&reparsed), mig);
+
+    // evolve со скретча даёт текст, структурно эквивалентный new (повторный diff пуст)
+    let evolved = evolve_schema("", &ops);
+    assert!(evolved.contains("enum ChatType"), "enum потерян:\n{}", evolved);
+    assert!(diff(&evolved, new).unwrap().is_empty(), "evolved:\n{}", evolved);
+  }
+
+  /// Удаление модели вместе с её enum → DropModel + DropEnum, evolve убирает оба блока
+  #[test]
+  fn diff_drop_enum() {
+    let old = "enum E {\n  a\n  b\n}\n\nmodel M {\n  type E\n}";
+    let ops = diff(old, "").unwrap();
+    assert!(ops.iter().any(|o| matches!(o, MigrationOp::DropEnum { name } if name == "E")));
+    // DropEnum — после DropModel
+    let model_pos = ops.iter().position(|o| matches!(o, MigrationOp::DropModel { .. })).unwrap();
+    let enum_pos = ops.iter().position(|o| matches!(o, MigrationOp::DropEnum { .. })).unwrap();
+    assert!(model_pos < enum_pos);
+
+    let evolved = evolve_schema(old, &ops);
+    assert!(!evolved.contains("enum E"), "enum не удалён:\n{}", evolved);
+    assert!(diff(&evolved, "").unwrap().is_empty(), "evolved:\n{}", evolved);
+  }
+
+  /// Неизменный enum не порождает операций (только add field к модели)
+  #[test]
+  fn diff_unchanged_enum_no_op() {
+    let old = "enum E {\n  a\n  b\n}\n\nmodel M {\n  type E\n}";
+    let new = "enum E {\n  a\n  b\n}\n\nmodel M {\n  type E\n  note String\n}";
+    let ops = diff(old, new).unwrap();
+    assert!(!ops.iter().any(|o| matches!(o, MigrationOp::CreateEnum { .. } | MigrationOp::DropEnum { .. })));
+    assert!(ops.iter().any(|o| matches!(o, MigrationOp::AddField { .. })));
   }
 }

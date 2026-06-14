@@ -1,4 +1,4 @@
-use marcidb::{MarciDB, MigrationApplyError};
+use marcidb::{MarciDB, MigrationApplyError, diff, serialize_migration};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -190,6 +190,57 @@ fn apply_migrations_rejects_invalid_mig() {
   assert!(db.apply_migrations(&[("0000_bad".to_string(), "totally bogus line".to_string())]).is_err());
   // синтаксис ok, но поле ссылается на неизвестный тип — ловится при разборе итоговой схемы
   assert!(db.apply_migrations(&[("0000_x".to_string(), "create model M {\n  ref Nope\n}".to_string())]).is_err());
+}
+
+/// Enum end-to-end через императивный путь ($migrate): генератор-стиль diff → .mig (с `create enum`)
+/// → apply_migrations создаёт модель и enum, данные пишутся/читаются по варианту
+#[test]
+fn migrate_enum_end_to_end_via_mig() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+
+  let schema = "enum ChatType {\n  direct {\n    uniqueId String\n  }\n  group {\n    name String\n  }\n}\n\nmodel Chat {\n  type ChatType\n}";
+  // Эмуляция `marcidb generate`: дифф пустого снимка против текущей схемы → текст .mig
+  let mig = serialize_migration(&diff("", schema).unwrap());
+  assert!(mig.contains("create enum ChatType"), "mig:\n{}", mig);
+
+  let applied = db.apply_migrations(&[("0000_init".to_string(), mig)]).unwrap();
+  assert_eq!(applied, vec!["0000_init"]);
+
+  insert_data(&db, "Chat", json!({ "type": "group", "name": "General" }));
+  assert_eq!(
+    get_data_one(&db, "Chat", json!({ "type": true, "name": true })),
+    json!({ "type": "group", "name": "General" })
+  );
+}
+
+/// Enum end-to-end через декларативный путь ($sync): migrate_to со схемой-с-enum со скретча
+#[test]
+fn migrate_enum_end_to_end_via_sync() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+
+  let schema = "enum ChatType {\n  direct {\n    uniqueId String\n  }\n  group {\n    name String\n  }\n}\n\nmodel Chat {\n  type ChatType\n}";
+  db.migrate_to(schema).unwrap();
+
+  insert_data(&db, "Chat", json!({ "type": "direct", "uniqueId": "u-1" }));
+  assert_eq!(
+    get_data_one(&db, "Chat", json!({ "type": true, "uniqueId": true })),
+    json!({ "type": "direct", "uniqueId": "u-1" })
+  );
+}
+
+/// Список enum (`Enum[]`) отклоняется с подсказкой об альтернативе (список модели с enum-полем)
+#[test]
+fn enum_list_rejected_with_hint() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+
+  let schema = "enum Role {\n  admin\n  user\n}\n\nmodel User {\n  roles Role[]\n}";
+  let err = db.migrate_to(schema).unwrap_err();
+  let msg = format!("{}", err);
+  assert!(msg.contains("list of enum"), "ожидали объяснение, got: {}", msg);
+  assert!(msg.contains("RoleItem"), "ожидали подсказку-альтернативу, got: {}", msg);
 }
 
 /// Разошедшаяся история (другой id на уже применённой позиции) отклоняется

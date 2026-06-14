@@ -168,7 +168,10 @@ fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Enti
 
                 if let Some(enum_def) = enums.get(name) {
                     if matches!(&field.ty, FieldType::RefListUnresolved(_)) {
-                        return Err(SchemaError(format!("{}[]: Enum list is not supported!", field.name)));
+                        return Err(SchemaError(format!(
+                            "Field '{0}': list of enum '{1}' is not supported. An enum injects its variant fields directly into the model, so an enum list has nowhere to store them. Instead make a list of a model that wraps the enum — e.g. `model {1}Item {{ value {1} }}` then `{0} {1}Item[]`.",
+                            field.name, name
+                        )));
                     }
 
                     let field_name = field.name.clone();
