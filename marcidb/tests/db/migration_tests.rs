@@ -197,8 +197,8 @@ fn apply_migration_rejects_invalid() {
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
   // unknown action
   assert!(db.apply_migration("totally bogus line").is_err());
-  // action is ok, but it references an unknown entity — caught during name resolution
-  assert!(db.apply_migration("create entity M {\n  ref Nope @slot(4)\n}").is_err());
+  // actions parse fine, but the field references an unknown model — caught during name resolution
+  assert!(db.apply_migration("create entity M\nadd field M.ref Nope @slot(4)").is_err());
 }
 
 /// Enum end-to-end via the imperative path ($migrate): self-contained actions with the enum baked in

@@ -24,7 +24,7 @@ pub fn serialize_snapshot(schema: &Schema) -> String {
     if i > 0 {
       out.push('\n');
     }
-    out.push_str(&format!("entity {} {{\n", entity.name));
+    out.push_str(&format!("Entity {} {{\n", entity.name));
     for field in entity.fields.iter() {
       out.push_str("  ");
       out.push_str(&serialize_field(schema, entity, field));
@@ -324,8 +324,8 @@ fn parse_blocks(text: &str) -> Result<Vec<SnapEntity>, SchemaError> {
   while let Some(raw) = lines.next() {
     let line = raw.trim();
     if line.is_empty() || line.starts_with("//") { continue; }
-    let Some(rest) = line.strip_prefix("entity ") else {
-      return Err(SchemaError(format!("snapshot: expected 'entity', got: \"{}\"", line)));
+    let Some(rest) = line.strip_prefix("Entity ") else {
+      return Err(SchemaError(format!("snapshot: expected 'Entity', got: \"{}\"", line)));
     };
     let name = rest.trim_end_matches('{').trim().to_string();
     let mut fields = vec![];

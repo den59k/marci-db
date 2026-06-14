@@ -18,9 +18,9 @@ enum is just fields, so `diff` is a per-name comparison of two flat schemas.
 
 ## A migration file = self-contained actions
 
-A migration file (`.march`) is a list of **self-contained actions** — what changes, each carrying its own
-field definition (the snapshot line). There is **no snapshot section**: you review the *changes* here, and
-look at the full schema in `schema.marci`.
+A migration file (`.march`) is a list of **self-contained actions, one per line** — what changes, each
+carrying its own field definition (the snapshot line). There is **no snapshot section**: you review the
+*changes* here, and look at the full schema in `schema.marci`.
 
 ```
 # 0001_add_age
@@ -28,15 +28,16 @@ add field User.age UInt @slot(12)
 add index User.email
 ```
 
-A baseline / first migration is just `create entity` actions carrying every field:
+`create entity X` is a bare line; the entity's fields follow as `add field` actions — the same definition
+surface used everywhere — so a baseline / first migration reads:
 
 ```
 # 0000_init
-create entity User {
-  id    UInt   @id @default(autoincrement())
-  name  String @slot(4)
-  email String @slot(8) @unique
-}
+create entity User
+add field User.id UInt @id @default(autoincrement())
+add field User.name String @slot(4)
+add field User.email String @slot(8) @unique
+add unique User.email
 ```
 
 Because each action carries its definition, the server can apply a migration without seeing the whole
@@ -168,7 +169,8 @@ Both wrap the same engine. The split is **smart `$sync` vs dumb `$migrate`**: th
 
 - `rename` of fields/entities — self-contained actions make this expressible (an explicit `rename` action
   carrying the slot, so data is preserved); detection in `generate` is the next step.
-- **Squash / baseline** ("migration = snapshot") — collapsing history into one `create entity`-only
-  migration is already expressible (a baseline is just all-creates); a `generate --squash` is the next step.
+- **Squash / baseline** ("migration = snapshot") — collapsing history into one baseline migration is
+  already expressible (a baseline is just `create entity` + `add field` actions); a `generate --squash` is
+  the next step.
 - `drop field` (needs slot tombstones so retired slots are never reused).
 - `changeFieldType` with data transforms; re-keying; `vacuum` to reclaim tombstoned slots.

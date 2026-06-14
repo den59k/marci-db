@@ -65,18 +65,18 @@ pub fn diff(old: &Schema, new: &Schema) -> Result<Vec<MigrateOp>, MigrateError> 
 
   let mut ops = vec![];
 
-  // New entities (apply will create the tree + index/relation trees from the fields)
+  // Created and existing entities. A new entity is just "diff against nothing": CreateEntity, then
+  // every field flows through diff_fields as AddField/AddIndex — one field-definition surface, no
+  // special-casing of new entities.
   for e in new.models.iter() {
-    if !old_by.contains_key(e.name.as_str()) {
-      ops.push(MigrateOp::CreateEntity { name: e.name.clone() });
-    }
-  }
-
-  // Changes within existing entities
-  for e in new.models.iter() {
-    if let Some(old_e) = old_by.get(e.name.as_str()) {
-      diff_fields(old, new, &e.name, old_e, e, &mut ops)?;
-    }
+    let old_fields: &[Field] = match old_by.get(e.name.as_str()) {
+      Some(old_e) => &old_e.fields,
+      None => {
+        ops.push(MigrateOp::CreateEntity { name: e.name.clone() });
+        &[]
+      }
+    };
+    diff_fields(old, new, &e.name, old_fields, &e.fields, &mut ops)?;
   }
 
   // Removed entities
@@ -91,14 +91,14 @@ pub fn diff(old: &Schema, new: &Schema) -> Result<Vec<MigrateOp>, MigrateError> 
 
 fn diff_fields(
   old_schema: &Schema, new_schema: &Schema,
-  entity: &str, old_e: &crate::schema::Entity, new_e: &crate::schema::Entity,
+  entity: &str, old_fields: &[Field], new_fields: &[Field],
   ops: &mut Vec<MigrateOp>,
 ) -> Result<(), MigrateError> {
-  let old_by: HashMap<&str, &Field> = old_e.fields.iter().map(|f| (f.name.as_str(), f)).collect();
-  let new_by: HashMap<&str, &Field> = new_e.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+  let old_by: HashMap<&str, &Field> = old_fields.iter().map(|f| (f.name.as_str(), f)).collect();
+  let new_by: HashMap<&str, &Field> = new_fields.iter().map(|f| (f.name.as_str(), f)).collect();
 
   // Added fields (+ index as a separate operation)
-  for f in new_e.fields.iter() {
+  for f in new_fields.iter() {
     if !old_by.contains_key(f.name.as_str()) {
       ops.push(MigrateOp::AddField { entity: entity.to_string(), field: f.name.clone() });
       if let Some(unique) = index_kind(f) {
@@ -108,7 +108,7 @@ fn diff_fields(
   }
 
   // Changed fields
-  for f in new_e.fields.iter() {
+  for f in new_fields.iter() {
     let Some(old_f) = old_by.get(f.name.as_str()) else { continue };
 
     if is_key(old_f) != is_key(f) {
@@ -155,7 +155,7 @@ fn diff_fields(
   }
 
   // Removed fields
-  for f in old_e.fields.iter() {
+  for f in old_fields.iter() {
     if !new_by.contains_key(f.name.as_str()) {
       if let Some(unique) = index_kind(f) {
         ops.push(MigrateOp::DropIndex { entity: entity.to_string(), field: f.name.clone(), unique });
@@ -532,25 +532,23 @@ fn drop_index(tx: &WriteTransaction, old: &Schema, entity: &str, field_name: &st
 
 // ─────────────────────── migration file (self-contained actions) ───────────────────────
 //
-// A migration file is a list of SELF-CONTAINED actions: each carries a definition (a snapshot line),
-// so the whole snapshot isn't put into the file. The developer sees the CHANGES (this is what gets reviewed),
-// and looks at the full schema in schema.marci. The server is dumb: `evolve` applies the actions to its current
-// snapshot → new snapshot → parse_snapshot; the physics is determined by the actions themselves (create entity/add index/...).
+// A migration file is a list of SELF-CONTAINED actions, ONE PER LINE: each carries its definition (a
+// snapshot line), so the whole snapshot isn't put into the file. `create entity X` is a bare line — the
+// entity's fields follow as `add field X.f` actions, so a field has a single definition surface everywhere.
+// The developer sees the CHANGES (this is what gets reviewed) and looks at the full schema in schema.marci.
+// The server is dumb: `evolve` applies the actions to its current snapshot → new snapshot → parse_snapshot;
+// the physics is determined by the actions themselves (create entity/add field/add index/...).
 
-/// Serializes the operations into migration-file text. Definitions are taken from `schema` (the target):
-/// `create entity` carries all field lines, `add/alter field` — the field line, indexes/drops — by name.
+/// Serializes the operations into migration-file text — one action per line. `create entity` is a bare
+/// line (its fields follow as `add field` actions); `add/alter field` carry the field line; index/drop
+/// ops reference by name. Definitions are taken from `schema` (the target).
 pub fn serialize_migration(ops: &[MigrateOp], schema: &Schema) -> String {
-  ops.iter().map(|op| serialize_op(op, schema)).collect::<Vec<_>>().join("\n\n")
+  ops.iter().map(|op| serialize_op(op, schema)).collect::<Vec<_>>().join("\n")
 }
 
 fn serialize_op(op: &MigrateOp, schema: &Schema) -> String {
   match op {
-    MigrateOp::CreateEntity { name } => {
-      let entity = find_entity(schema, name);
-      let body: Vec<String> = entity.fields.iter()
-        .map(|f| format!("  {}", crate::snapshot::serialize_field(schema, entity, f))).collect();
-      format!("create entity {} {{\n{}\n}}", name, body.join("\n"))
-    }
+    MigrateOp::CreateEntity { name } => format!("create entity {}", name),
     MigrateOp::DropEntity { name } => format!("drop entity {}", name),
     MigrateOp::AddField { entity, field } => format!("add field {}.{}", entity, field_spec(schema, entity, field)),
     MigrateOp::AlterField { entity, field } => format!("alter field {}.{}", entity, field_spec(schema, entity, field)),
@@ -571,10 +569,10 @@ fn field_spec(schema: &Schema, entity: &str, field: &str) -> String {
   format!("{} {}", field, line.strip_prefix(&prefix).unwrap_or(&line))
 }
 
-/// An action from a migration file. Carries the definition text (snapshot lines) for `evolve`
+/// An action from a migration file. Field actions carry the definition text (snapshot line) for `evolve`
 #[derive(Debug, Clone)]
 enum FileOp {
-  CreateEntity { name: String, lines: Vec<String> },
+  CreateEntity { name: String },
   DropEntity { name: String },
   AddField { entity: String, field: String, line: String },
   AlterField { entity: String, field: String, line: String },
@@ -587,7 +585,7 @@ impl FileOp {
   /// The physical operation (without definitions) for `apply`
   fn to_migrate_op(&self) -> MigrateOp {
     match self {
-      FileOp::CreateEntity { name, .. } => MigrateOp::CreateEntity { name: name.clone() },
+      FileOp::CreateEntity { name } => MigrateOp::CreateEntity { name: name.clone() },
       FileOp::DropEntity { name } => MigrateOp::DropEntity { name: name.clone() },
       FileOp::AddField { entity, field, .. } => MigrateOp::AddField { entity: entity.clone(), field: field.clone() },
       FileOp::AlterField { entity, field, .. } => MigrateOp::AlterField { entity: entity.clone(), field: field.clone() },
@@ -619,11 +617,11 @@ fn apply_file_op(blocks: &mut Vec<(String, Vec<String>)>, op: FileOp) -> Result<
     blocks.iter().position(|(n, _)| n == name)
   };
   match op {
-    FileOp::CreateEntity { name, lines } => {
+    FileOp::CreateEntity { name } => {
       if find(blocks, &name).is_some() {
         return Err(SchemaError(format!("evolve: entity {} already exists", name)));
       }
-      blocks.push((name, lines));
+      blocks.push((name, vec![]));   // empty entity; fields arrive as subsequent AddField actions
     }
     FileOp::DropEntity { name } => { blocks.retain(|(n, _)| n != &name); }
     FileOp::AddField { entity, field, line } => {
@@ -676,7 +674,7 @@ fn snapshot_blocks(text: &str) -> Vec<(String, Vec<String>)> {
   let mut lines = text.lines();
   while let Some(line) = lines.next() {
     let t = line.trim();
-    let Some(rest) = t.strip_prefix("entity ") else { continue };
+    let Some(rest) = t.strip_prefix("Entity ") else { continue };
     let name = rest.trim_end_matches('{').trim().to_string();
     let mut fields = vec![];
     for l in lines.by_ref() {
@@ -694,39 +692,28 @@ fn emit_blocks(blocks: &[(String, Vec<String>)]) -> String {
   let mut out = String::new();
   for (i, (name, fields)) in blocks.iter().enumerate() {
     if i > 0 { out.push('\n'); }
-    out.push_str(&format!("entity {} {{\n", name));
+    out.push_str(&format!("Entity {} {{\n", name));
     for f in fields { out.push_str(&format!("  {}\n", f)); }
     out.push_str("}\n");
   }
   out
 }
 
-/// Parses migration-file text into actions (`create entity` — a multi-line block)
+/// Parses migration-file text into actions — strictly one action per line.
 fn parse_migration(text: &str) -> Result<Vec<FileOp>, SchemaError> {
   let mut ops = vec![];
-  let mut lines = text.lines().peekable();
-  while let Some(raw) = lines.next() {
+  for raw in text.lines() {
     let line = raw.trim();
     if line.is_empty() || line.starts_with('#') || line.starts_with("//") { continue; }
-
-    if let Some(rest) = line.strip_prefix("create entity ") {
-      let name = rest.trim_end_matches('{').trim().to_string();
-      let mut field_lines = vec![];
-      for l in lines.by_ref() {
-        let lt = l.trim();
-        if lt == "}" { break; }
-        if lt.is_empty() { continue; }
-        field_lines.push(lt.to_string());
-      }
-      ops.push(FileOp::CreateEntity { name, lines: field_lines });
-      continue;
-    }
     ops.push(parse_line_op(line)?);
   }
   Ok(ops)
 }
 
 fn parse_line_op(line: &str) -> Result<FileOp, SchemaError> {
+  if let Some(rest) = line.strip_prefix("create entity ") {
+    return Ok(FileOp::CreateEntity { name: rest.trim().to_string() });
+  }
   if let Some(rest) = line.strip_prefix("drop entity ") {
     return Ok(FileOp::DropEntity { name: rest.trim().to_string() });
   }
@@ -787,7 +774,12 @@ mod tests {
   fn diff_create_and_drop_entity() {
     let old = "model User {\n  name String\n}";
     let new = "model User {\n  name String\n}\nmodel Post {\n  title String\n}";
-    assert_eq!(diff_text(old, new).unwrap(), vec![MigrateOp::CreateEntity { name: "Post".into() }]);
+    // a new entity = CreateEntity + an AddField per field (id is inserted first); drop is a single op
+    assert_eq!(diff_text(old, new).unwrap(), vec![
+      MigrateOp::CreateEntity { name: "Post".into() },
+      MigrateOp::AddField { entity: "Post".into(), field: "id".into() },
+      MigrateOp::AddField { entity: "Post".into(), field: "title".into() },
+    ]);
     assert_eq!(diff_text(new, old).unwrap(), vec![MigrateOp::DropEntity { name: "Post".into() }]);
   }
 
@@ -926,17 +918,21 @@ mod tests {
     crate::snapshot::serialize_snapshot(&crate::snapshot::parse_snapshot(snapshot_text).unwrap())
   }
 
-  /// The migration file is self-contained (carries definitions) and does NOT contain the whole snapshot
+  /// The migration file is self-contained (carries definitions) and does NOT contain the whole snapshot.
+  /// A new entity = a bare `create entity` line + one `add field` per field — no block syntax.
   #[test]
   fn migration_file_is_self_contained() {
     let new = parse_schema("model User {\n  name String\n  email String @unique\n}");
     let file = serialize_migration(&diff(&parse_schema(""), &new).unwrap(), &new);
 
-    assert!(file.contains("create entity User {"), "file:\n{}", file);
-    assert!(file.contains("email String @slot(8) @unique"), "file:\n{}", file);
+    assert!(file.contains("create entity User"), "file:\n{}", file);
+    assert!(file.contains("add field User.email String @slot(8) @unique"), "file:\n{}", file);
     assert!(!file.contains("--- snapshot ---"));
+    assert!(!file.contains('{'), "block syntax is gone:\n{}", file);
     // physical operations are extracted from the file for apply
-    assert_eq!(migration_ops(&file).unwrap(), vec![MigrateOp::CreateEntity { name: "User".into() }]);
+    let ops = migration_ops(&file).unwrap();
+    assert!(ops.contains(&MigrateOp::CreateEntity { name: "User".into() }), "ops: {:?}", ops);
+    assert!(ops.contains(&MigrateOp::AddField { entity: "User".into(), field: "email".into() }), "ops: {:?}", ops);
   }
 
   /// evolve(empty, from-scratch migration) yields the snapshot of the target schema
