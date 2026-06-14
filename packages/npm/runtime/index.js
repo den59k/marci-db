@@ -13,7 +13,19 @@ async function request(method, url, body) {
 }
 function encodeId(id) {
   if (typeof id === "object" && id !== null) {
-    return Object.entries(id).map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
+    const parts = [];
+    const walk = (obj, prefix) => {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? `${prefix}.${k}` : k;
+        if (typeof v === "object" && v !== null) {
+          walk(v, key);
+        } else {
+          parts.push(`${key}=${encodeURIComponent(String(v))}`);
+        }
+      }
+    };
+    walk(id, "");
+    return parts.join("&");
   }
   return String(id);
 }

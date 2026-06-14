@@ -22,9 +22,21 @@ export async function request(method: string, url: string, body?: any) {
 
 export function encodeId(id: any) {
   if (typeof id === "object" && id !== null) {
-    return Object.entries(id)
-      .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-      .join("&");
+    // Составной ключ: вложенные объекты (связь в @id) разворачиваются в dot-путь,
+    // как ждёт сервер — `chat.id=1&id=1`, а не `chat=[object Object]&id=1`
+    const parts: string[] = [];
+    const walk = (obj: Record<string, any>, prefix: string) => {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? `${prefix}.${k}` : k;
+        if (typeof v === "object" && v !== null) {
+          walk(v, key);
+        } else {
+          parts.push(`${key}=${encodeURIComponent(String(v))}`);
+        }
+      }
+    };
+    walk(id, "");
+    return parts.join("&");
   }
   return String(id);
 }
