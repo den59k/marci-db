@@ -9,7 +9,7 @@
 
 use std::{env, fs, process};
 
-use marcidb::{MigrateOp, Schema, diff, parse_snapshot, reconcile_slots, serialize_snapshot, try_parse_schema};
+use marcidb::{MigrateOp, Schema, diff, parse_snapshot, reconcile, serialize_snapshot, try_parse_schema};
 
 fn main() {
   let args: Vec<String> = env::args().collect();
@@ -87,8 +87,8 @@ fn cmd_generate(schema_path: &str, migrations_dir: &str, name: &str) {
     parse_snapshot(&prev_text).unwrap_or_else(|e| { eprintln!("Corrupt snapshot {}: {}", snapshot_path, e); process::exit(1); })
   };
 
-  // Переносим слоты/порядок из предыдущего снапшота, затем диффим
-  reconcile_slots(&mut new_schema, &prev);
+  // Переносим слоты/порядок/id вариантов из предыдущего снапшота, затем диффим
+  reconcile(&mut new_schema, &prev);
   let ops = diff(&prev, &new_schema).unwrap_or_else(|e| {
     eprintln!("Migration error: {}", e);
     process::exit(1);

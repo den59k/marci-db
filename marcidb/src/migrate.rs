@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use canopydb::WriteTransaction;
 
 use crate::index_utils::{encode_full_index, encode_index};
-use crate::schema::{Attribute, Entity, EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, Schema, SchemaError};
+use crate::schema::{Attribute, Entity, EnumInfo, Field, FieldDefault, FieldExistsCondition, FieldLocation, FieldType, RefBinding, Schema, SchemaError};
 use crate::snapshot::serialize_type;
 use crate::utils::get_data;
 use crate::StorageError;
@@ -174,8 +174,17 @@ fn diff_fields(
 /// высшей точки старой entity). Так «владение слотами» переходит из парсера (порядок объявления,
 /// нестабильно при вставке поля в середину) в миграционный слой (история). Запускать ДО [`diff`].
 ///
-/// Запинены только слоты; id вариантов enum (тоже order-dependent) — отдельная сверка (TODO).
-pub fn reconcile_slots(new: &mut Schema, old: &Schema) {
+/// Переносит из старого снапшота всё order-dependent: слоты Body-полей И id вариантов enum
+/// (по ним хранятся данные). Затем канонизирует порядок полей под инвариант формата строки.
+pub fn reconcile(new: &mut Schema, old: &Schema) {
+  carry_slots(new, old);
+  carry_enum_ids(new, old);
+  // Порядок полей в массиве мог разойтись с порядком слотов — канонизируем
+  canonicalize_field_order(new);
+}
+
+/// Совпавшим по имени Body-полям — слот из old; новым — следующий свободный (append-only)
+fn carry_slots(new: &mut Schema, old: &Schema) {
   let old_by: HashMap<&str, &Entity> = old.models.iter().map(|e| (e.name.as_str(), e)).collect();
 
   for entity in new.models.iter_mut() {
@@ -206,10 +215,69 @@ pub fn reconcile_slots(new: &mut Schema, old: &Schema) {
 
     entity.payload_offset = next; // размер заголовка = за последним слотом
   }
+}
 
-  // После переноса слотов порядок полей в массиве мог разойтись с порядком слотов
-  // (новое поле в середине объявления получило высокий слот) — канонизируем
-  canonicalize_field_order(new);
+/// Переносит u16-id вариантов enum из старого снапшота (совпавшим по имени), новым даёт следующий
+/// свободный. Без этого переупорядочивание вариантов в schema.marci сменило бы id (парсер назначает
+/// их по порядку объявления) → хранимые дискриминанты стали бы означать другое. Переотображает
+/// `EnumInfo`, условия payload-полей и enum-`@default`.
+fn carry_enum_ids(new: &mut Schema, old: &Schema) {
+  let old_by: HashMap<&str, &Entity> = old.models.iter().map(|e| (e.name.as_str(), e)).collect();
+
+  for entity in new.models.iter_mut() {
+    let Some(old_entity) = old_by.get(entity.name.as_str()) else { continue };
+    let old_fields: HashMap<&str, &Field> = old_entity.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+
+    // 1) для каждого дискриминанта считаем remap parser_id → reconciled_id (только если что-то меняется)
+    let mut remaps: Vec<(usize, HashMap<u16, u16>)> = vec![];
+    for (fi, field) in entity.fields.iter().enumerate() {
+      let FieldType::Enum(new_ei) = &field.ty else { continue };
+      let Some(old_field) = old_fields.get(field.name.as_str()) else { continue };
+      let FieldType::Enum(old_ei) = &old_field.ty else { continue };
+
+      let mut next = old_ei.variants_map.values().copied().max().map(|m| m + 1).unwrap_or(0);
+      let mut remap = HashMap::new();
+      let mut changed = false;
+      // варианты в порядке id для детерминизма
+      let mut variants: Vec<(&String, u16)> = new_ei.variants_map.iter().map(|(n, i)| (n, *i)).collect();
+      variants.sort_by_key(|(_, i)| *i);
+      for (name, parser_id) in variants {
+        let reconciled = match old_ei.variants_map.get(name) {
+          Some(&old_id) => old_id,
+          None => { let id = next; next += 1; id }
+        };
+        if reconciled != parser_id { changed = true; }
+        remap.insert(parser_id, reconciled);
+      }
+      if changed { remaps.push((fi, remap)); }
+    }
+
+    // 2) применяем remap к дискриминанту, его @default и условиям payload-полей
+    for (fi, remap) in remaps {
+      if let FieldType::Enum(ei) = &mut entity.fields[fi].ty {
+        ei.variants_map = std::mem::take(&mut ei.variants_map).into_iter().map(|(n, id)| (n, remap[&id])).collect();
+        ei.variants = std::mem::take(&mut ei.variants).into_iter().map(|(id, v)| (remap[&id], v)).collect();
+        ei.variants_names_map = ei.variants_map.iter().map(|(n, id)| (*id, n.clone())).collect();
+      }
+      // enum-@default хранится как 2 байта id — переотображаем
+      if let Some(FieldDefault::Value(bytes)) = &mut entity.fields[fi].default_value {
+        if bytes.len() == 2 {
+          let parser_id = u16::from_be_bytes([bytes[0], bytes[1]]);
+          if let Some(&reconciled) = remap.get(&parser_id) {
+            *bytes = reconciled.to_be_bytes().to_vec();
+          }
+        }
+      }
+      // условия payload-полей этого дискриминанта
+      for field in entity.fields.iter_mut() {
+        if let FieldExistsCondition::EnumValue { field_index, variants } = &mut field.condition {
+          if *field_index == fi {
+            for v in variants.iter_mut() { *v = remap[v]; }
+          }
+        }
+      }
+    }
+  }
 }
 
 /// Приводит порядок полей каждой entity к каноническому: ключи (по key-index), затем Body
@@ -573,7 +641,7 @@ mod tests {
     let old = parse_schema("model M {\n  a String\n  b String\n}");
     let mut new = parse_schema("model M {\n  a String\n  c String\n  b String\n}");
 
-    reconcile_slots(&mut new, &old);
+    reconcile(&mut new, &old);
 
     // a и b сохранили слоты из old; c — следующий свободный (после max=8 → 12)
     assert_eq!(body_offset(&new, "M", "a"), 4);
@@ -589,8 +657,23 @@ mod tests {
   fn reconcile_leaves_new_entity_untouched() {
     let old = parse_schema("model M {\n  a String\n}");
     let mut new = parse_schema("model M {\n  a String\n}\nmodel N {\n  x String\n  y String\n}");
-    reconcile_slots(&mut new, &old);
+    reconcile(&mut new, &old);
     assert_eq!(body_offset(&new, "N", "x"), 4);
     assert_eq!(body_offset(&new, "N", "y"), 8);
+  }
+
+  /// Переупорядочивание вариантов enum: id переносятся из старого снапшота → diff чист (не reject)
+  #[test]
+  fn reconcile_carries_enum_variant_ids() {
+    let old = parse_schema("model A {\n  t E\n}\nenum E {\n  a\n  b\n}");
+    // в новой схеме варианты переставлены местами
+    let mut new = parse_schema("model A {\n  t E\n}\nenum E {\n  b\n  a\n}");
+
+    // без сверки парсер дал бы b=0,a=1 → enum_cmp увидел бы смену id → reject
+    assert!(matches!(diff(&old, &new), Err(MigrateError::UnsupportedEnumChange { .. })));
+
+    reconcile(&mut new, &old);
+    // id перенесены: a=0, b=1 как в old → diff пуст
+    assert!(diff(&old, &new).unwrap().is_empty());
   }
 }

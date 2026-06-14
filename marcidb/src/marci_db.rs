@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, diff, reconcile_slots}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, try_parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, diff, reconcile}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, try_parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -155,7 +155,7 @@ impl MarciDB {
   /// изменение enum и drop field возвращают `MigrateApplyError` (транзакция откатывается).
   pub fn migrate_to(&mut self, new_schema_text: &str) -> Result<(), MigrateApplyError> {
     let mut new_schema = try_parse_schema(new_schema_text)?;
-    reconcile_slots(&mut new_schema, &self.schema);
+    reconcile(&mut new_schema, &self.schema);
     let ops = diff(&self.schema, &new_schema)?;
     self.commit_schema(new_schema, &ops)
   }

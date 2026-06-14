@@ -261,6 +261,27 @@ fn enum_list_rejected_with_hint() {
   assert!(msg.contains("RoleItem"), "ожидали подсказку-альтернативу, got: {}", msg);
 }
 
+/// Переупорядочивание вариантов enum в schema.marci: id переносятся из старого снапшота,
+/// поэтому уже записанные данные продолжают читаться правильно (дискриминант не «съезжает»)
+#[test]
+fn migrate_enum_reorder_preserves_data() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new(
+    "model Account {\n  name String\n  type AccountType\n}\n\nenum AccountType {\n  basic\n  pro {\n    sign String\n  }\n}",
+    dir.path().to_str().unwrap(),
+  );
+  insert_data(&db, "Account", json!({ "name": "Alice", "type": "pro", "sign": "a-sign" }));
+
+  // Варианты переставлены местами — но id pro/basic должны сохраниться
+  db.migrate_to("model Account {\n  name String\n  type AccountType\n}\n\nenum AccountType {\n  pro {\n    sign String\n  }\n  basic\n}").unwrap();
+
+  // Запись, сделанная до миграции, по-прежнему читается как pro со своим sign
+  assert_eq!(
+    get_data_one(&db, "Account", json!({ "name": true, "type": true, "sign": true })),
+    json!({ "name": "Alice", "type": "pro", "sign": "a-sign" })
+  );
+}
+
 /// Разошедшаяся история (другой id на уже применённой позиции) отклоняется
 #[test]
 fn migrations_history_diverged_rejected() {

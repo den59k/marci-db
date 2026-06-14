@@ -12,18 +12,18 @@ fi
 case "$PLATFORM" in
   linux)
     TARGET="x86_64-unknown-linux-gnu"
-    BIN_SRC="target/$TARGET/release/marcidb-ts"
-    BIN_DST="packages/npm/bin/marci-generate-linux-x64"
+    SUFFIX="linux-x64"
+    EXT=""
     ;;
   mac)
     TARGET="aarch64-apple-darwin"
-    BIN_SRC="target/$TARGET/release/marcidb-ts"
-    BIN_DST="packages/npm/bin/marci-generate-darwin-arm64"
+    SUFFIX="darwin-arm64"
+    EXT=""
     ;;
   win)
     TARGET="x86_64-pc-windows-msvc"
-    BIN_SRC="target/$TARGET/release/marcidb-ts.exe"
-    BIN_DST="packages/npm/bin/marci-generate-win32-x64.exe"
+    SUFFIX="win32-x64"
+    EXT=".exe"
     ;;
   *)
     echo "Unknown platform: $PLATFORM"
@@ -32,11 +32,21 @@ case "$PLATFORM" in
     ;;
 esac
 
+# Два бинаря: marcidb-ts → marci-generate (TS-типы), marcidb-migrate → marci-migrate (миграции).
+# (имя бинаря крейта marcidb-migrate переопределено на marci-migrate в его Cargo.toml)
 echo "Building for $PLATFORM ($TARGET)..."
-cargo build -p marcidb-ts --release --target "$TARGET"
+cargo build -p marcidb-ts -p marcidb-migrate --release --target "$TARGET"
 
-echo "Copying binary to $BIN_DST..."
 mkdir -p packages/npm/bin
-cp "$BIN_SRC" "$BIN_DST"
 
-echo "Done: $BIN_DST"
+copy_bin() {
+  local src="target/$TARGET/release/$1$EXT"
+  local dst="packages/npm/bin/$2-$SUFFIX$EXT"
+  echo "Copying $src -> $dst..."
+  cp "$src" "$dst"
+}
+
+copy_bin "marcidb-ts" "marci-generate"
+copy_bin "marci-migrate" "marci-migrate"
+
+echo "Done: packages/npm/bin/marci-generate-$SUFFIX$EXT, packages/npm/bin/marci-migrate-$SUFFIX$EXT"

@@ -1,259 +1,145 @@
-# MarciDB Migrations — design (proposal, not yet implemented)
+# MarciDB Migrations
 
-Status: **design**. This document specifies the op-set, the migration-file format, the row-format
-change that makes the common cases cheap, and what `apply` does per operation. It is the
-implementation guide for the migration engine.
+Status: **implemented** (snapshot-based engine). This document describes how migrations actually work:
+the snapshot model, the engine (`snapshot.rs` + `migrate.rs`), the row format that makes the common
+cases O(1), the two HTTP frontends, and the CLI.
 
-## Goals
+## Core idea: the snapshot IS the migration unit
 
-- `schema.marci` is the source of truth (declarative). You edit the schema; the tool computes the diff.
-- One **engine** — `(old_schema, ops) → apply` — shared by the embeddable library (direct call) and the
-  server (HTTP push). Transport differs, engine is the same.
-- Most migrations are **O(1) metadata** (see the row-format change below); only genuinely heavy changes
-  (type transforms, re-keying) cost a data rewrite, and those are **rejected in v1** rather than half-done.
-- Never silently lose data: destructive ops are gated; data conflicts (unique, failed transforms) are
-  reported up front, before anything is written.
+The source of truth is the **materialized snapshot** — the flat `Schema.models` array exactly as MarciDB
+holds it in memory: `struct` already expanded into models (`Parent.field` with an injected `@parent_id`
+key), `enum` already injected into the owning model (discriminant field + per-variant payload fields),
+refs carrying their resolved binding. There is no `struct`/`enum` sugar and no nesting in a snapshot.
+
+`schema.marci` (with sugar) stays the human-edited source. The engine **materializes** it
+(`parse_schema`), and from there everything — diff, apply, the stored schema, migration files — operates
+on the flat snapshot. Two consequences:
+
+- Migrations never special-case `struct`/`enum`: in the flat form a struct is just a model and an enum is
+  just fields. `diff` is a per-name comparison of two flat schemas.
+- What you diff is exactly what runs, so applying a migration holds no surprises. A snapshot also makes it
+  obvious where a bug lives: if the snapshot is wrong it's the parser; if apply is wrong it's the engine.
 
 ## Artifacts
 
 ```
-schema.marci                      # source of truth (dev-side)
+schema.marci                       # human-edited source of truth (with struct/enum sugar)
 migrations/
   meta/
-    snapshot.json                 # schema as of the last migration — used to diff offline at `generate`
-    journal.json                  # ordered [{ id, name, schemaHash }] — the migration chain
-  0000_init.mig
-  0001_add_user_bio.mig
+    snapshot                       # the latest materialized snapshot — what `generate` diffs against
+  0000_init.snapshot               # one full materialized snapshot per version
+  0001_add_users.snapshot
   ...
 ```
 
-Inside every database, a reserved tree `__marci_meta__` holds:
+A migration file is a **full materialized snapshot** of the schema at that version — not an incremental
+op list. The engine recovers "what changed" by diffing consecutive snapshots, so there is no separate op
+DSL and no replay/evolve step. Files are verbose (each is the whole schema) but fully reviewable: you see
+the exact flat schema at every version.
 
-```
-{ format_version, schema_snapshot, applied: [migration ids], schema_version: <last applied id/hash> }
-```
+Inside each database, the reserved tree `__marci_meta__` holds:
 
-`schema_snapshot` is the **materialized current schema** — the running server reconstructs its in-memory
-layout from here (it has no `schema.marci`). `format_version` is the version of *our* binary row format,
-independent of the user schema (lets us upgrade the format itself later).
+- `schema` — the current materialized snapshot (text). `MarciDB::open` reconstructs the in-memory schema
+  from it via `parse_snapshot`, with no re-expansion of sugar and the same slots — so reopening is
+  identical to the state the migration left behind.
+- `version` — `u64` BE, bumped per applied migration.
+- `applied` — ledger of applied migration ids (`\n`-joined), for the imperative frontend.
 
-## Commands
+## Commands (`marci-migrate`)
 
-| Command | When | What |
-|---|---|---|
-| `marcidb generate [name]` | dev, offline | diff `meta/snapshot.json` ↔ `schema.marci` → new migration file + update snapshot/journal |
-| `marcidb migrate [--dry-run]` | embedded / local | apply migrations after the DB's `schema_version`; `--dry-run` prints the plan |
-| `marcidb migrate push <db>` | server | send pending migration files to a running server; it applies them to the named DB |
-| `marcidb push` | dev only | diff `schema.marci` ↔ the DB's `schema_snapshot` and apply directly, no files (prototyping) |
-
-Rename detection (interactive "is `a` renamed to `b`?") is **v2** — see Open decisions.
-
-## Row-format change (the foundational decision)
-
-The current row is `[ offset table | payload ]` where the offset table has a fixed number of 4-byte slots
-(`payload_offset`, a per-schema constant). Adding a field grows the table → every existing row has the
-wrong layout → **full rewrite**. That makes the most common migration (add a field) O(rows).
-
-**Proposal — logical append-only slots + a per-row header length + default-on-read:**
-
-```
-v1 (now):   [ off0 off1 off2 ]                  [ payload ]
-            payload_offset = 12 (3 slots), constant per schema
-
-v2 (new):   [ nslots:u16 ][ off0 off1 off2 off3 ] [ payload ]
-            header length is read from the row, not the schema
-```
-
-- Each body field maps to a **fixed logical slot index**, stored in the schema and assigned
-  **append-only** (a new field always gets `max_slot + 1`; declaration order in `schema.marci` is
-  cosmetic). Dropped slots are tombstoned, never reused.
-- Reading field at slot `i`: if `i < nslots` read `off_i` (0 = null); if `i >= nslots` the field was added
-  after this row was written → treat as **absent**. Absent resolves to the field's `@default` if it has
-  one, otherwise `null` (**default-on-read** — the default lives in the schema, no backfill needed).
-
-What this buys:
-
-| Migration | Cost with v2 format |
+| Command | What |
 |---|---|
-| add nullable field | **O(1)** — old rows read it as null, new rows write the extra slot |
-| add field with `@default` | **O(1)** — default-on-read; no backfill |
-| drop field | **O(1)** — tombstone the slot; old bytes stay unread, new rows write 0 there |
-| reorder fields in schema | **O(1)** — declaration order is cosmetic, slots are stable |
+| `marci-migrate snapshot <schema.marci> [out]` | materialize a schema → flat snapshot (stdout or file) |
+| `marci-migrate generate <schema.marci> [dir] [name]` | diff schema vs `meta/snapshot` → new `NNNN_name.snapshot` + update `meta/snapshot` |
 
-So with the v2 format, **v1 `apply` does almost no row rewriting** — it's mostly metadata updates plus
-index/relation scans. The scary byte-rewrite path shrinks to v2-only changes (type transforms, re-key,
-optional `vacuum` to reclaim tombstoned slots). This is why the format decision must be made first.
+The npm wrapper (`marcidb` CLI) drives both binaries: `marci-generate` for TS types, `marci-migrate` for
+migrations. `marcidb generate` produces types + a migration file; `marcidb migrate push <db>` sends all
+`.snapshot` files to a server.
 
-There is no production data yet, so v2 is adopted as **the** format directly — no v1→v2 upgrader is
-written. The `format_version` field stays in `__marci_meta__` so a *future* format change can ship an
-upgrader without a flag day.
+## Row format (the foundational decision)
 
-## Op-set
+A row is `[ version:u8 | reserved:u8 | header_len:u16 | offset_table | payload ]`. Each Body field has a
+**fixed byte slot** in the offset table (`offset_pos`); the header length is stored per row.
 
-Each op is a JSON object `{ "op": "...", ... }`. "Rewrite?" assumes the v2 format above.
+- Reading field at `offset_pos`: if `offset_pos + 4 > header_len` the field was added after this row was
+  written → treated as **absent** (resolves to `@default` if present, else `null` — *default-on-read*, no
+  backfill). Otherwise the offset gives the payload start; the end is the next non-zero slot.
+- **Invariant:** Body fields are laid out in slot order. The writer writes them in array order and the
+  reader derives a field's end from the next slot, so the entity's field array must keep Body fields in
+  `offset_pos` order. `reconcile` enforces this via `canonicalize_field_order`.
 
-"Rewrite?" assumes the v2 row format above.
+What this buys (assuming the engine never reuses a retired slot):
 
-| line | apply does | rewrite? | destructive |
+| Migration | Cost |
+|---|---|
+| add nullable field | **O(1)** — old rows read it as absent/null |
+| add field with `@default` | **O(1)** — default-on-read, no backfill |
+| reorder fields in `schema.marci` | **O(1)** — declaration order is cosmetic; slots are carried |
+| add index / unique | scan (backfill the index tree from existing rows) |
+
+## Engine
+
+Pipeline for a declarative migration (`migrate_to` / `$sync`):
+
+```
+new = parse_schema(new_text)          # materialize: expand sugar, assign provisional slots/ids by order
+reconcile(&mut new, &old_snapshot)    # carry slots + enum variant ids from history; canonicalize order
+ops = diff(&old_snapshot, &new)       # per-name comparison of two flat schemas
+apply(tx, &old_snapshot, &new, &ops)  # physical: create/drop trees, build/drop indexes
+store serialize_snapshot(&new)        # __marci_meta__/schema
+```
+
+- **`reconcile(new, old)`** moves everything order-dependent from the old snapshot into the freshly
+  parsed schema, because the parser assigns these by declaration order (unstable):
+  - **slots**: a field matched by name keeps its old `offset_pos`; a new field gets the next free slot
+    (append-only, above the old high-water mark). This is why inserting a field mid-model no longer
+    breaks old rows — slot ownership lives in the migration layer, not the parser.
+  - **enum variant ids**: a variant matched by name keeps its old `u16` id; a new variant gets the next
+    free id. Stored discriminants stay valid even if variants are reordered in `schema.marci`.
+  - then `canonicalize_field_order` sorts each entity's fields (keys by index, Body by slot, then
+    virtual) and remaps index references (`condition.field_index`, enum variant→field maps,
+    `rev_field_idx`).
+- **`diff(old, new)`** emits `MigrateOp` by comparing entities and fields by name. Type comparison is by
+  name for refs/primitives; enums compare variant maps (adding variants is allowed, removing/renumbering
+  is rejected).
+- **`apply`** executes ops in one write transaction. add/alter field are metadata-only (the slot is
+  already in `new`, old rows stay forward-compatible).
+
+`parse_snapshot` reverses `serialize_snapshot`: it reads the flat text, wires names → indices, and
+rebuilds the computed caches (default bytes, index trees, counters, reverse-dependencies) via
+`rebuild_caches` — without re-expanding sugar or re-assigning slots/ids (those are pinned in the text).
+
+## Op-set (`MigrateOp`)
+
+| op | apply does | rewrite? | destructive |
 |---|---|---|---|
-| `create model M { … }` | create model tree (+ index/relation trees), assign slots | no (empty) | no |
-| `drop model M` | delete model tree + its index/relation trees | no | **yes** |
-| `rename model A -> B` | `rename_tree` for the model + dependent trees; update refs | no | no |
-| `add field M.f <spec>` | assign next slot; update schema | **no** | no |
-| `alter field M.f <spec>` | update default / format / nullable; `false` nullable → check no nulls | no | narrowing only |
-| `drop field M.f` | tombstone the slot in schema | **no** | **yes** |
-| `rename field M.f -> g` | update name → slot mapping (layout unchanged) | no | no |
-| `add index M.f` / `add unique M.f` | scan rows, encode keys, fill index tree; `unique` → dup check | scan | no |
-| `drop index M.f` / `drop unique M.f` | delete the index tree | no | no |
-| `add relation M.f -> T.r` | create relation index tree(s), backfill from existing refs | scan | no |
-| `drop relation M.f` | delete the relation index tree(s) | no | no |
-| `create enum E { … }` | add the enum definition to the schema text | no | no |
-| `drop enum E` | remove the enum definition from the schema text | no | no |
+| `CreateEntity` | create the entity tree + its index/relation trees | no (empty) | no |
+| `DropEntity` | delete the entity tree + its index/relation trees | no | **yes** |
+| `AddField` | nothing (slot is in `new`; default-on-read) | **no** | no |
+| `AlterField` | nothing (nullable/default/format/added enum variants — metadata) | no | no |
+| `DropField` | — **rejected** (slot tombstone not implemented yet) | — | **yes** |
+| `AddIndex` / `DropIndex` | build the index tree from existing rows / delete it | scan / no | no |
 
-An enum injects its variant fields directly into the model, so an enum carries **no tree of its own** —
-`create enum` / `drop enum` are pure metadata (the definition lives in the schema text; payload fields
-arrive via the `create model` / `add field` of the models that use it). The diff emits `create enum`
-before, and `drop enum` after, the models that reference it.
+**Rejected by `diff`** (need data transformation, not done): a field **type** change
+(`UnsupportedTypeChange`), an `@id`/key change (`UnsupportedKeyChange`), a slot that moved without being
+reconciled (`UnsupportedLayoutChange`), removing or renumbering an enum variant
+(`UnsupportedEnumChange`).
 
-**Variant-level changes (`add variant` / `drop variant`) and any other change to an *existing* enum are
-deferred** — they touch the injected payload-field layout (slot positions) and so belong with
-`changeFieldType` / re-key in the heavy-change bucket. Today a changed enum emits no op: via `push`
-(declarative `$sync`) it still takes effect because the full schema text is stored; via migration files it
-is not yet reflected.
+## Frontends
 
-**Rejected by `generate` in v1** (clear "edit manually" message): a field **type** change (needs a
-transform), `@id` / key changes (re-key), field-slot `vacuum`.
+Both wrap the same engine; do not mix them on one database (`$sync` ignores the ledger).
 
-## Migration file format
+- **`POST /:db/$sync`** (declarative) — body is `schema.marci` text. The server materializes, reconciles
+  against its stored snapshot, diffs and applies. For databases not managed by migration files (CI,
+  direct HTTP). `MarciDB::migrate_to`.
+- **`POST /:db/$migrate`** (imperative, ledger) — body is `[{ id, ops }]` where `ops` is the version's
+  **snapshot** (not a DSL). The server applies only ids after those in its ledger, diffing each snapshot
+  against the running one in a single transaction. Applied ids must be a prefix of the incoming list,
+  else `HistoryDiverged` (400). Idempotent. `MarciDB::apply_migrations`. Chosen for prod reproducibility:
+  apply exactly what was reviewed and committed.
 
-Migration files are **line-based and human-readable** — one action per line, reusing the `.marci` schema
-vocabulary (so `add field User.bio String?` is the same field syntax you already write in the schema). A
-new model is a schema-style block; every incremental change is a single line.
+## Deferred
 
-```
-# 0001_add_user_bio   (from 0000)
-
-add field User.bio String?
-add index Post.views
-add unique User.email
-```
-
-Baseline `0000_init.mig` is just the schema as `create model` blocks:
-
-```
-# 0000_init
-
-create model User {
-  id     Byte[16]  @id @format(uuid)
-  name   String
-  email  String?   @unique
-  posts  Post[]    @bind(Post.author)
-}
-create model Post {
-  title  String
-  views  UInt      @index
-  author User?
-}
-```
-
-Chain metadata (`from`, resulting `schemaHash`, order) lives in machine-managed `meta/journal.json`, not in
-the file — the file stays purely the list of actions (the `#` header line is cosmetic). The resulting
-schema is recomputed by replaying the actions; `apply` verifies its hash against the journal, and refuses
-to apply unless the DB is at `from`.
-
-### Grammar
-
-```
-# models
-create model <Model> { <schema-style field block> }
-drop   model <Model>
-rename model <Old> -> <New>
-
-# fields   (<spec> = type + nullable + @default/@format, exactly as in schema.marci)
-add    field <Model>.<name> <spec>
-alter  field <Model>.<name> <spec>      # default / format / nullable; a type change is rejected in v1
-drop   field <Model>.<name>
-rename field <Model>.<old> -> <new>
-
-# indexes
-add  index  <Model>.<field>
-add  unique <Model>.<field>
-drop index  <Model>.<field>
-drop unique <Model>.<field>
-
-# relations  (mirrors @bind)
-add  relation <Model>.<field> -> <Target>.<reverseField>
-drop relation <Model>.<field>
-
-# enums  (block carries the verbatim `enum Name { … }` body, nested payload braces and all)
-create enum <Enum> { <schema-style variant block> }
-drop   enum <Enum>
-# changing the variants of an existing enum (add/drop variant) is deferred — see the op-set notes
-```
-
-The format carries **semantic actions, not byte offsets** — `apply` computes the byte mechanics at run
-time from the DB's stored old schema + the action. Files stay readable and survive format-version changes.
-
-## `apply` algorithm
-
-```
-apply(db, migration):
-  assert db.schema_version == migration.from           # chain guard, else error
-  old = db.schema_snapshot
-  new = replay(old, migration.ops)                      # pure: ops → new schema
-  assert hash(new) == migration.schemaHash
-  in one write transaction (build-then-swap):
-    for op in migration.ops:
-      run op against trees (per the op-set table)       # metadata, tree create/drop/rename, index scans
-      on conflict (unique dup, narrowing with nulls, …) → abort tx, return the offending rows
-    write __marci_meta__ { schema_snapshot = new, schema_version = migration.id, applied += id }
-    commit                                              # version bumps only here
-```
-
-- **Atomic**: a crash or conflict mid-migration rolls the whole thing back; the DB stays on `from`.
-- **Online (server)**: the write lock is exclusive, so writes to that DB stall for the migration's
-  duration (reads continue on the old snapshot). With the v2 format most ops are O(1)/metadata, so the
-  stall is short; index builds are O(rows). In-flight reads keep the *old* in-memory schema until they
-  finish; new transactions pick up `new` after the swap. v1 keeps the swap simple: briefly quiesce new
-  transactions, drain in-flight, swap, resume.
-- For very large index builds we can later chunk + checkpoint; v1 does it in one transaction.
-
-## `generate` algorithm
-
-```
-generate(name):
-  old = read migrations/meta/snapshot.json   # or empty for 0000_init
-  new = parse(schema.marci)
-  ops = diff(old, new)                        # see below
-  if ops contains a v2-only change: error with "unsupported in v1, edit manually"
-  write migrations/NNNN_name.mig                      # the action lines
-  record { id, name, from, schemaHash: hash(new) } in meta/journal.json
-  update meta/snapshot.json = new
-```
-
-`diff(old, new)` per element:
-- model in new not in old → `createModel`; in old not in new → `dropModel` (destructive, gated).
-- field added / removed / default / format / nullable change → the matching op.
-- index/relation added or removed → the matching op.
-- enum added or removed → `createEnum` / `dropEnum` (whole block); a *changed* enum emits no op (deferred).
-- v1 has **no rename detection**: a removed+added pair is emitted as drop+add (destructive). v2 adds the
-  interactive "renamed `a`→`b`?" prompt that rewrites the pair into a `renameField`/`renameModel`.
-
-Destructive ops require `--allow-destructive` (CLI) / `OpenOptions { allow_destructive }` (embedded).
-
-## v1 scope
-
-- **In:** the v2 row format; `generate` (diff → file) without rename detection; `apply` for all ops in the
-  op-set table above; `migrate` (local) and `push` (dev); chain guard; destructive gate; conflict
-  reporting; one-time format v1→v2 upgrade.
-- **Deferred (v2+):** interactive rename detection; `changeFieldType` with transforms; re-keying;
-  `vacuum`; server `migrate push` + multi-DB + auth (separate server-layer milestone — the engine is
-  ready to be wrapped by it).
-
-## Open decisions
-
-1. **Row format v2 (logical slots + header length + default-on-read)** — recommended; it is what makes v1
-   `apply` tractable. Must be decided before freezing v1.
-2. Migration files as a line-based DSL (one action per line) — proposed above.
-3. `migrations/` layout & file naming (`NNNN_name.json`) — proposed; bikeshed welcome.
-4. Rename detection deferred to v2 — confirmed direction.
+- `drop field` (needs slot tombstones so retired slots are never reused).
+- `changeFieldType` with data transforms; re-keying; `vacuum` to reclaim tombstoned slots.
+- Interactive rename detection (a removed+added pair is currently two ops).
