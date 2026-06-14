@@ -117,7 +117,15 @@ fn apply_file_op(blocks: &mut Vec<(String, Vec<String>)>, op: FileOp) -> Result<
         }
         FileOp::DropField { entity, field } => {
             let i = find(blocks, &entity).ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
-            blocks[i].1.retain(|l| field_name_of(l) != field);
+            // Replace the field line with a retired-slot tombstone so the slot is never reused (old rows keep
+            // dead bytes there). A field with no slot (a virtual relation) is removed — `apply` rejects
+            // relation drops anyway.
+            if let Some(pos) = blocks[i].1.iter().position(|l| field_name_of(l) == field) {
+                match slot_of(&blocks[i].1[pos]) {
+                    Some(slot) => blocks[i].1[pos] = format!("@retired({})", slot),
+                    None => { blocks[i].1.remove(pos); }
+                }
+            }
         }
         FileOp::AddIndex { entity, field, unique } => set_field_index(blocks, &entity, &field, Some(unique))?,
         FileOp::DropIndex { entity, field, .. } => set_field_index(blocks, &entity, &field, None)?,
@@ -143,6 +151,12 @@ fn set_field_index(blocks: &mut [(String, Vec<String>)], entity: &str, field: &s
 
 fn field_name_of(line: &str) -> &str {
     line.split_whitespace().next().unwrap_or("")
+}
+
+/// Extracts the Body `@slot(N)` from a field line, if any (virtual fields have none).
+fn slot_of(line: &str) -> Option<usize> {
+    line.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("@slot(").and_then(|x| x.strip_suffix(")")).and_then(|n| n.parse().ok()))
 }
 
 /// Splits snapshot text into blocks `(entity name, field lines)`, preserving order.

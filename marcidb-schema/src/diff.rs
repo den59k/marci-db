@@ -2,7 +2,7 @@
 //! enum ids from history, canonicalize field order). Operates only on the flat `Schema`; the physical
 //! apply lives in the engine, and rendering ops to `.march` text lives in `march.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use marcidb::{
     Attribute, Entity, EnumInfo, Field, FieldDefault, FieldExistsCondition, FieldLocation, FieldType,
@@ -147,25 +147,35 @@ fn carry_slots(new: &mut Schema, old: &Schema) {
     for entity in new.models.iter_mut() {
         let Some(old_entity) = old_by.get(entity.name.as_str()) else { continue };
 
+        let new_names: HashSet<&str> = entity.fields.iter().map(|f| f.name.as_str()).collect();
+
         let mut old_slots: HashMap<&str, usize> = HashMap::new();
-        let mut max_offset = 0usize;
+        // Retire: carry the old retired slots, plus any old Body field now missing from `new` (a drop).
+        let mut retired = old_entity.retired_slots.clone();
         for f in old_entity.fields.iter() {
             if let FieldLocation::Body { offset_pos } = f.location {
                 old_slots.insert(f.name.as_str(), offset_pos);
-                max_offset = max_offset.max(offset_pos);
-            }
-        }
-        let mut next = if max_offset == 0 { PRE_HEADER } else { max_offset + 4 };
-
-        for f in entity.fields.iter_mut() {
-            if let FieldLocation::Body { offset_pos } = &mut f.location {
-                match old_slots.get(f.name.as_str()) {
-                    Some(&old_off) => *offset_pos = old_off,
-                    None => { *offset_pos = next; next += 4; }
+                if !new_names.contains(f.name.as_str()) {
+                    retired.push(offset_pos);
                 }
             }
         }
 
+        // The high-water mark never shrinks: old.payload_offset already covers old fields + old retired,
+        // and a just-dropped field's slot is below it — so new fields always land above every retired slot,
+        // and a retired slot is never reused (old rows keep dead bytes there).
+        let mut next = old_entity.payload_offset.max(PRE_HEADER);
+
+        for f in entity.fields.iter_mut() {
+            if let FieldLocation::Body { offset_pos } = &mut f.location {
+                match old_slots.get(f.name.as_str()) {
+                    Some(&old_off) => *offset_pos = old_off,   // matched by name — keep the old slot
+                    None => { *offset_pos = next; next += 4; } // new field — next free slot above the mark
+                }
+            }
+        }
+
+        entity.retired_slots = retired;
         entity.payload_offset = next;
     }
 }
@@ -481,5 +491,26 @@ mod tests {
 
         reconcile(&mut new, &old);
         assert!(diff(&old, &new).unwrap().is_empty());
+    }
+
+    /// Dropping a field retires its slot; reconcile carries the retirement forward and never reuses the slot.
+    #[test]
+    fn reconcile_retires_dropped_slot_and_never_reuses_it() {
+        let v0 = parse_schema("model M {\n  a String\n  b String\n  c String\n}"); // a@4 b@8 c@12
+
+        // drop b
+        let mut v1 = parse_schema("model M {\n  a String\n  c String\n}");
+        reconcile(&mut v1, &v0);
+        assert!(v1.models[0].retired_slots.contains(&8), "retired: {:?}", v1.models[0].retired_slots);
+        assert_eq!(body_offset(&v1, "M", "a"), 4);
+        assert_eq!(body_offset(&v1, "M", "c"), 12);
+        assert_eq!(v1.models[0].payload_offset, 16, "high-water mark held");
+        assert_eq!(diff(&v0, &v1).unwrap(), vec![MigrateOp::DropField { entity: "M".into(), field: "b".into() }]);
+
+        // add d on top of v1 — it must land above the retired slot 8, not reuse it
+        let mut v2 = parse_schema("model M {\n  a String\n  c String\n  d String\n}");
+        reconcile(&mut v2, &v1);
+        assert_eq!(body_offset(&v2, "M", "d"), 16, "d must NOT reuse retired slot 8");
+        assert!(v2.models[0].retired_slots.contains(&8), "retirement carried forward");
     }
 }

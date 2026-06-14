@@ -30,6 +30,12 @@ pub fn serialize_snapshot(schema: &Schema) -> String {
       out.push_str(&serialize_field(schema, entity, field));
       out.push('\n');
     }
+    // Retired (dropped-field) slots — reserved so they are never reused. Sorted for a deterministic snapshot.
+    let mut retired = entity.retired_slots.clone();
+    retired.sort_unstable();
+    for slot in retired {
+      out.push_str(&format!("  @retired({})\n", slot));
+    }
     out.push_str("}\n");
   }
   out
@@ -177,6 +183,7 @@ struct SnapField {
 struct SnapEntity {
   name: String,
   fields: Vec<SnapField>,
+  retired: Vec<usize>,
 }
 
 /// Parses snapshot text back into a flat `Schema`. Without expanding sugar and without reassigning
@@ -221,9 +228,14 @@ pub fn parse_snapshot(text: &str) -> Result<Schema, SchemaError> {
         payload_offset = payload_offset.max(offset_pos + 4);
       }
     }
+    // Retired slots keep the header high-water mark up even after the top field was dropped
+    for slot in se.retired.iter() {
+      payload_offset = payload_offset.max(slot + 4);
+    }
 
     let mut entity = Entity::new(se.name.clone(), fields);
     entity.payload_offset = payload_offset;
+    entity.retired_slots = se.retired.clone();
     models.push(entity);
   }
 
@@ -329,13 +341,18 @@ fn parse_blocks(text: &str) -> Result<Vec<SnapEntity>, SchemaError> {
     };
     let name = rest.trim_end_matches('{').trim().to_string();
     let mut fields = vec![];
+    let mut retired = vec![];
     for raw in lines.by_ref() {
       let l = raw.trim();
       if l == "}" { break; }
       if l.is_empty() || l.starts_with("//") { continue; }
+      if let Some(n) = l.strip_prefix("@retired(").and_then(|x| x.strip_suffix(")")) {
+        retired.push(n.trim().parse().map_err(|_| SchemaError(format!("snapshot: bad @retired slot: {}", l)))?);
+        continue;
+      }
       fields.push(parse_field_line(l)?);
     }
-    entities.push(SnapEntity { name, fields });
+    entities.push(SnapEntity { name, fields, retired });
   }
   Ok(entities)
 }

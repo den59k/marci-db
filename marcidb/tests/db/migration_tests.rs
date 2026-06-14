@@ -137,14 +137,72 @@ fn migrate_insert_field_in_middle_carries_slots() {
   );
 }
 
-/// drop field is not yet supported by apply (a slot tombstone is needed) — an explicit error, not silent corruption
+/// Dropping a Body field retires its slot ($sync): the field is gone, old rows still read, and a field
+/// added later must NOT reuse the retired slot (which would resurrect dead bytes as the new field).
 #[test]
-fn migrate_drop_field_unsupported() {
+fn migrate_drop_field_retires_slot() {
   let dir = tempdir().unwrap();
-  let mut db = MarciDB::new("model User {\n  name String\n  age  UInt\n}", dir.path().to_str().unwrap());
+  let mut db = MarciDB::new("model M {\n  a String\n  b String\n}", dir.path().to_str().unwrap());
+  insert_data(&db, "M", json!({ "a": "a1", "b": "b1" }));  // b is at slot 8
 
-  let result = migrate_to(&mut db,"model User {\n  name String\n}");
-  assert!(matches!(result, Err(MigrateApplyError::Unsupported(_))));
+  // drop b — it's gone, the old row still reads its other fields
+  migrate_to(&mut db, "model M {\n  a String\n}").unwrap();
+  assert_eq!(get_data(&db, "M", json!({ "a": true })), json!([{ "a": "a1" }]));
+  assert!(marcidb::serialize_snapshot(&db.schema).contains("@retired(8)"), "slot 8 must be retired");
+
+  // add d — it must land ABOVE the retired slot, not reuse slot 8
+  migrate_to(&mut db, "model M {\n  a String\n  d String\n}").unwrap();
+  // the pre-existing row (which has "b1" sitting at slot 8) must read d as null — proves no slot reuse
+  assert_eq!(get_data(&db, "M", json!({ "a": true, "d": true })), json!([{ "a": "a1", "d": null }]));
+
+  // new rows use d normally
+  insert_data(&db, "M", json!({ "a": "a2", "d": "d2" }));
+  assert_eq!(get_data(&db, "M", json!({ "a": true, "d": true })), json!([
+    { "a": "a1", "d": null },
+    { "a": "a2", "d": "d2" },
+  ]));
+}
+
+/// A retired slot survives a reopen (it lives in `__marci_meta__`), so a later add still avoids it.
+#[test]
+fn migrate_drop_field_retirement_persists_across_reopen() {
+  let dir = tempdir().unwrap();
+  let path = dir.path().to_str().unwrap().to_string();
+  {
+    let mut db = MarciDB::new("model M {\n  a String\n  b String\n}", &path);
+    insert_data(&db, "M", json!({ "a": "a1", "b": "b1" }));
+    migrate_to(&mut db, "model M {\n  a String\n}").unwrap();  // drop b (slot 8)
+  }
+  let mut db = MarciDB::open(&path);
+  assert!(marcidb::serialize_snapshot(&db.schema).contains("@retired(8)"), "retirement must survive reopen");
+  migrate_to(&mut db, "model M {\n  a String\n  e String\n}").unwrap();  // add e
+  assert_eq!(get_data(&db, "M", json!({ "a": true, "e": true })), json!([{ "a": "a1", "e": null }]));
+}
+
+/// Dropping a field via the imperative `$migrate` path (a `.march` `drop field` action) retires the slot too.
+#[test]
+fn migrate_drop_field_via_migrate_path() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new("model M {\n  a String\n  b String\n}", dir.path().to_str().unwrap());
+  insert_data(&db, "M", json!({ "a": "a1", "b": "b1" }));
+
+  apply_migration(&mut db, "drop field M.b").unwrap();
+  assert_eq!(get_data(&db, "M", json!({ "a": true })), json!([{ "a": "a1" }]));
+  assert!(marcidb::serialize_snapshot(&db.schema).contains("@retired(8)"));
+
+  // generate would compute slot 12 here (next free above the retired 8); the action carries it
+  apply_migration(&mut db, "add field M.d String @slot(12)").unwrap();
+  assert_eq!(get_data(&db, "M", json!({ "a": true, "d": true })), json!([{ "a": "a1", "d": null }]));
+}
+
+/// Dropping a relation field is rejected (its trees / reverse side need handling) — an explicit error.
+#[test]
+fn migrate_drop_relation_field_unsupported() {
+  let dir = tempdir().unwrap();
+  let schema = "model User {\n  name String\n  posts Post[] @bind(Post.author)\n}\nmodel Post {\n  title String\n  author User?\n}";
+  let mut db = MarciDB::new(schema, dir.path().to_str().unwrap());
+  let result = migrate_to(&mut db, "model User {\n  name String\n}\nmodel Post {\n  title String\n  author User?\n}");
+  assert!(matches!(result, Err(MigrateApplyError::Unsupported(_))), "got {:?}", result);
 }
 
 /// Changing a field's type requires data transformation — rejected

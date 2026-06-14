@@ -218,7 +218,7 @@ rebuilds the computed caches (default bytes, index trees, counters, reverse-depe
 | `DropEntity` | delete the entity tree + its index/relation trees | no | **yes** |
 | `AddField` | nothing (slot is in `new`; default-on-read) | **no** | no |
 | `AlterField` | nothing (nullable/default/format/added enum variants — metadata) | no | no |
-| `DropField` | — **rejected** (slot tombstone not implemented yet) | — | **yes** |
+| `DropField` | nothing — the slot is **retired** (`@retired(N)` in the snapshot); old rows keep dead bytes, new rows skip it. Relation/key drops are rejected. | no | **yes** |
 | `AddIndex` / `DropIndex` | build the index tree from existing rows / delete it | scan / no | no |
 
 **Rejected by `diff`** (need data transformation, not done): a field **type** change
@@ -254,5 +254,6 @@ Both wrap the same engine. The split is **smart `$sync` vs dumb `$migrate`**: th
 - **Squash / baseline** ("migration = snapshot") — collapsing history into one baseline migration is
   already expressible (a baseline is just `create entity` + `add field` actions); a `generate --squash` is
   the next step.
-- `drop field` (needs slot tombstones so retired slots are never reused).
-- `changeFieldType` with data transforms; re-keying; `vacuum` to reclaim tombstoned slots.
+- `drop field` for **relation** fields (Ref/RefList) — needs relation-tree teardown + reverse-side fixup;
+  dropping a **Body** field (scalar/enum/list) is supported (its slot is retired via `@retired(N)`).
+- `changeFieldType` with data transforms; re-keying; `vacuum` to reclaim retired slots.

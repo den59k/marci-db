@@ -7,7 +7,7 @@
 use canopydb::WriteTransaction;
 
 use crate::index_utils::{encode_full_index, encode_index};
-use crate::schema::{Entity, Field, FieldType, RefBinding, Schema, SchemaError};
+use crate::schema::{Entity, Field, FieldLocation, FieldType, RefBinding, Schema, SchemaError};
 use crate::utils::get_data;
 use crate::StorageError;
 
@@ -107,7 +107,19 @@ pub fn apply(tx: &WriteTransaction, old: &Schema, new: &Schema, ops: &[MigrateOp
       MigrateOp::DropIndex { entity, field, .. } => drop_index(tx, old, entity, field)?,
       MigrateOp::CreateEntity { name } => create_entity_trees(tx, find_entity(new, name))?,
       MigrateOp::DropEntity { name } => drop_entity_trees(tx, find_entity(old, name))?,
-      MigrateOp::DropField { .. } => return Err(MigrateApplyError::Unsupported("drop field (slot tombstone) is not supported yet")),
+      MigrateOp::DropField { entity, field } => {
+        // The field is leaving `new`, so look it up in `old`. A Body scalar/enum/list needs NO physical work:
+        // old rows keep dead bytes at the now-retired slot, new rows skip it, and a value index (if any) was
+        // dropped by a preceding DropIndex op. Relation/key fields aren't supported yet.
+        let f = find_field(find_entity(old, entity), field);
+        match (&f.ty, &f.location) {
+          (FieldType::Ref(_) | FieldType::RefList(_), _) =>
+            return Err(MigrateApplyError::Unsupported("dropping a relation field is not supported yet — remove the related model or its @bind instead")),
+          (_, FieldLocation::Key { .. }) =>
+            return Err(MigrateApplyError::Unsupported("cannot drop a primary-key field")),
+          _ => {}
+        }
+      }
     }
   }
   Ok(())

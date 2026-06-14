@@ -37,12 +37,16 @@ pub struct Entity {
     pub fields: Vec<Field>,
     pub payload_offset: usize,
     pub autoinsert: bool,
-    pub rev_dependencies: Vec<EntityDependency>
+    pub rev_dependencies: Vec<EntityDependency>,
+    /// Body `offset_pos` slots of dropped fields — permanently retired so they are never reused (old rows
+    /// still hold dead bytes there). Kept in the snapshot as `@retired(N)` lines; `payload_offset` (the
+    /// high-water mark) accounts for them so new fields always get a fresh slot above any retired one.
+    pub retired_slots: Vec<usize>,
 }
 
 impl Entity {
     pub fn new(name: String, fields: Vec<Field>) -> Self {
-        Entity { name, fields, payload_offset: 0, autoinsert: false, rev_dependencies: vec![] }
+        Entity { name, fields, payload_offset: 0, autoinsert: false, rev_dependencies: vec![], retired_slots: vec![] }
     }
 }
 
