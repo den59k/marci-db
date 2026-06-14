@@ -8,11 +8,18 @@ The server is schema-agnostic and hosts **multiple databases** under one data di
 
 ```bash
 docker run -d -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
-# or, from the repo: cargo run -p marcidb-server --release
+# or, from the repo: cargo run -p marcidb-server --release -- --port 3000
 ```
 
-- listens on `0.0.0.0:$PORT` (default `3000`)
-- stores each database under `<data>/<db>` (`./data` locally, `/app/data` in the image)
+**Configuration** — each option is a CLI flag or an environment variable; precedence is **flag > env > default**:
+
+| Flag | Env | Default | |
+|---|---|---|---|
+| `--host <HOST>` | `MARCI_HOST` | `0.0.0.0` | bind address (`localhost` is accepted) |
+| `--port <PORT>` | `PORT` | `3000` | listen port |
+| `--data <DIR>` | `MARCI_DATA` | `./data` | data directory (`/app/data` in the image) |
+
+`--help` / `--version` print and exit. Each database is stored under `<data>/<db>`.
 
 ## Endpoints
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex, RwLock}};
+use std::{collections::HashMap, convert::Infallible, net::{IpAddr, SocketAddr}, path::PathBuf, sync::{Arc, Mutex, RwLock}};
 
 use http_body_util::Full;
 use hyper::{Method, Request, Response, StatusCode, body::Bytes, server::conn::http1, service::service_fn};
@@ -122,19 +122,100 @@ async fn handle_inner(
     }
 }
 
+/// Resolved server configuration. Precedence: CLI flag > environment variable > built-in default.
+struct Config {
+    host: IpAddr,
+    port: u16,
+    data_dir: String,
+}
+
+/// Parses CLI flags layered over environment variables over defaults. Accepts `--flag value` and
+/// `--flag=value`. `--help`/`--version` print and exit; an unknown flag or a bad value exits with code 2.
+fn parse_config() -> Config {
+    // seed from the environment; CLI flags override below
+    let mut host = std::env::var("MARCI_HOST").ok();
+    let mut port = std::env::var("PORT").ok();
+    let mut data = std::env::var("MARCI_DATA").ok();
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) => (f.to_string(), Some(v.to_string())),
+            None => (arg.clone(), None),
+        };
+        match flag.as_str() {
+            "-h" | "--help" => { print_help(); std::process::exit(0); }
+            "-v" | "--version" => { println!("marcidb-server {}", env!("CARGO_PKG_VERSION")); std::process::exit(0); }
+            "--host" => host = Some(take_value(&flag, inline, &mut args)),
+            "--port" => port = Some(take_value(&flag, inline, &mut args)),
+            "--data" | "--data-dir" => data = Some(take_value(&flag, inline, &mut args)),
+            other => {
+                eprintln!("marcidb-server: unknown argument '{}'. Try '--help'.", other);
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let host = parse_host(host.as_deref().unwrap_or("0.0.0.0"));
+    let port = match port {
+        Some(p) => p.parse::<u16>().unwrap_or_else(|_| {
+            eprintln!("marcidb-server: invalid port '{}' (expected 0-65535)", p);
+            std::process::exit(2);
+        }),
+        None => 3000,
+    };
+    let data_dir = data.unwrap_or_else(|| "./data".to_string());
+
+    Config { host, port, data_dir }
+}
+
+/// Pulls a flag's value from the inline `=value` or the next argument; exits 2 if absent.
+fn take_value(flag: &str, inline: Option<String>, args: &mut impl Iterator<Item = String>) -> String {
+    inline.or_else(|| args.next()).unwrap_or_else(|| {
+        eprintln!("marcidb-server: missing value for '{}'. Try '--help'.", flag);
+        std::process::exit(2);
+    })
+}
+
+/// Bind host as an IP. `localhost` is accepted as a convenience for `127.0.0.1`.
+fn parse_host(s: &str) -> IpAddr {
+    if s.eq_ignore_ascii_case("localhost") {
+        return IpAddr::from([127, 0, 0, 1]);
+    }
+    s.parse::<IpAddr>().unwrap_or_else(|_| {
+        eprintln!("marcidb-server: invalid host '{}' (expected an IP such as 0.0.0.0, 127.0.0.1, or ::)", s);
+        std::process::exit(2);
+    })
+}
+
+fn print_help() {
+    println!("MarciDB Server v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("USAGE:");
+    println!("  marcidb-server [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("  --host <HOST>   Address to bind     [default: 0.0.0.0]  [env: MARCI_HOST]");
+    println!("  --port <PORT>   Port to listen on   [default: 3000]     [env: PORT]");
+    println!("  --data <DIR>    Data directory      [default: ./data]   [env: MARCI_DATA]");
+    println!("  -h, --help      Print help and exit");
+    println!("  -v, --version   Print version and exit");
+    println!();
+    println!("CLI flags take precedence over environment variables.");
+}
+
 #[tokio::main]
 async fn main() {
-    let data_dir = std::env::var("MARCI_DATA").unwrap_or_else(|_| "./data".to_string());
-    if let Err(e) = fs::create_dir_all(&data_dir).await {
-        eprintln!("MarciDB Server: cannot create data dir '{}': {}", data_dir, e);
+    let cfg = parse_config();
+
+    if let Err(e) = fs::create_dir_all(&cfg.data_dir).await {
+        eprintln!("MarciDB Server: cannot create data dir '{}': {}", cfg.data_dir, e);
         std::process::exit(1);
     }
-    let root = PathBuf::from(&data_dir);
+    let root = PathBuf::from(&cfg.data_dir);
     let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(root.clone()));
 
-    // 0.0.0.0 — so the server is reachable from outside the container; port from env PORT
-    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = SocketAddr::new(cfg.host, cfg.port);
     let listener = match TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -178,8 +259,13 @@ fn print_banner(addr: &SocketAddr, data_dir: &std::path::Path, dbs: &[String]) {
     println!();
     println!("  MarciDB Server v{}", env!("CARGO_PKG_VERSION"));
     println!("  ----------------------------------------");
-    println!("  Local      http://localhost:{}", addr.port());
-    println!("  Network    http://{}", addr);
+    // 0.0.0.0 / :: bind to every interface — show the friendly localhost URL plus the wildcard
+    if addr.ip().is_unspecified() {
+        println!("  Local      http://localhost:{}", addr.port());
+        println!("  Network    http://{}", addr);
+    } else {
+        println!("  Listening  http://{}", addr);
+    }
     println!("  Data dir   {}", display_path(data_dir));
     if dbs.is_empty() {
         println!("  Databases  none yet (created on first migration)");
