@@ -96,6 +96,27 @@ pub fn parse_schema(input: &str) -> Schema {
     try_parse_schema(input).unwrap_or_else(|e| panic!("invalid schema: {}", e))
 }
 
+/// Пересобирает вычисляемые кэши уже-плоских моделей: байты `default`, индексы (`FieldIndex`),
+/// `counter_idx`, `rev_dependencies`. БЕЗ раскрытия сахара и БЕЗ переназначения слотов/offset'ов —
+/// для загрузки `Schema` из materialized-снапшота ([`crate::snapshot::parse_snapshot`]), где
+/// структура/слоты/биндинги уже запинены, а кэши надо восстановить.
+pub(crate) fn rebuild_caches(models: &mut [Entity]) -> Result<(), SchemaError> {
+    for model in models.iter_mut() {
+        for field in model.fields.iter_mut() {
+            resolve_default_value(field)?;
+        }
+    }
+    for model in models.iter_mut() {
+        resolve_indexes(model)?;
+    }
+    let mut counter_id = 0;
+    for model in models.iter_mut() {
+        resolve_counter_idx(model, &mut counter_id);
+    }
+    resolve_ref_constraints(models)?;
+    Ok(())
+}
+
 pub fn parse_model_block(name: String, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Result<Entity, SchemaError> {
 
     let fields = parse_fields(lines)?;
@@ -205,7 +226,8 @@ fn create_entity_model(field: &Field, st: &Entity, parent_name: &String) -> Enti
     parent_id.name = "@parent_id".to_string();
     parent_id.ty = FieldType::RefUnresolved(parent_name.to_string());
     parent_id.default_value = None;
-    parent_id.attributes.push(Attribute::BindUnresolved(field.name.clone()));
+    // @parent_id — это Ref на родителя, у него только bind (унаследованный от new_id @default не нужен)
+    parent_id.attributes = vec![Attribute::BindUnresolved(field.name.clone())];
     entity_model.fields.insert(0, parent_id);
 
     entity_model

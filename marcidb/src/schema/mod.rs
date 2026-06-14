@@ -8,8 +8,9 @@ mod schema_default_value;
 mod schema_resolve_bindings;
 
 pub use crate::schema::schema_attributes::{Attribute,DeleteConstraint,FieldCustomFormat};
-pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition,FieldIndex,FieldIndexNum,parse_field_raw};
-pub use crate::schema::{schema_parse::{parse_schema,try_parse_schema,collect_blocks,parse_model_block}};
+pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition,FieldIndex,FieldIndexNum};
+pub use crate::schema::{schema_parse::{parse_schema,try_parse_schema}};
+pub(crate) use crate::schema::schema_parse::rebuild_caches;
 pub use crate::schema::schema_default_value::FieldDefault;
 
 /// Ошибка разбора/валидации текста схемы. Сообщение пригодно для показа пользователю (→ HTTP 400).

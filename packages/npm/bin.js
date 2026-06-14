@@ -8,20 +8,22 @@ import fs from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const BINS = {
-  "linux-x64":    "marci-generate-linux-x64",
-  "darwin-arm64": "marci-generate-darwin-arm64",
-  "win32-x64":    "marci-generate-win32-x64.exe",
+// Платформенный суффикс пребилт-бинарей. `marci-generate` генерит TS-типы,
+// `marci-migrate` — файлы миграций (отдельный бинарь после рефактора миграций).
+const PLATFORM = {
+  "linux-x64":    "linux-x64",
+  "darwin-arm64": "darwin-arm64",
+  "win32-x64":    "win32-x64.exe",
 };
 
-function binPath() {
+function binPath(base) {
   const key = `${os.platform()}-${os.arch()}`;
-  const name = BINS[key];
-  if (!name) {
+  const suffix = PLATFORM[key];
+  if (!suffix) {
     console.error(`marcidb: unsupported platform ${key}`);
     process.exit(1);
   }
-  return path.join(__dirname, "bin", name);
+  return path.join(__dirname, "bin", `${base}-${suffix}`);
 }
 
 // Разбирает позиционные аргументы и флаги (--flag value | --flag)
@@ -56,7 +58,7 @@ Commands:
     --name <name>                 migration name (default: migration)
     --no-migrations               types only, skip the migration file
 
-  migrate push <db> [options]     Push migration files (.mig) to a server; it applies the new ones
+  migrate push <db> [options]     Push migration files (.snapshot) to a server; it applies the new ones
     --url <url>                   server url (default: http://localhost:3000)
     --migrations <dir>            migrations directory (default: migrations)
 
@@ -71,25 +73,24 @@ function cmdGenerate(args) {
   const { positional, flags } = parseArgs(args);
   const schema = positional[0] ?? "schema.marci";
   const output = positional[1] ?? path.join(__dirname, "..", ".marcidb", "client");
-  const bin = binPath();
 
   // 1) TypeScript-типы (всегда — без них миграция бессмысленна)
   if (fs.existsSync(output)) {
     fs.rmSync(output, { recursive: true, force: true });
   }
   console.log(`Generating types from ${schema} into ${output}...`);
-  execFileSync(bin, ["types", schema, output], { stdio: "inherit" });
+  execFileSync(binPath("marci-generate"), ["types", schema, output], { stdio: "inherit" });
   fs.writeFileSync(path.join(output, "package.json"), `{
   "name": "marci-client",
   "main": "index.js",
   "types": "index.d.ts"
 }`);
 
-  // 2) Файл миграции (если не отключено)
+  // 2) Файл миграции (полный снапшот версии) — отдельным бинарём marci-migrate
   if (!flags["no-migrations"]) {
     const dir = flags.migrations ?? "migrations";
     const name = flags.name ?? "migration";
-    execFileSync(bin, ["migration", schema, dir, name], { stdio: "inherit" });
+    execFileSync(binPath("marci-migrate"), ["generate", schema, dir, name], { stdio: "inherit" });
   }
 
   console.log("Done.");
@@ -120,11 +121,12 @@ async function migratePush(rest) {
     process.exit(1);
   }
 
-  // Все .mig по порядку имён → [{ id, ops }]; id — имя файла без расширения
+  // Все .snapshot по порядку имён → [{ id, ops }]; id — имя файла без расширения.
+  // `ops` — это materialized-снапшот версии (сервер диффит соседние снапшоты и применяет)
   const migrations = fs.readdirSync(dir)
-    .filter((f) => f.endsWith(".mig"))
+    .filter((f) => f.endsWith(".snapshot"))
     .sort()
-    .map((f) => ({ id: f.replace(/\.mig$/, ""), ops: fs.readFileSync(path.join(dir, f), "utf8") }));
+    .map((f) => ({ id: f.replace(/\.snapshot$/, ""), ops: fs.readFileSync(path.join(dir, f), "utf8") }));
 
   if (migrations.length === 0) {
     console.log("No migration files — nothing to push");

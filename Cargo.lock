@@ -520,6 +520,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "marcidb-migrate"
+version = "0.1.0"
+dependencies = [
+ "marcidb",
+]
+
+[[package]]
 name = "marcidb-server"
 version = "0.1.0"
 dependencies = [

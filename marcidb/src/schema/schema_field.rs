@@ -61,10 +61,12 @@ impl Field {
         Field { 
             name: "id".to_string(), 
             full_name: String::new(),
-            ty: FieldType::Primitive(PrimitiveFieldType::UInt64), 
+            ty: FieldType::Primitive(PrimitiveFieldType::UInt64),
             nullable: false,
             location: FieldLocation::Key { index: 0 },
-            attributes: vec![],
+            // @default(autoincrement()) делает дефолт явным атрибутом — так он переживает
+            // сериализацию в снапшот (serialize_snapshot рендерит default из атрибутов)
+            attributes: vec![Attribute::Default("autoincrement()".to_string())],
             indexes: vec![],
             default_value: Some(FieldDefault::Counter(0)),
             condition: FieldExistsCondition::None,

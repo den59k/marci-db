@@ -1,6 +1,6 @@
 use std::{env, fs, path::Path};
 
-use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, Schema, diff, parse_schema, serialize_migration};
+use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
 
 fn get_model_id_name(model: &Entity) -> String {
   format!("{}ModelId", model.name.replace('.', "_"))
@@ -373,63 +373,17 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
 fn main() {
   let args: Vec<String> = env::args().collect();
   match args.get(1).map(String::as_str) {
-    Some("migration") => generate_migration(
-      args.get(2).map(String::as_str).unwrap_or("schema.marci"),
-      args.get(3).map(String::as_str).unwrap_or("migrations"),
-      args.get(4).map(String::as_str).unwrap_or("migration"),
-    ),
     Some("types") => generate_types(
       args.get(2).map(String::as_str).unwrap_or("schema.marci"),
       args.get(3).map(String::as_str).unwrap_or("."),
     ),
-    // Обратная совместимость: `marcidb-ts <schema> <output>` = генерация типов
+    // Обратная совместимость: `marcidb-ts <schema> <output>` = генерация типов.
+    // Миграции переехали в отдельный бинарь `marci-migrate`.
     _ => generate_types(
       args.get(1).map(String::as_str).unwrap_or("schema.marci"),
       args.get(2).map(String::as_str).unwrap_or("."),
     ),
   }
-}
-
-/// Дифф схемы против снимка последней миграции (`<dir>/meta/snapshot.marci`) → новый `.mig`-файл.
-/// Снимок обновляется; номер берётся из числа существующих `.mig`-файлов
-fn generate_migration(schema_path: &str, migrations_dir: &str, name: &str) {
-  let new_schema = fs::read_to_string(schema_path)
-    .unwrap_or_else(|_| panic!("File not found: {}", schema_path));
-
-  let meta_dir = format!("{}/meta", migrations_dir);
-  let snapshot_path = format!("{}/snapshot.marci", meta_dir);
-  let old_schema = fs::read_to_string(&snapshot_path).unwrap_or_default();
-
-  let ops = match diff(&old_schema, &new_schema) {
-    Ok(ops) => ops,
-    Err(e) => {
-      eprintln!("Migration error: {:?}", e);
-      std::process::exit(1);
-    }
-  };
-
-  if ops.is_empty() {
-    println!("No schema changes — migration not created");
-    return;
-  }
-
-  let id = format!("{:04}", count_migrations(migrations_dir));
-  let filename = format!("{}_{}.mig", id, name);
-  let content = format!("# {}_{}\n\n{}\n", id, name, serialize_migration(&ops));
-
-  fs::create_dir_all(&meta_dir).unwrap();
-  fs::write(format!("{}/{}", migrations_dir, filename), content).unwrap();
-  fs::write(&snapshot_path, &new_schema).unwrap();
-  println!("Created migration {}", filename);
-}
-
-/// Сколько `.mig`-файлов уже есть в каталоге миграций (для следующего номера)
-fn count_migrations(dir: &str) -> usize {
-  fs::read_dir(dir)
-    .map(|entries| entries.filter_map(|e| e.ok())
-      .filter(|e| e.file_name().to_string_lossy().ends_with(".mig"))
-      .count())
-    .unwrap_or(0)
 }
 
 fn generate_types(input: &str, output_dir: &str) {
