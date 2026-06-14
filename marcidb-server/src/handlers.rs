@@ -31,7 +31,16 @@ pub async fn handle_sync(req: Request<hyper::body::Incoming>, ctx: Arc<ServerCon
     blocking(move || {
         let db = ctx.get_db(&db_name, true)?; // create-if-absent
         let mut db = db.write().unwrap_or_else(|e| e.into_inner());
-        db.migrate_to(&schema_text).map_err(|e| match e {
+
+        // The "smart" $sync path lives here, in the server: parse the .marci schema, carry slots/ids from
+        // the stored snapshot, diff, then apply through the engine's commit primitive. The engine itself
+        // stays dumb (no DSL parsing / diffing).
+        let mut new_schema = marcidb::try_parse_schema(&schema_text)
+            .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        marcidb_schema::reconcile(&mut new_schema, &db.schema);
+        let ops = marcidb_schema::diff(&db.schema, &new_schema)
+            .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        db.commit_schema(new_schema, &ops).map_err(|e| match e {
             MigrateApplyError::Storage(_) => ApiError::Internal(format!("{:?}", e)),
             _ => ApiError::BadRequest(format!("{}", e)),
         })?;

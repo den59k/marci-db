@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, diff, evolve, migration_ops, reconcile}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, try_parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, evolve, migration_ops}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -13,11 +13,15 @@ pub struct MarciDB {
 
 impl MarciDB {
 
-  /// Creates/opens a DB with a schema from text (the schema-first path, used by embedding and tests).
-  /// The schema is written to `__marci_meta__` so it can be reconstructed via [`MarciDB::open`]
+  /// Creates/opens a DB with a schema from `.marci` text (the schema-first path, used by embedding and tests).
+  /// The schema is written to `__marci_meta__` so it can be reconstructed via [`MarciDB::open`].
   pub fn new(schema_str: &str, path: &str) -> MarciDB {
-    let schema = parse_schema(schema_str);
+    MarciDB::create(parse_schema(schema_str), path)
+  }
 
+  /// Creates/opens a DB from an already-materialized [`Schema`] (the engine-level constructor). Writes the
+  /// snapshot into `__marci_meta__` so it can be reconstructed via [`MarciDB::open`].
+  pub fn create(schema: Schema, path: &str) -> MarciDB {
     let db = canopydb::Database::new(path).unwrap();
     let model_by_name = schema.build_model_name_map();
 
@@ -42,8 +46,8 @@ impl MarciDB {
   }
 
   /// Opens a DB, reconstructing the schema from `__marci_meta__` (the state left after migrations).
-  /// For a new/empty DB the schema is empty — models appear after the first [`MarciDB::migrate_to`].
-  /// This is an open-time self-migrate: migrations survive a restart
+  /// For a new/empty DB the schema is empty — models appear after the first migration ([`MarciDB::apply_migration`]
+  /// / `$sync`). The reconstructed state survives a restart
   pub fn open(path: &str) -> MarciDB {
     let db = canopydb::Database::new(path).unwrap();
 
@@ -147,19 +151,6 @@ impl MarciDB {
     Ok(is_delete)
   }
 
-  /// Declarative migration to a new schema (`$sync` / embedding): materializes the supplied `.marci`
-  /// text, checks slots against the old snapshot ([`reconcile_slots`]), diffs against the current schema
-  /// and applies atomically. A new materialized snapshot is written to `__marci_meta__`.
-  ///
-  /// Compatible changes are metadata/indexes; a type/key change, slot shift, destructive
-  /// enum change, and drop field return `MigrateApplyError` (the transaction is rolled back).
-  pub fn migrate_to(&mut self, new_schema_text: &str) -> Result<(), MigrateApplyError> {
-    let mut new_schema = try_parse_schema(new_schema_text)?;
-    reconcile(&mut new_schema, &self.schema);
-    let ops = diff(&self.schema, &new_schema)?;
-    self.commit_schema(new_schema, &ops)
-  }
-
   /// Imperative migration (`$migrate`): takes the text of a migration file (self-contained actions),
   /// applies it onto its current state via [`evolve`] and applies it physically.
   ///
@@ -177,7 +168,8 @@ impl MarciDB {
 
   /// Atomically applies ops to the DB, writes the new snapshot+version to `__marci_meta__` and switches
   /// the in-memory schema. On error the transaction is rolled back and state is unchanged.
-  fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::migrate::MigrateOp]) -> Result<(), MigrateApplyError> {
+  /// Public so the declarative `$sync` path (compute ops in the authoring layer, then commit) can reuse it.
+  pub fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::migrate::MigrateOp]) -> Result<(), MigrateApplyError> {
     let tx = self.db.begin_write().unwrap();
     apply(&tx, &self.schema, &new_schema, ops)?;
 

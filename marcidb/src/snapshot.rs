@@ -35,7 +35,7 @@ pub fn serialize_snapshot(schema: &Schema) -> String {
   out
 }
 
-pub(crate) fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crate::schema::Field) -> String {
+pub fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crate::schema::Field) -> String {
   let mut tokens: Vec<String> = vec![field.name.clone(), serialize_type(schema, field)];
 
   if field.nullable {
@@ -81,7 +81,7 @@ pub(crate) fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, f
   tokens.join(" ")
 }
 
-pub(crate) fn serialize_type(schema: &Schema, field: &crate::schema::Field) -> String {
+pub fn serialize_type(schema: &Schema, field: &crate::schema::Field) -> String {
   match &field.ty {
     FieldType::Primitive(p) => primitive_name(p).to_string(),
     FieldType::PrimitiveList(p, None) => format!("{}[]", primitive_name(p)),

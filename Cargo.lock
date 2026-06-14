@@ -513,6 +513,7 @@ dependencies = [
  "bitvec",
  "canopydb",
  "chrono",
+ "marcidb-schema",
  "memchr",
  "serde_json",
  "smallvec 2.0.0-alpha.12",
@@ -522,6 +523,14 @@ dependencies = [
 [[package]]
 name = "marcidb-migrate"
 version = "0.1.0"
+dependencies = [
+ "marcidb",
+ "marcidb-schema",
+]
+
+[[package]]
+name = "marcidb-schema"
+version = "0.2.0"
 dependencies = [
  "marcidb",
 ]
@@ -535,6 +544,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "marcidb",
+ "marcidb-schema",
  "serde_json",
  "tokio",
 ]

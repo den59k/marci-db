@@ -1,8 +1,18 @@
 # MarciDB Migrations
 
 Status: **implemented** (snapshot-based engine). This document describes how migrations actually work:
-the snapshot model, the engine (`snapshot.rs` + `migrate.rs`), the row format that makes the common
-cases O(1), the two HTTP frontends, and the CLI.
+the snapshot model, the engine, the row format that makes the common cases O(1), the two HTTP frontends,
+and the CLI.
+
+**Crate layering.** The work is split between the runtime engine and the authoring layer:
+
+- **`marcidb`** (engine) — loads the schema from the snapshot, runs CRUD, and *applies* migrations:
+  `snapshot.rs` (`serialize_snapshot`/`parse_snapshot`) and `migrate.rs` (`apply`, `evolve`,
+  `migration_ops`, the dumb `$migrate` executor). It only ever deals with the materialized snapshot.
+- **`marcidb-schema`** (authoring) — the "smart" build-time tooling: `diff`, `reconcile`,
+  `serialize_migration`. Used by the CLI (`marcidb-migrate`) and by the server for `$sync`.
+
+(The `.marci` DSL parser `parse_schema` lives in `marcidb` — the engine's own tests depend on it.)
 
 ## The materialized snapshot
 
@@ -15,6 +25,69 @@ fields), refs carrying their resolved binding. No `struct`/`enum` sugar, no nest
 and from there everything — diff, apply, the stored schema, migration files — operates on the flat
 snapshot. Migrations never special-case `struct`/`enum`: in the flat form a struct is just a model and an
 enum is just fields, so `diff` is a per-name comparison of two flat schemas.
+
+### What a snapshot looks like
+
+This source `schema.marci`:
+
+```
+model User {
+    email   String   @unique
+    profile Profile?
+    posts   Post[]   @bind(Post.author)
+}
+struct Profile { bio String }
+
+model Post {
+    title  String
+    author User
+    kind   PostKind
+}
+enum PostKind {
+    note
+    article { wordCount Int }
+}
+```
+
+materializes to this snapshot (`marci-migrate snapshot schema.marci`):
+
+```
+Entity User {
+  id UInt @id @default(autoincrement())
+  email String @slot(4) @unique
+  profile User.profile @nullable @virtual @current_id @rev(@parent_id)
+  posts Post[] @nullable @virtual @index_tree(User.posts->Post) @rev(author)
+}
+
+Entity Post {
+  id UInt @id @default(autoincrement())
+  title String @slot(4)
+  author User @slot(8) @field_value @rev(posts)
+  kind Enum(note=0,article=1) @slot(12)
+  wordCount Int @slot(16) @variant(kind:article)
+}
+
+Entity User.profile {
+  @parent_id User @id @current_id @rev(profile)
+  bio String @slot(4)
+}
+```
+
+`struct Profile` became the `User.profile` model (an injected `@parent_id` key); `enum PostKind` became a
+discriminant field plus a `@variant`-guarded payload field; every line is flat and fully resolved. The
+pinned tokens:
+
+- `@slot(N)` — the field's fixed byte slot in the row (see *Row format*); `@id` — key field; `@nullable`,
+  `@default(...)`, `@unique`, `@index`, `@format(...)` — as in the DSL.
+- relation **binding** — *where the relation physically lives*: `@current_id` (child stored under the
+  parent's key prefix, e.g. a struct or a composite-key child), `@field_value` (the target id is held in
+  this field), or `@index_tree(Name)` (a secondary tree maps the relation). `@rev(field)` names the
+  matching field on the other side.
+- `@variant(disc:a|b)` — marks an enum payload field present only for those variants.
+
+A relation's binding is derived from the schema's key/`@bind` structure and **pinned** in the snapshot, so
+changing it (e.g. adding `@bind` to a composite-key relation flips `index_tree` → `current_id`) moves where
+data lives — `diff` rejects that rather than silently doing nothing (see *Op-set*).
 
 ## A migration file = self-contained actions
 
@@ -97,14 +170,15 @@ What this buys (assuming the engine never reuses a retired slot):
 
 ## Engine
 
-Pipeline for a declarative migration (`migrate_to` / `$sync`):
+Pipeline for a declarative migration (`$sync`). The diff is computed in `marcidb-schema`; the apply +
+commit (`MarciDB::commit_schema`) is the engine:
 
 ```
-new = parse_schema(new_text)          # materialize: expand sugar, assign provisional slots/ids by order
-reconcile(&mut new, &old_snapshot)    # carry slots + enum variant ids from history; canonicalize order
-ops = diff(&old_snapshot, &new)       # per-name comparison of two flat schemas
-apply(tx, &old_snapshot, &new, &ops)  # physical: create/drop trees, build/drop indexes
-store serialize_snapshot(&new)        # __marci_meta__/schema
+new = parse_schema(new_text)          # marcidb: materialize — expand sugar, provisional slots/ids
+reconcile(&mut new, &old_snapshot)    # marcidb-schema: carry slots + enum ids from history; canonicalize
+ops = diff(&old_snapshot, &new)       # marcidb-schema: per-name comparison of two flat schemas
+apply(tx, &old_snapshot, &new, &ops)  # marcidb: physical — create/drop trees, build/drop indexes
+store serialize_snapshot(&new)        # marcidb: __marci_meta__/schema
 ```
 
 - **`reconcile(new, old)`** moves everything order-dependent from the old snapshot into the freshly
@@ -156,9 +230,10 @@ silent no-op; apply the schema to a fresh database via `$sync` instead.
 Both wrap the same engine. The split is **smart `$sync` vs dumb `$migrate`**: the server thinks for
 `$sync`, the client thinks for `$migrate`.
 
-- **`POST /:db/$sync`** (declarative, smart) — body is `schema.marci` text. The server materializes,
-  reconciles against its stored snapshot, diffs and applies. For databases not managed by migration files
-  (CI, direct HTTP). `MarciDB::migrate_to`.
+- **`POST /:db/$sync`** (declarative, smart) — body is `schema.marci` text. The server materializes it
+  (`marcidb::try_parse_schema`), reconciles/diffs against its stored snapshot (`marcidb-schema`), and
+  commits (`MarciDB::commit_schema`). For databases not managed by migration files (CI, direct HTTP). The
+  engine has no declarative method of its own — the "smartness" lives in the server handler + authoring crate.
 - **`POST /:db/$migrate`** (imperative, dumb) — body is the text of migration actions. The server lays them
   onto its current state and applies — **no ledger**, no deciding what to skip. `MarciDB::apply_migration`.
   Coordination lives in the client:

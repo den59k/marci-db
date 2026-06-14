@@ -4,6 +4,7 @@ resolver = "3"
 members = [
     "marcidb",
     # "marci-vector",
+    "marcidb-schema",
     "marcidb-server",
     "marcidb-ts",
     "marcidb-migrate"

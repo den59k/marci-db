@@ -16,7 +16,7 @@ mod url_parser;
 mod update_op;
 mod num_utils;
 
-pub use crate::schema::{parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType,FieldExistsCondition,EnumInfo};
+pub use crate::schema::{parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType,FieldExistsCondition,EnumInfo,RefInfo,RefBinding,Attribute,DeleteConstraint,FieldCustomFormat,FieldDefault};
 pub use crate::json_parsers::{parse_insert,parse_update,parse_query,parse_aggregate,aggregate_to_json,decode_document,decode_id,array_to_json,parse_id,EncodeError};
 pub use crate::aggregate_op::{AggregateOp,AggregateResult,SumValue};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
@@ -24,8 +24,8 @@ pub use crate::marci_db::MarciDB;
 pub use crate::transaction::MarciTransaction;
 pub use crate::error::StorageError;
 pub use crate::batch::{execute_batch, BatchError, BatchErrorKind};
-pub use crate::migrate::{diff, reconcile, apply, serialize_migration, migration_ops, evolve, MigrateOp, MigrateError, MigrateApplyError};
-pub use crate::snapshot::{serialize_snapshot, parse_snapshot};
+pub use crate::migrate::{apply, migration_ops, evolve, MigrateOp, MigrateError, MigrateApplyError};
+pub use crate::snapshot::{serialize_snapshot, parse_snapshot, serialize_type, serialize_field};
 
 pub use crate::query_op::DecodeCtx;
 pub use crate::update_op::UpdateError;

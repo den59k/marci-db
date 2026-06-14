@@ -7,7 +7,8 @@
 
 use std::{env, fs, io::Read, process};
 
-use marcidb::{MigrateOp, Schema, diff, evolve, parse_snapshot, reconcile, serialize_migration, serialize_snapshot, try_parse_schema};
+use marcidb::{MigrateOp, Schema, evolve, parse_snapshot, serialize_snapshot, try_parse_schema};
+use marcidb_schema::{diff, reconcile, serialize_migration};
 
 const EXT: &str = ".march";
 

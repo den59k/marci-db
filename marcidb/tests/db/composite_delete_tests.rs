@@ -3,7 +3,8 @@
 //! cascade, cross-reference preservation, and the schema/migration guards for the two cases that
 //! genuinely cannot be applied (binding change, @index on a relation).
 
-use marcidb::{MarciDB, MigrateError, diff, parse_schema, reconcile, try_parse_schema};
+use marcidb::{MarciDB, MigrateError, parse_schema, try_parse_schema};
+use marcidb_schema::{diff, reconcile};
 use serde_json::json;
 use tempfile::tempdir;
 

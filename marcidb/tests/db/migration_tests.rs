@@ -1,8 +1,19 @@
-use marcidb::{MarciDB, MigrateApplyError, diff, parse_schema, reconcile, serialize_migration};
+use marcidb::{MarciDB, MigrateApplyError, parse_schema, try_parse_schema};
+use marcidb_schema::{diff, reconcile, serialize_migration};
 use serde_json::json;
 use tempfile::tempdir;
 
 use crate::db::{get_data, get_data_one, insert_data};
+
+/// Declarative `$sync` against a live DB: parse the `.marci` schema, carry slots/ids from the stored
+/// snapshot, diff, then apply through the engine's commit primitive. This is what the server's `$sync`
+/// does; the engine no longer has a `migrate_to` method (the smart side moved to `marcidb-schema`).
+fn migrate_to(db: &mut MarciDB, schema_text: &str) -> Result<(), MigrateApplyError> {
+  let mut new_schema = try_parse_schema(schema_text)?;
+  reconcile(&mut new_schema, &db.schema);
+  let ops = diff(&db.schema, &new_schema)?;
+  db.commit_schema(new_schema, &ops)
+}
 
 /// Migration file text = self-contained actions (diff prev→new). `prev`/`new` are `.marci` schema
 /// texts (prev="" for the first migration); slots/variants are inherited from prev via reconcile
@@ -24,7 +35,7 @@ fn migrate_add_field() {
   insert_data(&db, "User", json!({ "name": "Alice" }));
   insert_data(&db, "User", json!({ "name": "Bob" }));
 
-  db.migrate_to("model User {\n  name String\n  age  UInt\n}").unwrap();
+  migrate_to(&mut db,"model User {\n  name String\n  age  UInt\n}").unwrap();
 
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }, { "name": "Bob" }]));
 
@@ -45,7 +56,7 @@ fn migrate_add_index_backfills_existing_rows() {
   insert_data(&db, "User", json!({ "name": "Alice", "email": "a@x.com" }));
   insert_data(&db, "User", json!({ "name": "Bob", "email": "b@x.com" }));
 
-  db.migrate_to("model User {\n  name  String\n  email String @index\n}").unwrap();
+  migrate_to(&mut db,"model User {\n  name  String\n  email String @index\n}").unwrap();
 
   assert_eq!(
     get_data_one(&db, "User", json!({ "name": true, "$where": { "email": "a@x.com" } })),
@@ -62,7 +73,7 @@ fn migrate_create_model_on_empty_db() {
   // Empty DB — no models yet
   assert!(db.get_model("User").is_none());
 
-  db.migrate_to("model User {\n  name  String\n  email String @index\n}").unwrap();
+  migrate_to(&mut db,"model User {\n  name  String\n  email String @index\n}").unwrap();
 
   insert_data(&db, "User", json!({ "name": "Alice", "email": "a@x.com" }));
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
@@ -82,7 +93,7 @@ fn migrate_persists_across_reopen() {
   {
     let mut db = MarciDB::new("model User {\n  name String\n}", &path);
     insert_data(&db, "User", json!({ "name": "Alice" }));
-    db.migrate_to("model User {\n  name String\n  age  UInt\n}").unwrap();
+    migrate_to(&mut db,"model User {\n  name String\n  age  UInt\n}").unwrap();
     insert_data(&db, "User", json!({ "name": "Bob", "age": 5 }));
   } // DB is closed
 
@@ -103,7 +114,7 @@ fn migrate_insert_field_in_middle_carries_slots() {
   let mut db = MarciDB::new("model M {\n  a String\n  b String\n}", dir.path().to_str().unwrap());
   insert_data(&db, "M", json!({ "a": "a1", "b": "b1" }));
 
-  db.migrate_to("model M {\n  a String\n  c String\n  b String\n}").unwrap();
+  migrate_to(&mut db,"model M {\n  a String\n  c String\n  b String\n}").unwrap();
 
   // The old row reads correctly (a/b on their slots, c absent → null)
   assert_eq!(get_data(&db, "M", json!({ "a": true, "b": true, "c": true })), json!([{ "a": "a1", "b": "b1", "c": null }]));
@@ -121,7 +132,7 @@ fn migrate_drop_field_unsupported() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::new("model User {\n  name String\n  age  UInt\n}", dir.path().to_str().unwrap());
 
-  let result = db.migrate_to("model User {\n  name String\n}");
+  let result = migrate_to(&mut db,"model User {\n  name String\n}");
   assert!(matches!(result, Err(MigrateApplyError::Unsupported(_))));
 }
 
@@ -130,7 +141,7 @@ fn migrate_drop_field_unsupported() {
 fn migrate_type_change_rejected() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::new("model User {\n  age UInt\n}", dir.path().to_str().unwrap());
-  let result = db.migrate_to("model User {\n  age String\n}");
+  let result = migrate_to(&mut db,"model User {\n  age String\n}");
   assert!(matches!(result, Err(MigrateApplyError::Diff(_))));
 }
 
@@ -186,8 +197,8 @@ fn migrate_imperative_persists_across_reopen() {
 fn migrate_to_rejects_invalid_schema() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
-  assert!(db.migrate_to("model A {\n  x Undefined\n}").is_err());      // unknown type
-  assert!(db.migrate_to("model A {\n  x String @bogus\n}").is_err());  // bad attribute
+  assert!(migrate_to(&mut db,"model A {\n  x Undefined\n}").is_err());      // unknown type
+  assert!(migrate_to(&mut db,"model A {\n  x String @bogus\n}").is_err());  // bad attribute
 }
 
 /// Invalid action via apply_migration ($migrate) — an error, not a panic
@@ -224,7 +235,7 @@ fn migrate_enum_end_to_end_via_sync() {
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
   let schema = "enum ChatType {\n  direct {\n    uniqueId String\n  }\n  group {\n    name String\n  }\n}\n\nmodel Chat {\n  type ChatType\n}";
-  db.migrate_to(schema).unwrap();
+  migrate_to(&mut db,schema).unwrap();
 
   insert_data(&db, "Chat", json!({ "type": "direct", "uniqueId": "u-1" }));
   assert_eq!(
@@ -240,7 +251,7 @@ fn enum_list_rejected_with_hint() {
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
   let schema = "enum Role {\n  admin\n  user\n}\n\nmodel User {\n  roles Role[]\n}";
-  let err = db.migrate_to(schema).unwrap_err();
+  let err = migrate_to(&mut db,schema).unwrap_err();
   let msg = format!("{}", err);
   assert!(msg.contains("list of enum"), "expected an explanation, got: {}", msg);
   assert!(msg.contains("RoleItem"), "expected an alternative hint, got: {}", msg);
@@ -258,7 +269,7 @@ fn migrate_enum_reorder_preserves_data() {
   insert_data(&db, "Account", json!({ "name": "Alice", "type": "pro", "sign": "a-sign" }));
 
   // The variants are swapped — but the pro/basic ids must be preserved
-  db.migrate_to("model Account {\n  name String\n  type AccountType\n}\n\nenum AccountType {\n  pro {\n    sign String\n  }\n  basic\n}").unwrap();
+  migrate_to(&mut db,"model Account {\n  name String\n  type AccountType\n}\n\nenum AccountType {\n  pro {\n    sign String\n  }\n  basic\n}").unwrap();
 
   // The record made before the migration still reads as pro with its sign
   assert_eq!(

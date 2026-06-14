@@ -12,6 +12,9 @@ serde_json = "1.0.145"
 
 [dev-dependencies]
 tempfile = "3.26.0"
+# Authoring layer (the migration diff engine). The engine's integration tests exercise diff/reconcile/
+# serialize_migration. Dev-only dependency cycle (this crate depends on the engine) — allowed by Cargo.
+marcidb-schema = { path = "../marcidb-schema" }
 
 [[bench]]
 name = "include_cache"
