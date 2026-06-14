@@ -112,9 +112,7 @@ fn parse_default_value_list(ty: &PrimitiveFieldType, value: &str, fixed_size: Op
 #[cfg(test)]
 mod tests {
 
-    use serde_json::json;
-
-    use crate::{json_parsers::encode_list, parse_schema, schema::{FieldDefault, PrimitiveFieldType}};
+    use crate::{parse_schema, schema::FieldDefault};
 
   #[test]
   fn test_parse_default_value() {
@@ -129,20 +127,18 @@ mod tests {
 
     let created_at_field = &schema.models[0].fields[1];
     assert_eq!(created_at_field.default_value, Some(FieldDefault::Now));
-    
+
     let age_field = &schema.models[0].fields[2];
     assert_eq!(age_field.default_value, Some(FieldDefault::Value(20u64.to_be_bytes().to_vec())));
 
+    // String[] default `["ar","paid"]` encodes as: count:u32, then (count+1) u32 offsets, then the bytes.
+    // [count=2 | off0=16 | off1=18 | end=22 | "ar" "paid"]
     let features_field = &schema.models[0].fields[3];
-
-    let mut json_buf = vec![];
-    encode_list(&mut json_buf, &json!([ "ar", "paid" ]), features_field, &PrimitiveFieldType::String, None).unwrap();
-    
-    let Some(FieldDefault::Value(buf)) = &features_field.default_value else {
-        panic!("Wrong default_value: {:?}", features_field.default_value)
-    };
-
-    assert_eq!(buf, &json_buf);
+    let expected: Vec<u8> = vec![
+        0, 0, 0, 2,   0, 0, 0, 16,   0, 0, 0, 18,   0, 0, 0, 22,
+        b'a', b'r', b'p', b'a', b'i', b'd',
+    ];
+    assert_eq!(features_field.default_value, Some(FieldDefault::Value(expected)));
   }
 
 }

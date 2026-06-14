@@ -3,7 +3,7 @@
 //! — the runtime engine (`marcidb`) only ever consumes the resulting snapshot via `parse_snapshot` and the
 //! ops via `apply`. A migration file is a list of SELF-CONTAINED actions, one per line.
 
-use marcidb::{Entity, Field, MigrateOp, Schema, SchemaError, serialize_field};
+use crate::{Entity, Field, MigrateOp, Schema, SchemaError, serialize_field};
 
 // ─────────────────────────── rendering (ops → .march text) ───────────────────────────
 
@@ -256,7 +256,7 @@ fn split_path(path: &str) -> Result<(String, String), SchemaError> {
 mod tests {
     use super::{evolve, migration_ops, serialize_migration};
     use crate::diff::{diff, reconcile};
-    use marcidb::{MigrateOp, Schema, parse_schema, parse_snapshot, serialize_snapshot};
+    use crate::{MigrateOp, Schema, parse_schema, parse_snapshot, serialize_snapshot};
 
     /// Normalizes snapshot text to canonical form (for comparison)
     fn canon(snapshot_text: &str) -> String {

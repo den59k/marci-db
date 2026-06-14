@@ -4,4 +4,5 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-marcidb = { path = "../marcidb" }
+# Foundation crate — pure schema model + parser + snapshot codec + migration authoring. No storage,
+# and (deliberately) no dependency on the engine; the engine depends on this crate.

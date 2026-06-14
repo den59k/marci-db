@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -157,7 +157,7 @@ impl MarciDB {
   /// This is the engine's single migration entry point. The caller (server `$sync`/`$migrate`, or the
   /// `marcidb-schema` authoring layer) computes `(new_schema, ops)` — by diffing a `.marci` schema, or by
   /// `evolve`-ing a `.march` action file — and hands the result here to apply + persist.
-  pub fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::migrate::MigrateOp]) -> Result<(), MigrateApplyError> {
+  pub fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::schema::MigrateOp]) -> Result<(), MigrateApplyError> {
     let tx = self.db.begin_write().unwrap();
     apply(&tx, &self.schema, &new_schema, ops)?;
 

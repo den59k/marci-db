@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use marcidb::{
+use crate::{
     Attribute, Entity, EnumInfo, Field, FieldDefault, FieldExistsCondition, FieldLocation, FieldType,
     MigrateError, MigrateOp, RefBinding, Schema, serialize_type,
 };
@@ -361,7 +361,7 @@ fn format_attr(field: &Field) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{diff, reconcile};
-    use marcidb::{FieldLocation, MigrateError, MigrateOp, Schema, parse_schema};
+    use crate::{FieldLocation, MigrateError, MigrateOp, Schema, parse_schema};
 
     fn diff_text(old: &str, new: &str) -> Result<Vec<MigrateOp>, MigrateError> {
         diff(&parse_schema(old), &parse_schema(new))

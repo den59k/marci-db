@@ -4,19 +4,19 @@ Status: **implemented** (snapshot-based engine). This document describes how mig
 the snapshot model, the engine, the row format that makes the common cases O(1), the two HTTP frontends,
 and the CLI.
 
-**Crate layering.** The work is split between the runtime engine and the authoring layer:
+**Crate layering.** A pure foundation crate, and a storage engine on top of it:
 
-- **`marcidb`** (engine) — loads the schema from the snapshot, runs CRUD, and *applies* a precomputed
-  migration: `snapshot.rs` (`serialize_snapshot`/`parse_snapshot`) + `migrate.rs` (`apply` — the physical
-  create/drop trees + build/drop indexes — and the `MigrateOp`/error types). The single entry point is
-  `MarciDB::commit_schema(new_schema, ops)`. The engine only ever deals with the materialized snapshot.
-- **`marcidb-schema`** (authoring) — everything "smart": `diff`/`reconcile` (schema → ops, in `diff.rs`)
-  and the `.march` file format `serialize_migration`/`evolve`/`migration_ops` (in `march.rs`). Used by the
-  CLI (`marcidb-migrate`) and by the server (`$sync` and `$migrate`).
+- **`marcidb-schema`** (foundation — no storage, no dependency on the engine) owns the whole schema/migration
+  *model*: the schema types, the `.marci` DSL parser (`parse_schema`), the materialized-snapshot codec
+  (`serialize_snapshot`/`parse_snapshot`), the op set + diff (`diff`/`reconcile`), and the `.march` file
+  format (`serialize_migration`/`evolve`/`migration_ops`).
+- **`marcidb`** (storage engine) *depends on* `marcidb-schema` and adds persistence: CRUD, transactions,
+  and `apply` (the physical create/drop trees + build/drop indexes). Its single migration entry point is
+  `MarciDB::commit_schema(new_schema, ops)`. It re-exports the foundation's types so downstream can still
+  say `marcidb::Schema`, `marcidb::parse_schema`, etc.
 
 The engine has **no `migrate_to`/`apply_migration` methods** — both frontends are orchestrated in the
-server handler: compute `(new_schema, ops)` via `marcidb-schema`, then call `commit_schema`. (The `.marci`
-DSL parser `parse_schema` does live in `marcidb` — the engine's own tests depend on it.)
+server handler: compute `(new_schema, ops)` via `marcidb-schema`, then call `commit_schema`.
 
 ## The materialized snapshot
 
@@ -178,11 +178,11 @@ Pipeline for a declarative migration (`$sync`). The diff is computed in `marcidb
 commit (`MarciDB::commit_schema`) is the engine:
 
 ```
-new = parse_schema(new_text)          # marcidb: materialize — expand sugar, provisional slots/ids
+new = parse_schema(new_text)          # marcidb-schema: materialize — expand sugar, provisional slots/ids
 reconcile(&mut new, &old_snapshot)    # marcidb-schema: carry slots + enum ids from history; canonicalize
 ops = diff(&old_snapshot, &new)       # marcidb-schema: per-name comparison of two flat schemas
 apply(tx, &old_snapshot, &new, &ops)  # marcidb: physical — create/drop trees, build/drop indexes
-store serialize_snapshot(&new)        # marcidb: __marci_meta__/schema
+store serialize_snapshot(&new)        # marcidb (commit_schema): __marci_meta__/schema
 ```
 
 - **`reconcile(new, old)`** moves everything order-dependent from the old snapshot into the freshly
