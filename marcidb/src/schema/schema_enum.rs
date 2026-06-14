@@ -2,8 +2,8 @@ use std::{collections::HashMap};
 
 use crate::{Field, schema::{SchemaError, schema_parse::parse_fields}};
 
-/// Поле enum вместе со списком вариантов, которым оно принадлежит.
-/// Общее поле (`admin | creator { ... }`) — одно физическое поле с несколькими вариантами
+/// An enum field together with the list of variants it belongs to.
+/// A shared field (`admin | creator { ... }`) is one physical field with several variants
 #[derive(Debug,Clone)]
 pub struct EnumFieldDef {
     pub variants: Vec<u16>,
@@ -16,9 +16,9 @@ pub struct EnumDef {
     pub variants_map: HashMap<String, u16>
 }
 
-// Каждая строка enum — это `имя1 | имя2 [{ поля }]`.
-// Вариант объявляется при первом упоминании, индекс — порядок первого упоминания.
-// Блок присоединяет свои поля ко всем перечисленным вариантам
+// Each enum line is `name1 | name2 [{ fields }]`.
+// A variant is declared on first mention, the index is the order of first mention.
+// The block attaches its fields to all the listed variants
 pub fn parse_enum_block(
     lines: &mut std::iter::Peekable<std::str::Lines<'_>>,
 ) -> Result<EnumDef, SchemaError> {
@@ -28,7 +28,7 @@ pub fn parse_enum_block(
     while let Some(raw) = lines.peek() {
         let line = raw.trim();
 
-        // пропускаем пустые строки
+        // skip empty lines
         if line.is_empty() {
             lines.next();
             continue;
@@ -39,7 +39,7 @@ pub fn parse_enum_block(
             break;
         }
 
-        // теперь точно строка с вариантами enum'а
+        // now this is definitely a line with enum variants
         let raw_line = lines.next().unwrap();
         let line = raw_line.trim();
 
@@ -126,12 +126,12 @@ mod tests {
         }
         ");
 
-        // Union-блок не объявляет новые варианты и не меняет их порядок
+        // A union block does not declare new variants and does not change their order
         assert_eq!(en.variants_map.len(), 2);
         assert_eq!(en.variants_map.get("creator"), Some(&0));
         assert_eq!(en.variants_map.get("admin"), Some(&1));
 
-        // sign — одно поле, принадлежащее обоим вариантам; level доопределен вторым блоком admin
+        // sign is one field belonging to both variants; level is defined further by the second admin block
         assert_eq!(en.fields.len(), 2);
         assert_eq!(en.fields[0].field.name, "sign");
         assert_eq!(en.fields[0].variants, vec![1, 0]);
@@ -150,7 +150,7 @@ mod tests {
         }
         ");
 
-        // Компактная форма: union-строка сама объявляет варианты в порядке упоминания
+        // Compact form: the union line itself declares the variants in order of mention
         assert_eq!(en.variants_map.len(), 3);
         assert_eq!(en.variants_map.get("viewer"), Some(&0));
         assert_eq!(en.variants_map.get("creator"), Some(&1));

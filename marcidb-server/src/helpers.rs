@@ -15,7 +15,7 @@ pub async fn parse_json_body(
         .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {}", e)))
 }
 
-/// Читает тело запроса как текст (для `$sync` — тело является текстом схемы `.marci`)
+/// Reads the request body as text (for `$sync` — the body is the `.marci` schema text)
 pub async fn parse_text_body(
     req: Request<hyper::body::Incoming>
 ) -> Result<String, ApiError> {
@@ -27,7 +27,7 @@ pub async fn parse_text_body(
         .map_err(|e| ApiError::BadRequest(format!("Invalid UTF-8 body: {}", e)))
 }
 
-/// Запускает тяжёлую работу в blocking pool
+/// Runs heavy work on the blocking pool
 pub async fn blocking<F, T>(f: F) -> Result<T, ApiError>
 where
     F: FnOnce() -> Result<T, ApiError> + Send + 'static,
@@ -38,7 +38,7 @@ where
         .map_err(|e| ApiError::Internal(e.to_string()))? // JoinError
 }
 
-/// Строит финальный ответ
+/// Builds the final response
 pub fn ok_response(body: impl Into<Bytes>) -> Response<Full<Bytes>> {
     Response::new(Full::new(body.into()))
 }

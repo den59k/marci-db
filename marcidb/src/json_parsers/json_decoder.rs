@@ -114,8 +114,8 @@ pub fn array_to_json(arr: &[String]) -> String {
         return "[]".to_owned();
     }
 
-    let mut total_len = 2; // '[' и ']'
-    total_len += arr.len().saturating_sub(1); // запятые
+    let mut total_len = 2; // '[' and ']'
+    total_len += arr.len().saturating_sub(1); // commas
 
     for s in arr {
         total_len += s.len();
@@ -142,9 +142,9 @@ pub fn array_to_json(arr: &[String]) -> String {
 pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     let DecodeCtx { data, entity, id, mask, includes, schema } = ctx;
 
-    // Длину заголовка берём из самой строки (байты 2..4), а не из схемы: строки, записанные
-    // под схемой с меньшим числом полей, короче — недостающие поля декодируются как отсутствующие.
-    // Так миграция add-field не требует переписывания старых строк (forward-compatible reader)
+    // We take the header length from the row itself (bytes 2..4), not from the schema: rows written
+    // under a schema with fewer fields are shorter — the missing fields are decoded as absent.
+    // This way an add-field migration does not require rewriting old rows (forward-compatible reader)
     let row_header = if data.is_empty() {
         0
     } else {
@@ -165,7 +165,7 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     let mut str = String::with_capacity(256);
     str.push('{');
 
-    // Декодируем все поля
+    // Decode all fields
     let mut id_offset = 0;
     for (field_index, field) in entity.fields.iter().enumerate() {
         match field.location {
@@ -224,7 +224,7 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
     // return Ok(Value::Object(obj));
 }
 
-/// Декодирует одиночное значение примитивного поля в JSON (для min/max в агрегациях)
+/// Decodes a single primitive field value into JSON (for min/max in aggregations)
 pub fn decode_field_value(field: &Field, data: &[u8]) -> Result<String, DecodeError> {
   if let Some(format) = &field.format {
     return decode_by_format(data, format, Some(&field.ty));
@@ -253,7 +253,7 @@ pub fn decode_id(id: &[u8], entity: &Entity, schema: &Schema) -> String {
     return str;
 }
 
-// Декодирует в JSON значение из ID
+// Decodes a value from the ID into JSON
 fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut String) -> Result<(), DecodeError> {
     let field_name = field.name.clone();
     
@@ -284,9 +284,9 @@ fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut
     }
 }
 
-// Декодирует в JSON значение из Body
+// Decodes a value from the Body into JSON
 fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: &mut String, payload_offset: usize) -> Result<(), DecodeError> {
-    // Слот за пределами заголовка строки — поле добавлено более поздней миграцией → отсутствует
+    // Slot beyond the row header — the field was added by a later migration → absent
     if offset_pos + 4 > payload_offset {
         insert_null(obj, field);
         return Ok(())
@@ -315,7 +315,7 @@ fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: 
         FieldType::Primitive(primitive) => {
         let offset_end = get_end_optimized(data, field, offset_start, offset_pos, payload_offset);
 
-        // Декодируем
+        // Decode
         let value = decode_primitive_value(primitive, &data[offset_start..offset_end])?;
         insert_value(obj, &field_name, &value);
         // obj.insert(field_name, value);
@@ -365,7 +365,7 @@ fn decode_by_format(data: &[u8], format: &FieldCustomFormat, ty: Option<&FieldTy
                 u16::from_be_bytes(data[4..6].try_into().unwrap()),
                 u16::from_be_bytes(data[6..8].try_into().unwrap()),
                 u16::from_be_bytes(data[8..10].try_into().unwrap()),
-                // u48 не существует, собираем вручную
+                // u48 does not exist, assemble it manually
                 data[10..16].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64),
             ))
         },
@@ -424,7 +424,7 @@ fn decode_primitive_value(ty: &PrimitiveFieldType, data: &[u8]) -> Result<String
         }
         PrimitiveFieldType::DateTime => {
             let epoch = i64::from_be_bytes(data.try_into().unwrap());
-            // Возвращаем как число (или можно форматировать обратно в ISO)
+            // Return it as a number (or it could be formatted back into ISO)
             Ok(epoch.to_string())
             // Ok(Value::Number(epoch.into()))
         }

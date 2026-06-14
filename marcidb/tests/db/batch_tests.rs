@@ -34,7 +34,7 @@ fn batch_commit_returns_results_in_order() {
     json!({ "model": "User", "action": "insert", "data": { "name": "Bob",   "email": "b@x.com" } }),
   ]).unwrap();
 
-  // insert возвращает объект id, по одному результату на операцию, в порядке операций
+  // insert returns an id object, one result per operation, in operation order
   assert_eq!(results, vec![json!({ "id": 1 }), json!({ "id": 2 })]);
   assert_eq!(user_count(&db), 2);
 }
@@ -43,14 +43,14 @@ fn batch_commit_returns_results_in_order() {
 fn batch_ref_links_generated_id() {
   let (_dir, db) = make_db();
 
-  // Post в операции #1 ссылается на id пользователя, созданного в операции #0
+  // The Post in operation #1 references the id of the user created in operation #0
   let results = execute_batch(&db, &[
     json!({ "model": "User", "action": "insert", "data": { "name": "Alice", "email": "a@x.com" } }),
     json!({ "model": "Post", "action": "insert", "data": { "title": "Hi", "author": { "id": { "$ref": "0.id" } } } }),
     json!({ "model": "User", "action": "findFirst", "query": { "name": true, "posts": { "title": true } } }),
   ]).unwrap();
 
-  // findFirst видит и пользователя, и связанный с ним пост (read-your-writes внутри транзакции)
+  // findFirst sees both the user and the post linked to it (read-your-writes within the transaction)
   assert_eq!(results[2], json!({ "name": "Alice", "posts": [{ "title": "Hi" }] }));
 }
 
@@ -58,7 +58,7 @@ fn batch_ref_links_generated_id() {
 fn batch_rolls_back_all_on_failing_op() {
   let (_dir, db) = make_db();
 
-  // Операция #0 проходит, #1 нарушает unique email → откатывается ВСЯ транзакция
+  // Operation #0 passes, #1 violates the unique email → the ENTIRE transaction rolls back
   let err = execute_batch(&db, &[
     json!({ "model": "User", "action": "insert", "data": { "name": "Alice", "email": "dup@x.com" } }),
     json!({ "model": "User", "action": "insert", "data": { "name": "Bob",   "email": "dup@x.com" } }),
@@ -66,7 +66,7 @@ fn batch_rolls_back_all_on_failing_op() {
 
   assert_eq!(err.index, 1);
   assert!(matches!(err.kind, BatchErrorKind::Insert(InsertError::UniqueViolation(..))));
-  // Ничего не сохранилось — вставка Alice из операции #0 тоже откачена
+  // Nothing was saved — Alice's insert from operation #0 was rolled back too
   assert_eq!(user_count(&db), 0);
 }
 
@@ -99,8 +99,8 @@ fn batch_delete_returns_bool() {
     json!({ "model": "User", "action": "count",  "query": {} }),
   ]).unwrap();
 
-  assert_eq!(results[0], json!(true));   // существовал — удалён
-  assert_eq!(results[1], json!(false));  // не существовал
+  assert_eq!(results[0], json!(true));   // existed — deleted
+  assert_eq!(results[1], json!(false));  // did not exist
   assert_eq!(results[2], json!(1));
   assert_eq!(user_count(&db), 1);
 }
@@ -116,5 +116,5 @@ fn batch_unknown_model_reports_index() {
 
   assert_eq!(err.index, 1);
   assert!(matches!(err.kind, BatchErrorKind::UnknownModel(_)));
-  assert_eq!(user_count(&db), 0); // операция #0 откачена
+  assert_eq!(user_count(&db), 0); // operation #0 rolled back
 }

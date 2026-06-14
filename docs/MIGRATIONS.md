@@ -4,57 +4,74 @@ Status: **implemented** (snapshot-based engine). This document describes how mig
 the snapshot model, the engine (`snapshot.rs` + `migrate.rs`), the row format that makes the common
 cases O(1), the two HTTP frontends, and the CLI.
 
-## Core idea: the snapshot IS the migration unit
+## The materialized snapshot
 
-The source of truth is the **materialized snapshot** — the flat `Schema.models` array exactly as MarciDB
-holds it in memory: `struct` already expanded into models (`Parent.field` with an injected `@parent_id`
-key), `enum` already injected into the owning model (discriminant field + per-variant payload fields),
-refs carrying their resolved binding. There is no `struct`/`enum` sugar and no nesting in a snapshot.
+The state representation is the **materialized snapshot** — the flat `Schema.models` array exactly as
+MarciDB holds it in memory: `struct` already expanded into models (`Parent.field` with an injected
+`@parent_id` key), `enum` already injected into the owning model (discriminant field + per-variant payload
+fields), refs carrying their resolved binding. No `struct`/`enum` sugar, no nesting.
 
-`schema.marci` (with sugar) stays the human-edited source. The engine **materializes** it
-(`parse_schema`), and from there everything — diff, apply, the stored schema, migration files — operates
-on the flat snapshot. Two consequences:
+`schema.marci` (with sugar) stays the human-edited source. The engine **materializes** it (`parse_schema`),
+and from there everything — diff, apply, the stored schema, migration files — operates on the flat
+snapshot. Migrations never special-case `struct`/`enum`: in the flat form a struct is just a model and an
+enum is just fields, so `diff` is a per-name comparison of two flat schemas.
 
-- Migrations never special-case `struct`/`enum`: in the flat form a struct is just a model and an enum is
-  just fields. `diff` is a per-name comparison of two flat schemas.
-- What you diff is exactly what runs, so applying a migration holds no surprises. A snapshot also makes it
-  obvious where a bug lives: if the snapshot is wrong it's the parser; if apply is wrong it's the engine.
+## A migration file = self-contained actions
+
+A migration file (`.march`) is a list of **self-contained actions** — what changes, each carrying its own
+field definition (the snapshot line). There is **no snapshot section**: you review the *changes* here, and
+look at the full schema in `schema.marci`.
+
+```
+# 0001_add_age
+add field User.age UInt @slot(12)
+add index User.email
+```
+
+A baseline / first migration is just `create entity` actions carrying every field:
+
+```
+# 0000_init
+create entity User {
+  id    UInt   @id @default(autoincrement())
+  name  String @slot(4)
+  email String @slot(8) @unique
+}
+```
+
+Because each action carries its definition, the server can apply a migration without seeing the whole
+schema — it just lays the actions onto its current state. An accidental `drop field` is visible in review.
 
 ## Artifacts
 
 ```
 schema.marci                       # human-edited source of truth (with struct/enum sugar)
 migrations/
-  meta/
-    snapshot                       # the latest materialized snapshot — what `generate` diffs against
-  0000_init.snapshot               # one full materialized snapshot per version
-  0001_add_users.snapshot
+  0000_init.march                  # self-contained actions, one file per version
+  0001_add_age.march
   ...
 ```
 
-A migration file is a **full materialized snapshot** of the schema at that version — not an incremental
-op list. The engine recovers "what changed" by diffing consecutive snapshots, so there is no separate op
-DSL and no replay/evolve step. Files are verbose (each is the whole schema) but fully reviewable: you see
-the exact flat schema at every version.
-
-Inside each database, the reserved tree `__marci_meta__` holds:
+`generate` replays the existing `.march` files from empty (via `evolve`) to recover the previous state,
+then diffs `schema.marci` against it — no separate `meta/` snapshot pointer. Inside each database, the
+reserved tree `__marci_meta__` holds:
 
 - `schema` — the current materialized snapshot (text). `MarciDB::open` reconstructs the in-memory schema
   from it via `parse_snapshot`, with no re-expansion of sugar and the same slots — so reopening is
   identical to the state the migration left behind.
-- `version` — `u64` BE, bumped per applied migration.
-- `applied` — ledger of applied migration ids (`\n`-joined), for the imperative frontend.
+- `version` — `u64` BE, bumped per applied migration. (No applied-id ledger — see *Frontends*.)
 
 ## Commands (`marci-migrate`)
 
 | Command | What |
 |---|---|
 | `marci-migrate snapshot <schema.marci> [out]` | materialize a schema → flat snapshot (stdout or file) |
-| `marci-migrate generate <schema.marci> [dir] [name]` | diff schema vs `meta/snapshot` → new `NNNN_name.snapshot` + update `meta/snapshot` |
+| `marci-migrate generate <schema.marci> [dir] [name]` | diff schema vs replayed history → new `NNNN_name.march` (self-contained actions) |
+| `marci-migrate plan [dir]` | read the server's snapshot on STDIN → print the actions not yet applied |
 
 The npm wrapper (`marcidb` CLI) drives both binaries: `marci-generate` for TS types, `marci-migrate` for
-migrations. `marcidb generate` produces types + a migration file; `marcidb migrate push <db>` sends all
-`.snapshot` files to a server.
+migrations. `marcidb generate` produces types + a migration file; `marcidb migrate push <db>` plans the
+pending actions and applies them; `marcidb migrate check <db>` reports whether the server is up to date.
 
 ## Row format (the foundational decision)
 
@@ -105,6 +122,11 @@ store serialize_snapshot(&new)        # __marci_meta__/schema
 - **`apply`** executes ops in one write transaction. add/alter field are metadata-only (the slot is
   already in `new`, old rows stay forward-compatible).
 
+For `$migrate` (the file-based frontend) the server is **dumb**: it `evolve`s its current snapshot with the
+actions it was sent (each action carries its definition), parses the result, and applies — no diff, no
+ledger, no deciding what to skip. Choosing *which* actions to send is the client's job (`marci-migrate
+plan`, see *Frontends*). `$sync` has no file, so it diffs as shown above.
+
 `parse_snapshot` reverses `serialize_snapshot`: it reads the flat text, wires names → indices, and
 rebuilds the computed caches (default bytes, index trees, counters, reverse-dependencies) via
 `rebuild_caches` — without re-expanding sugar or re-assigning slots/ids (those are pinned in the text).
@@ -127,19 +149,26 @@ reconciled (`UnsupportedLayoutChange`), removing or renumbering an enum variant
 
 ## Frontends
 
-Both wrap the same engine; do not mix them on one database (`$sync` ignores the ledger).
+Both wrap the same engine. The split is **smart `$sync` vs dumb `$migrate`**: the server thinks for
+`$sync`, the client thinks for `$migrate`.
 
-- **`POST /:db/$sync`** (declarative) — body is `schema.marci` text. The server materializes, reconciles
-  against its stored snapshot, diffs and applies. For databases not managed by migration files (CI,
-  direct HTTP). `MarciDB::migrate_to`.
-- **`POST /:db/$migrate`** (imperative, ledger) — body is `[{ id, ops }]` where `ops` is the version's
-  **snapshot** (not a DSL). The server applies only ids after those in its ledger, diffing each snapshot
-  against the running one in a single transaction. Applied ids must be a prefix of the incoming list,
-  else `HistoryDiverged` (400). Idempotent. `MarciDB::apply_migrations`. Chosen for prod reproducibility:
-  apply exactly what was reviewed and committed.
+- **`POST /:db/$sync`** (declarative, smart) — body is `schema.marci` text. The server materializes,
+  reconciles against its stored snapshot, diffs and applies. For databases not managed by migration files
+  (CI, direct HTTP). `MarciDB::migrate_to`.
+- **`POST /:db/$migrate`** (imperative, dumb) — body is the text of migration actions. The server lays them
+  onto its current state and applies — **no ledger**, no deciding what to skip. `MarciDB::apply_migration`.
+  Coordination lives in the client:
+  - **`GET /:db/$snapshot`** returns the server's current materialized snapshot.
+  - **`marci-migrate plan`** replays the local `.march` history from empty until a step matches the
+    server's snapshot, then emits the unapplied tail. `marcidb migrate push` sends that tail to `$migrate`;
+    `marcidb migrate check` reports up-to-date / behind / drift. This makes push idempotent and ordered
+    *client-side* — the server stays a pure executor.
 
 ## Deferred
 
+- `rename` of fields/entities — self-contained actions make this expressible (an explicit `rename` action
+  carrying the slot, so data is preserved); detection in `generate` is the next step.
+- **Squash / baseline** ("migration = snapshot") — collapsing history into one `create entity`-only
+  migration is already expressible (a baseline is just all-creates); a `generate --squash` is the next step.
 - `drop field` (needs slot tombstones so retired slots are never reused).
 - `changeFieldType` with data transforms; re-keying; `vacuum` to reclaim tombstoned slots.
-- Interactive rename detection (a removed+added pair is currently two ops).

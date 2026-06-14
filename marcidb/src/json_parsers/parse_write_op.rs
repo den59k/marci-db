@@ -53,11 +53,11 @@ fn parse_write_op<'a>(
     data.push(0);
     // payload_offset
     data.extend_from_slice(&(entity.payload_offset as u16).to_be_bytes());
-    // offsets (плейсхолдеры)
+    // offsets (placeholders)
     data.resize(entity.payload_offset, 0);
 
     for field in entity.fields.iter() {
-        // Если ключ является родительским, то мы сразу его заполняем значением
+        // If the key is the parent one, we fill it with the value right away
         if let Some(parent_field) = parent_field && std::ptr::eq(field, parent_field) {
             match field.location {
                 FieldLocation::Key { index: _ } => {
@@ -72,13 +72,13 @@ fn parse_write_op<'a>(
             continue;
         }
 
-        // Пропускаем внутренние значения enum, если у нас стоит не тот enum
+        // Skip enum-internal values if a different enum variant is set
         if !check_exists_condition(entity, &field.condition, &id, &data, schema) {
             continue;
         }
 
         let Some(value) = obj.get(&field.name) else {
-            // Проверяем, есть ли значение по умолчанию
+            // Check whether there is a default value
             if let Some(default_value) = &field.default_value {
                 match field.location {
                     FieldLocation::Key { index: _ } => {
@@ -100,9 +100,9 @@ fn parse_write_op<'a>(
             if matches!(field.location, FieldLocation::Key { .. }) {
                 return Err(EncodeError::MissingIdField(field.full_name.clone()));
             }
-            // Non-nullable Body-поле (скаляр/enum/FK-ref) без @default обязательно. Исключены:
-            // списки (опциональны, отсутствие = пусто) и Virtual-связи (back-reference/owned —
-            // заполняются с другой стороны, а не на insert этой модели)
+            // A non-nullable Body field (scalar/enum/FK-ref) without @default is required. Excluded:
+            // lists (optional, absence = empty) and Virtual relations (back-reference/owned —
+            // filled from the other side, not on insert of this model)
             if !field.nullable && !matches!(field.location, FieldLocation::Virtual) && !matches!(field.ty, FieldType::PrimitiveList(_, _)) {
                 return Err(EncodeError::MissingRequiredField(field.full_name.clone()));
             }
@@ -112,7 +112,7 @@ fn parse_write_op<'a>(
         // mask.set(field_index, true);
 
         if value.is_null() {
-            // null допустим для nullable-полей и списков (пусто); иначе — ошибка, а не молчаливый пропуск
+            // null is allowed for nullable fields and lists (empty); otherwise it's an error, not a silent skip
             if !field.nullable && !matches!(field.location, FieldLocation::Virtual) && !matches!(field.ty, FieldType::PrimitiveList(_, _)) {
                 return Err(EncodeError::NullNotAllowed(field.full_name.clone()));
             }
@@ -126,7 +126,7 @@ fn parse_write_op<'a>(
                 let start_offset = id.len();
                 encode_id_value(&mut id, field, schema, value)?;
 
-                // Добавляем нуль-терминатор в id, если размер неизвестен (для разделения)
+                // Add a null terminator to id if the size is unknown (for separation)
                 if !matches!(field.ty, FieldType::Ref(_)) && field.get_size().is_none() {
                     id.push(b'\0');
                     value_data = &id[start_offset..id.len()-1];
@@ -168,7 +168,7 @@ fn parse_write_op<'a>(
                 value_data = &[];
                 match &field.ty {
                     FieldType::Ref (ref_info) => {
-                        // Здесь может быть как структура, так и модель. Если структура, используем insert
+                        // This can be either a struct or a model. If it's a struct, we use insert
                         let ref_entity = &schema.models[ref_info.model_index];
                         if ref_entity.autoinsert {
                             let op = parse_insert_nested(schema, ref_info, value)?;
@@ -219,7 +219,7 @@ fn parse_write_op<'a>(
 }
 
 
-/// Записывает значение по умолчанию. Если значение вычисляется во время записи - возвращает offset
+/// Writes the default value. If the value is computed at write time, returns the offset
 fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
     match default_value {
         FieldDefault::Value(val) => {
@@ -239,7 +239,7 @@ fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDe
     }
 }
 
-// Записывает пустые байты. Само значение заполняется во время выполнения insert
+// Writes empty bytes. The value itself is filled in during insert execution
 fn encode_empty(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
     match field.ty {
         FieldType::Primitive(primitive_type) => {
@@ -255,7 +255,7 @@ fn encode_empty(dst: &mut Vec<u8>, field: &Field) -> Result<(), EncodeError> {
     Ok(())
 }
 
-/// Записывает в offset текущий курсор на buf
+/// Writes the current cursor into buf at offset
 fn write_header(dst: &mut [u8], offset_pos: usize) {
    let start = dst.len() as u32;
    dst[offset_pos..offset_pos + 4].copy_from_slice(&start.to_be_bytes());
@@ -266,8 +266,8 @@ mod tests {
     use serde_json::json;
     use crate::{json_parsers::{parse_insert, parsers::encode_list}, parse_schema, utils::{get_data, get_end, get_offsets}, write_op::{WriteDefault, WriteDefaultInsert, WriteRelation}};
 
-    /// not-null/required валидация на insert: отсутствующее или null non-nullable поле → ошибка;
-    /// nullable, списки и поля с @default остаются опциональными
+    /// not-null/required validation on insert: a missing or null non-nullable field → error;
+    /// nullable, lists, and fields with @default remain optional
     #[test]
     fn insert_required_and_null_validation() {
         use crate::json_parsers::EncodeError;
@@ -281,7 +281,7 @@ mod tests {
         ");
         let user = &schema.models[0];
 
-        // отсутствует обязательное name → MissingRequiredField
+        // required name is missing → MissingRequiredField
         assert!(matches!(
             parse_insert(&schema, user, &json!({ "nickname": "x" })),
             Err(EncodeError::MissingRequiredField(f)) if f == "User.name"
@@ -291,7 +291,7 @@ mod tests {
             parse_insert(&schema, user, &json!({ "name": null })),
             Err(EncodeError::NullNotAllowed(f)) if f == "User.name"
         ));
-        // nullable отсутствует/null — ок; список отсутствует/null — ок; @default подставляется — ок
+        // nullable missing/null — ok; list missing/null — ok; @default substituted — ok
         assert!(parse_insert(&schema, user, &json!({ "name": "Alice" })).is_ok());
         assert!(parse_insert(&schema, user, &json!({ "name": "Alice", "nickname": null })).is_ok());
         assert!(parse_insert(&schema, user, &json!({ "name": "Alice", "tags": null })).is_ok());
@@ -320,25 +320,25 @@ mod tests {
 
         let encoded = parse_insert(&schema, model, &input).unwrap();
 
-        // Проверяем версию
+        // Check the version
         assert_eq!(encoded.data[0], 1);
         match encoded.defaults[0] {
             WriteDefault::Key(offset, _) => assert_eq!(offset, 0),
             _ => panic!("Wrong default value")
         }
 
-        // Читаем field_count
+        // Read field_count
         let field_count = u16::from_be_bytes(encoded.data[2..4].try_into().unwrap());
         assert_eq!(field_count, model.payload_offset as u16);
 
-        // Читаем смещения
+        // Read the offsets
         let offset_name = u32::from_be_bytes(encoded.data[4..8].try_into().unwrap()) as usize;
         let offset_age  = u32::from_be_bytes(encoded.data[8..12].try_into().unwrap()) as usize;
         let _offset_profile  = u32::from_be_bytes(encoded.data[12..16].try_into().unwrap()) as usize;
 
         assert_eq!(offset_name, model.payload_offset);
 
-        // Проверяем, что смещения действительно указывают на данные
+        // Check that the offsets actually point to the data
         // name: [len=5][bytes]
         let name_end = get_end(&encoded.data, 4, model.payload_offset);
 
@@ -384,7 +384,7 @@ mod tests {
 
         let encoded = parse_insert(&schema, model, &input).unwrap();
         
-        // Проверяем версию
+        // Check the version
         assert_eq!(encoded.data[0], 1);
 
         assert_eq!(get_offsets(&encoded.data, model), vec![ model.payload_offset ]); // 3 bytes + 4 byte offset
@@ -454,7 +454,7 @@ mod tests {
 
         let project_model = &schema.models[1];
 
-         // Проверяем, что field из enum на месте
+         // Check that the field from the enum is present
         { 
             let input = json!({
                 "name": "First project",
@@ -485,7 +485,7 @@ mod tests {
             assert_eq!(get_data(st, features_field, &ops[0].id, &ops[0].data, &schema).unwrap(), buf);
         }
 
-        // Проверяем, что field из другого option не записывается в данные
+        // Check that a field from another option is not written into the data
         {
             let input = json!({
                 "name": "First project",
@@ -533,7 +533,7 @@ mod tests {
             let encoded = parse_insert(&schema, user_model, &input).unwrap();
             assert_eq!(encoded.id, vec![ 0x55, 0x9d, 0x7a, 0x0c, 0xec, 0x2e, 0x49, 0x26, 0x99, 0xad, 0xeb, 0x6f, 0x4a, 0x70, 0xc7, 0x89 ]);
             
-            // Первые 4 байта - размер массива
+            // The first 4 bytes are the array size
             assert_eq!(
                 get_data(user_model, &user_model.fields[2], &encoded.id, &encoded.data, &schema).unwrap(),
                 vec![ 0, 0, 0, 3, 0, 0, 0 ] 

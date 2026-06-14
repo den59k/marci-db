@@ -237,7 +237,7 @@ fn include_cache_test() {
   insert_data(&db, "Post", json!({ "title": "Third", "author": { "id": bob["id"] } }));
   insert_data(&db, "Post", json!({ "title": "Orphan" }));
 
-  // Общий автор у нескольких постов декодируется через кэш — результат не должен отличаться
+  // A shared author across several posts is decoded via the cache — the result must not differ
   {
     let resp = get_data(&db, "Post", json!({ "title": true, "author": { "name": true } }));
     assert_eq!(resp, json!([
@@ -248,7 +248,7 @@ fn include_cache_test() {
     ]));
   }
 
-  // Два разных select одной сущности в одном запросе не делят кэш между собой
+  // Two different selects of the same entity in one query do not share a cache with each other
   {
     let schema_str2 = "
       model Item {

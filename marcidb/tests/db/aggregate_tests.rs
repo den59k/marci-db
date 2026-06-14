@@ -30,25 +30,25 @@ fn count_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Без фильтра — tree.len()
+  // Without a filter — tree.len()
   {
     let resp = get_aggregate(&db, "User", json!({ "$count": true }));
     assert_eq!(resp, json!({ "count": 4 }));
   }
 
-  // Фильтр полностью покрыт индексным диапазоном — подсчёт по ключам индекса
+  // The filter is fully covered by the index range — count by index keys
   {
     let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "age": { "$gte": 25 } } }));
     assert_eq!(resp, json!({ "count": 3 }));
   }
 
-  // Residual-фильтр по неиндексированному полю — скан строк
+  // Residual filter on an unindexed field — row scan
   {
     let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "city": { "$not": null } } }));
     assert_eq!(resp, json!({ "count": 3 }));
   }
 
-  // Составной фильтр: индексный диапазон + residual-условие (weight есть только у Alice и Carol)
+  // Compound filter: index range + residual condition (only Alice and Carol have weight)
   {
     let resp = get_aggregate(&db, "User", json!({
       "$count": true, "$where": { "age": { "$gte": 25 }, "weight": { "$not": null } }
@@ -56,13 +56,13 @@ fn count_test() {
     assert_eq!(resp, json!({ "count": 2 }));
   }
 
-  // Пустой результат
+  // Empty result
   {
     let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "age": { "$gt": 100 } } }));
     assert_eq!(resp, json!({ "count": 0 }));
   }
 
-  // null / not-null по индексированному nullable-полю — разность размеров деревьев, без скана
+  // null / not-null on an indexed nullable field — difference of tree sizes, no scan
   {
     let resp = get_aggregate(&db, "User", json!({ "$count": true, "$where": { "rating": { "$not": null } } }));
     assert_eq!(resp, json!({ "count": 3 }));
@@ -85,7 +85,7 @@ fn min_max_index_fast_path_test() {
   let dir = tempdir().unwrap();
   let db = MarciDB::new(schema_str, dir.path().to_str().unwrap());
 
-  // Пустая таблица: min/max — null, count — 0
+  // Empty table: min/max — null, count — 0
   {
     let resp = get_aggregate(&db, "Reading", json!({ "$count": true, "$min": "celsius", "$max": "celsius" }));
     assert_eq!(resp, json!({ "count": 0, "min": null, "max": null }));
@@ -95,25 +95,25 @@ fn min_max_index_fast_path_test() {
   insert_data(&db, "Reading", json!({ "sensor": "south", "celsius": 14, "voltage": -0.5 }));
   insert_data(&db, "Reading", json!({ "sensor": "east", "celsius": -3, "voltage": 12.25 }));
 
-  // Int с отрицательными значениями: обратный sign-flip декод из ключа индекса
+  // Int with negative values: reverse sign-flip decode from the index key
   {
     let resp = get_aggregate(&db, "Reading", json!({ "$count": true, "$min": "celsius", "$max": "celsius" }));
     assert_eq!(resp, json!({ "count": 3, "min": -25, "max": 14 }));
   }
 
-  // Double: отрицательные инвертируются полностью
+  // Double: negatives are fully inverted
   {
     let resp = get_aggregate(&db, "Reading", json!({ "$min": "voltage", "$max": "voltage" }));
     assert_eq!(resp, json!({ "min": -0.5, "max": 12.25 }));
   }
 
-  // Строковый Value-индекс: значение до нуль-терминатора
+  // String Value index: the value up to the null terminator
   {
     let resp = get_aggregate(&db, "Reading", json!({ "$min": "sensor", "$max": "sensor" }));
     assert_eq!(resp, json!({ "min": "east", "max": "south" }));
   }
 
-  // Смешанный запрос: min по индексу + sum — уходит в скан, результат тот же
+  // Mixed query: min by index + sum — falls back to a scan, same result
   {
     let resp = get_aggregate(&db, "Reading", json!({ "$min": "celsius", "$sum": "celsius" }));
     assert_eq!(resp, json!({ "min": -25, "sum": -14 }));
@@ -130,25 +130,25 @@ fn sum_avg_test() {
     assert_eq!(resp, json!({ "count": 4, "sum": 115, "avg": 28.75 }));
   }
 
-  // null-значения не входят ни в сумму, ни в знаменатель среднего: (5 - 3 + 10) / 3
+  // null values are excluded from both the sum and the average's denominator: (5 - 3 + 10) / 3
   {
     let resp = get_aggregate(&db, "User", json!({ "$sum": "rating", "$avg": "rating" }));
     assert_eq!(resp, json!({ "sum": 12, "avg": 4 }));
   }
 
-  // Дробный тип
+  // Fractional type
   {
     let resp = get_aggregate(&db, "User", json!({ "$sum": "weight" }));
     assert_eq!(resp, json!({ "sum": 130.5 }));
   }
 
-  // С фильтром
+  // With a filter
   {
     let resp = get_aggregate(&db, "User", json!({ "$sum": "age", "$where": { "age": { "$lt": 30 } } }));
     assert_eq!(resp, json!({ "sum": 45 }));
   }
 
-  // Пустое множество — null (как в SQL)
+  // Empty set — null (as in SQL)
   {
     let resp = get_aggregate(&db, "User", json!({ "$sum": "age", "$avg": "age", "$where": { "age": { "$gt": 100 } } }));
     assert_eq!(resp, json!({ "sum": null, "avg": null }));
@@ -165,25 +165,25 @@ fn min_max_test() {
     assert_eq!(resp, json!({ "min": 20, "max": 40 }));
   }
 
-  // Отрицательные значения (sign-flip кодировка)
+  // Negative values (sign-flip encoding)
   {
     let resp = get_aggregate(&db, "User", json!({ "$min": "rating", "$max": "rating" }));
     assert_eq!(resp, json!({ "min": -3, "max": 10 }));
   }
 
-  // Строки сравниваются лексикографически, null не участвует
+  // Strings are compared lexicographically, null does not participate
   {
     let resp = get_aggregate(&db, "User", json!({ "$min": "city", "$max": "city" }));
     assert_eq!(resp, json!({ "min": "Lima", "max": "Tokyo" }));
   }
 
-  // С фильтром
+  // With a filter
   {
     let resp = get_aggregate(&db, "User", json!({ "$max": "age", "$where": { "city": { "$not": null } } }));
     assert_eq!(resp, json!({ "max": 40 }));
   }
 
-  // Пустое множество
+  // Empty set
   {
     let resp = get_aggregate(&db, "User", json!({ "$min": "age", "$where": { "age": { "$gt": 100 } } }));
     assert_eq!(resp, json!({ "min": null }));
@@ -215,7 +215,7 @@ fn nested_aggregate_test() {
   insert_data(&db, "Post", json!({ "title": "Second", "views": 25, "author": { "id": alice["id"] } }));
   insert_data(&db, "Post", json!({ "title": "Third", "views": 5, "author": { "id": alice["id"] } }));
 
-  // count по связи: подсчёт ключей индекса, у Bob — ноль детей
+  // count over a relation: count of index keys, Bob has zero children
   {
     let resp = get_data(&db, "User", json!({ "name": true, "posts": { "$count": true } }));
     assert_eq!(resp, json!([
@@ -224,7 +224,7 @@ fn nested_aggregate_test() {
     ]));
   }
 
-  // Несколько агрегатов по связи
+  // Several aggregates over a relation
   {
     let resp = get_data_one(&db, "User", json!({
       "posts": { "$count": true, "$sum": "views", "$max": "views", "$min": "title" },
@@ -235,7 +235,7 @@ fn nested_aggregate_test() {
     }));
   }
 
-  // Агрегат с $where по детям (residual-фильтр)
+  // Aggregate with $where over children (residual filter)
   {
     let resp = get_data_one(&db, "User", json!({
       "posts": { "$count": true, "$sum": "views", "$where": { "views": { "$gte": 10 } } },
@@ -244,7 +244,7 @@ fn nested_aggregate_test() {
     assert_eq!(resp, json!({ "posts": { "count": 2, "sum": 35 } }));
   }
 
-  // Пустая связь: агрегаты по нулю строк
+  // Empty relation: aggregates over zero rows
   {
     let resp = get_data_one(&db, "User", json!({
       "posts": { "$count": true, "$max": "views" },
@@ -279,13 +279,13 @@ fn nested_aggregate_struct_test() {
     ]
   }));
 
-  // Обычный select для сверки
+  // Plain select for cross-checking
   {
     let resp = get_data_one(&db, "Project", json!({ "name": true, "tasks": { "title": true } }));
     assert_eq!(resp, json!({ "name": "Apollo", "tasks": [ { "title": "Design" }, { "title": "Build" } ] }));
   }
 
-  // Struct-дети живут под префиксом родителя в основном дереве
+  // Struct children live under the parent's prefix in the main tree
   let resp = get_data_one(&db, "Project", json!({
     "name": true,
     "tasks": { "$count": true, "$sum": "hours" }

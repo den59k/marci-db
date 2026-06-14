@@ -104,7 +104,7 @@ pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id:
       if action.is_empty() {
         delete_by_prefix(&mut tree, parent_id)?;
       } else {
-        // Каскад во вложенную owned-коллекцию, у которой свои зависимости, пока не реализован
+        // A cascade into a nested owned collection that has its own dependencies is not implemented yet
         return Err(DeleteError::Unsupported("cascade delete of a nested owned collection with its own dependencies is not supported yet"));
       }
     }

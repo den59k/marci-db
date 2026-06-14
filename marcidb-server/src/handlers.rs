@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update};
+use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, serialize_snapshot};
 use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body}};
 
 type HandlerResult = Result<Response<Full<Bytes>>, ApiError>;
 
-/// Открывает БД по имени (read-lock) и выполняет операцию над ней
+/// Opens the DB by name (read-lock) and runs an operation against it
 fn with_db<T>(ctx: &ServerContext, db_name: &str, f: impl FnOnce(&MarciDB) -> Result<T, ApiError>) -> Result<T, ApiError> {
     let db = ctx.get_db(db_name, false)?;
     let db = db.read().unwrap_or_else(|e| e.into_inner());
@@ -20,11 +20,11 @@ fn model<'a>(db: &'a MarciDB, name: &str) -> Result<&'a marcidb::Entity, ApiErro
     db.get_model(name).ok_or_else(|| ApiError::NotFound(format!("Model '{}' not found", name)))
 }
 
-/// Декларативная синхронизация схемы (`$sync`). Тело — текст схемы `.marci`; сервер диффит свою
-/// сохранённую схему против присланной и применяет дифф. Если БД нет — создаётся. HTTP-only
-/// escape-hatch для окружений без CLI/файлов миграций — в CLI не вынесен, чтобы не путать с
-/// `migrate push`. Не трогает ledger, поэтому не смешивать с `$migrate` на одной БД. Осторожно:
-/// отсутствие модели в схеме = `drop model` (потеря данных модели); несовместимые изменения → 400
+/// Declarative schema synchronization (`$sync`). The body is the `.marci` schema text; the server diffs its
+/// stored schema against the one sent and applies the diff. If the DB doesn't exist — it's created. An HTTP-only
+/// escape-hatch for environments without a CLI/migration files — not exposed in the CLI to avoid confusion with
+/// `migrate push`. Doesn't touch the ledger, so don't mix it with `$migrate` on the same DB. Caution:
+/// a model missing from the schema = `drop model` (loss of the model's data); incompatible changes → 400
 pub async fn handle_sync(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
     let schema_text = parse_text_body(req).await?;
 
@@ -41,40 +41,34 @@ pub async fn handle_sync(req: Request<hyper::body::Incoming>, ctx: Arc<ServerCon
     Ok(ok_response(Vec::new()))
 }
 
-/// Императивная миграция (`$migrate`). Тело — JSON-массив `.mig`-файлов `[{ "id", "ops" }]` (ВСЕ
-/// миграции клиента по порядку). Сервер по ledger'у применяет только новые и реплеит их ops в
-/// одной транзакции. Если БД нет — создаётся. Ответ — `{ "applied": [...id] }` за этот пуш
+/// Imperative migration (`$migrate`). The body is the TEXT of the migration actions (self-contained actions,
+/// possibly several migrations in a row). The server dumbly lays them onto its state and applies them —
+/// no ledger. Which actions to send is decided by the `marci-migrate` client based on `GET /:db/$snapshot`.
+/// If the DB doesn't exist — it's created.
 pub async fn handle_migrate(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
-    let json_val = parse_json_body(req).await?;
+    let migration_text = parse_text_body(req).await?;
 
-    let applied = blocking(move || {
-        let migrations = parse_migrations_payload(&json_val)?;
+    blocking(move || {
         let db = ctx.get_db(&db_name, true)?; // create-if-absent
         let mut db = db.write().unwrap_or_else(|e| e.into_inner());
-        db.apply_migrations(&migrations).map_err(|e| match e {
+        db.apply_migration(&migration_text).map_err(|e| match e {
             MigrateApplyError::Storage(_) => ApiError::Internal(format!("{:?}", e)),
             _ => ApiError::BadRequest(format!("{}", e)),
-        })
+        })?;
+        Ok::<_, ApiError>(())
     }).await?;
 
-    let body = serde_json::to_string(&serde_json::json!({ "applied": applied })).unwrap();
-    Ok(ok_response(body))
+    Ok(ok_response(Vec::new()))
 }
 
-/// Разбирает тело `$migrate`: JSON-массив `[{ "id": "0000_init", "ops": "<.mig текст>" }]`
-fn parse_migrations_payload(json: &Value) -> Result<Vec<(String, String)>, ApiError> {
-    let arr = json.as_array()
-        .ok_or_else(|| ApiError::BadRequest("Migrate body must be an array of { id, ops }".to_string()))?;
-    arr.iter().map(|item| {
-        let id = item.get("id").and_then(Value::as_str)
-            .ok_or_else(|| ApiError::BadRequest("Each migration needs a string \"id\"".to_string()))?;
-        let ops = item.get("ops").and_then(Value::as_str)
-            .ok_or_else(|| ApiError::BadRequest("Each migration needs a string \"ops\"".to_string()))?;
-        Ok((id.to_string(), ops.to_string()))
-    }).collect()
+/// Returns the current materialized snapshot of the DB — the client reconciles it against its local migration
+/// history (`marci-migrate plan`) to figure out which actions haven't been applied yet and to catch drift
+pub async fn handle_snapshot(ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
+    let snapshot = blocking(move || with_db(&ctx, &db_name, |db| Ok(serialize_snapshot(&db.schema)))).await?;
+    Ok(ok_response(snapshot))
 }
 
-/// Атомарная batch-транзакция: тело — массив операций `{ model, action, ... }`
+/// Atomic batch transaction: the body is an array of operations `{ model, action, ... }`
 pub async fn handle_transaction(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
     let json_val = parse_json_body(req).await?;
 

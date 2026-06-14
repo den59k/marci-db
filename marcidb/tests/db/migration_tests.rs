@@ -1,16 +1,21 @@
-use marcidb::{MarciDB, MigrateApplyError, parse_schema, serialize_snapshot};
+use marcidb::{MarciDB, MigrateApplyError, diff, parse_schema, reconcile, serialize_migration};
 use serde_json::json;
 use tempfile::tempdir;
 
 use crate::db::{get_data, get_data_one, insert_data};
 
-/// Контент императивной миграции = materialized-снапшот версии схемы
-fn snap(schema_text: &str) -> String {
-  serialize_snapshot(&parse_schema(schema_text))
+/// Migration file text = self-contained actions (diff prev→new). `prev`/`new` are `.marci` schema
+/// texts (prev="" for the first migration); slots/variants are inherited from prev via reconcile
+fn mig(prev: &str, new: &str) -> String {
+  let prev_schema = parse_schema(prev);
+  let mut new_schema = parse_schema(new);
+  reconcile(&mut new_schema, &prev_schema);
+  let ops = diff(&prev_schema, &new_schema).unwrap();
+  serialize_migration(&ops, &new_schema)
 }
 
-/// add field на существующих данных: старые строки читаются (поле отсутствует),
-/// новые строки пишутся с полем — без переписывания старых строк (формат v2)
+/// add field on existing data: old rows are read (field is absent),
+/// new rows are written with the field — without rewriting old rows (v2 format)
 #[test]
 fn migrate_add_field() {
   let dir = tempdir().unwrap();
@@ -30,8 +35,8 @@ fn migrate_add_field() {
   );
 }
 
-/// add index строит индекс из существующих строк (бэкфилл) — запрос по индексу
-/// находит записи, вставленные ДО миграции
+/// add index builds the index from existing rows (backfill) — a query by index
+/// finds records inserted BEFORE the migration
 #[test]
 fn migrate_add_index_backfills_existing_rows() {
   let dir = tempdir().unwrap();
@@ -48,27 +53,27 @@ fn migrate_add_index_backfills_existing_rows() {
   );
 }
 
-/// Первый push в пустую БД создаёт сущность (CreateEntity) — БД появляется «из ничего»
+/// The first push into an empty DB creates the entity (CreateEntity) — the DB appears "out of nothing"
 #[test]
 fn migrate_create_model_on_empty_db() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
-  // Пустая БД — моделей ещё нет
+  // Empty DB — no models yet
   assert!(db.get_model("User").is_none());
 
   db.migrate_to("model User {\n  name  String\n  email String @index\n}").unwrap();
 
   insert_data(&db, "User", json!({ "name": "Alice", "email": "a@x.com" }));
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
-  // Индекс работает
+  // The index works
   assert_eq!(
     get_data_one(&db, "User", json!({ "name": true, "$where": { "email": "a@x.com" } })),
     json!({ "name": "Alice" })
   );
 }
 
-/// Состояние после миграции переживает рестарт: open() реконструирует схему из снапшота в __marci_meta__
+/// State after migration survives a restart: open() reconstructs the schema from the snapshot in __marci_meta__
 #[test]
 fn migrate_persists_across_reopen() {
   let dir = tempdir().unwrap();
@@ -79,9 +84,9 @@ fn migrate_persists_across_reopen() {
     insert_data(&db, "User", json!({ "name": "Alice" }));
     db.migrate_to("model User {\n  name String\n  age  UInt\n}").unwrap();
     insert_data(&db, "User", json!({ "name": "Bob", "age": 5 }));
-  } // БД закрывается
+  } // DB is closed
 
-  // Переоткрытие: схема (с age) реконструирована из снапшота, без передачи schema.marci
+  // Reopen: schema (with age) is reconstructed from the snapshot, without passing schema.marci
   let db = MarciDB::open(&path);
   assert!(db.get_model("User").is_some());
   assert_eq!(
@@ -90,8 +95,8 @@ fn migrate_persists_across_reopen() {
   );
 }
 
-/// Вставка поля в СЕРЕДИНУ модели: reconcile_slots переносит слоты существующих полей,
-/// новое поле получает следующий свободный → миграция проходит, старые данные целы (фикс layout-бага)
+/// Inserting a field into the MIDDLE of a model: reconcile_slots carries over slots of existing fields,
+/// the new field gets the next free one → migration passes, old data is intact (layout bug fix)
 #[test]
 fn migrate_insert_field_in_middle_carries_slots() {
   let dir = tempdir().unwrap();
@@ -100,9 +105,9 @@ fn migrate_insert_field_in_middle_carries_slots() {
 
   db.migrate_to("model M {\n  a String\n  c String\n  b String\n}").unwrap();
 
-  // Старая строка читается корректно (a/b на своих слотах, c отсутствует → null)
+  // The old row reads correctly (a/b on their slots, c absent → null)
   assert_eq!(get_data(&db, "M", json!({ "a": true, "b": true, "c": true })), json!([{ "a": "a1", "b": "b1", "c": null }]));
-  // Новая строка пишет c
+  // The new row writes c
   insert_data(&db, "M", json!({ "a": "a2", "b": "b2", "c": "c2" }));
   assert_eq!(
     get_data_one(&db, "M", json!({ "a": true, "b": true, "c": true, "$where": { "a": "a2" } })),
@@ -110,7 +115,7 @@ fn migrate_insert_field_in_middle_carries_slots() {
   );
 }
 
-/// drop field пока не поддержан apply (нужен tombstone слота) — явная ошибка, не молчаливая порча
+/// drop field is not yet supported by apply (a slot tombstone is needed) — an explicit error, not silent corruption
 #[test]
 fn migrate_drop_field_unsupported() {
   let dir = tempdir().unwrap();
@@ -120,7 +125,7 @@ fn migrate_drop_field_unsupported() {
   assert!(matches!(result, Err(MigrateApplyError::Unsupported(_))));
 }
 
-/// Смена типа поля требует трансформации данных — отклоняется
+/// Changing a field's type requires data transformation — rejected
 #[test]
 fn migrate_type_change_rejected() {
   let dir = tempdir().unwrap();
@@ -129,44 +134,20 @@ fn migrate_type_change_rejected() {
   assert!(matches!(result, Err(MigrateApplyError::Diff(_))));
 }
 
-// ─────────────────────────────── императивные миграции (ledger + replay снапшотов) ───────────────────────────────
+// ─────────── imperative migrations ($migrate): a dumb server applies the actions it is sent ───────────
 
-/// Императивный реплей: применяет снапшоты по ledger'у. Повторный пуш того же списка — no-op
+/// Sequential application: create a model, then add a field. Old rows are intact.
 #[test]
-fn migrations_replay_and_idempotent() {
+fn migrate_apply_sequential() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
-  let m0 = ("0000_init".to_string(), snap("model User {\n  name String\n}"));
-  let m1 = ("0001_age".to_string(), snap("model User {\n  name String\n  age UInt\n}"));
-
-  let applied = db.apply_migrations(&[m0.clone(), m1.clone()]).unwrap();
-  assert_eq!(applied, vec!["0000_init", "0001_age"]);
-
-  insert_data(&db, "User", json!({ "name": "Alice", "age": 30 }));
-  assert_eq!(get_data_one(&db, "User", json!({ "name": true, "age": true })), json!({ "name": "Alice", "age": 30 }));
-
-  // Повторный пуш — ничего не применяется, данные целы
-  let applied2 = db.apply_migrations(&[m0.clone(), m1.clone()]).unwrap();
-  assert!(applied2.is_empty());
-  assert_eq!(get_data_one(&db, "User", json!({ "name": true, "age": true })), json!({ "name": "Alice", "age": 30 }));
-}
-
-/// Инкрементальный пуш: применяется только новая миграция, старые данные сохраняются
-#[test]
-fn migrations_incremental_push() {
-  let dir = tempdir().unwrap();
-  let mut db = MarciDB::open(dir.path().to_str().unwrap());
-
-  let m0 = ("0000_init".to_string(), snap("model User {\n  name String\n}"));
-  db.apply_migrations(&[m0.clone()]).unwrap();
+  let v0 = "model User {\n  name String\n}";
+  let v1 = "model User {\n  name String\n  age UInt\n}";
+  db.apply_migration(&mig("", v0)).unwrap();
   insert_data(&db, "User", json!({ "name": "Alice" }));
 
-  let m1 = ("0001_age".to_string(), snap("model User {\n  name String\n  age UInt\n}"));
-  let applied = db.apply_migrations(&[m0.clone(), m1.clone()]).unwrap();
-  assert_eq!(applied, vec!["0001_age"]);
-
-  // Старая строка читается (age отсутствует), новая пишется с age
+  db.apply_migration(&mig(v0, v1)).unwrap();   // only adding age
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
   insert_data(&db, "User", json!({ "name": "Bob", "age": 5 }));
   assert_eq!(
@@ -175,55 +156,59 @@ fn migrations_incremental_push() {
   );
 }
 
-/// Ledger переживает рестарт: повторное открытие видит схему, повторный пуш всё ещё no-op
+/// The server is dumb: reapplying the same migration fails (idempotency is the client's concern)
 #[test]
-fn migrations_ledger_persists_across_reopen() {
+fn migrate_reapply_fails_no_ledger() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::open(dir.path().to_str().unwrap());
+  let m0 = mig("", "model User {\n  name String\n}");
+  db.apply_migration(&m0).unwrap();
+  assert!(db.apply_migration(&m0).is_err()); // create entity User again → error
+}
+
+/// State after an imperative migration survives a restart (snapshot in __marci_meta__)
+#[test]
+fn migrate_imperative_persists_across_reopen() {
   let dir = tempdir().unwrap();
   let path = dir.path().to_str().unwrap().to_string();
-  let m0 = ("0000_init".to_string(), snap("model User {\n  name String\n}"));
-
   {
     let mut db = MarciDB::open(&path);
-    db.apply_migrations(&[m0.clone()]).unwrap();
+    db.apply_migration(&mig("", "model User {\n  name String\n}")).unwrap();
     insert_data(&db, "User", json!({ "name": "Alice" }));
   }
-
-  let mut db = MarciDB::open(&path);
+  let db = MarciDB::open(&path);
   assert!(db.get_model("User").is_some());
-  let applied = db.apply_migrations(&[m0.clone()]).unwrap();
-  assert!(applied.is_empty());
   assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }]));
 }
 
-/// Невалидная схема через migrate_to ($sync) — ошибка, а не паника
+/// Invalid schema via migrate_to ($sync) — an error, not a panic
 #[test]
 fn migrate_to_rejects_invalid_schema() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
-  assert!(db.migrate_to("model A {\n  x Undefined\n}").is_err());      // неизвестный тип
-  assert!(db.migrate_to("model A {\n  x String @bogus\n}").is_err());  // плохой атрибут
+  assert!(db.migrate_to("model A {\n  x Undefined\n}").is_err());      // unknown type
+  assert!(db.migrate_to("model A {\n  x String @bogus\n}").is_err());  // bad attribute
 }
 
-/// Невалидный снапшот через apply_migrations ($migrate) — ошибка, а не паника
+/// Invalid action via apply_migration ($migrate) — an error, not a panic
 #[test]
-fn apply_migrations_rejects_invalid_snapshot() {
+fn apply_migration_rejects_invalid() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
-  // битый синтаксис снапшота
-  assert!(db.apply_migrations(&[("0000_bad".to_string(), "totally bogus line".to_string())]).is_err());
-  // синтаксис ok, но ссылка на неизвестную сущность — ловится при разводке имён
-  assert!(db.apply_migrations(&[("0000_x".to_string(), "entity M {\n  ref Nope @slot(4)\n}".to_string())]).is_err());
+  // unknown action
+  assert!(db.apply_migration("totally bogus line").is_err());
+  // action is ok, but it references an unknown entity — caught during name resolution
+  assert!(db.apply_migration("create entity M {\n  ref Nope @slot(4)\n}").is_err());
 }
 
-/// Enum end-to-end через императивный путь ($migrate): снапшот со впечатанным enum → apply_migrations
+/// Enum end-to-end via the imperative path ($migrate): self-contained actions with the enum baked in
 #[test]
 fn migrate_enum_end_to_end_via_mig() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
   let schema = "enum ChatType {\n  direct {\n    uniqueId String\n  }\n  group {\n    name String\n  }\n}\n\nmodel Chat {\n  type ChatType\n}";
-  let applied = db.apply_migrations(&[("0000_init".to_string(), snap(schema))]).unwrap();
-  assert_eq!(applied, vec!["0000_init"]);
+  db.apply_migration(&mig("", schema)).unwrap();
 
   insert_data(&db, "Chat", json!({ "type": "group", "name": "General" }));
   assert_eq!(
@@ -232,7 +217,7 @@ fn migrate_enum_end_to_end_via_mig() {
   );
 }
 
-/// Enum end-to-end через декларативный путь ($sync): migrate_to со схемой-с-enum со скретча
+/// Enum end-to-end via the declarative path ($sync): migrate_to with an enum-bearing schema from scratch
 #[test]
 fn migrate_enum_end_to_end_via_sync() {
   let dir = tempdir().unwrap();
@@ -248,7 +233,7 @@ fn migrate_enum_end_to_end_via_sync() {
   );
 }
 
-/// Список enum (`Enum[]`) отклоняется с подсказкой об альтернативе (список модели с enum-полем)
+/// A list of enums (`Enum[]`) is rejected with a hint about the alternative (a list of a model with an enum field)
 #[test]
 fn enum_list_rejected_with_hint() {
   let dir = tempdir().unwrap();
@@ -257,12 +242,12 @@ fn enum_list_rejected_with_hint() {
   let schema = "enum Role {\n  admin\n  user\n}\n\nmodel User {\n  roles Role[]\n}";
   let err = db.migrate_to(schema).unwrap_err();
   let msg = format!("{}", err);
-  assert!(msg.contains("list of enum"), "ожидали объяснение, got: {}", msg);
-  assert!(msg.contains("RoleItem"), "ожидали подсказку-альтернативу, got: {}", msg);
+  assert!(msg.contains("list of enum"), "expected an explanation, got: {}", msg);
+  assert!(msg.contains("RoleItem"), "expected an alternative hint, got: {}", msg);
 }
 
-/// Переупорядочивание вариантов enum в schema.marci: id переносятся из старого снапшота,
-/// поэтому уже записанные данные продолжают читаться правильно (дискриминант не «съезжает»)
+/// Reordering enum variants in schema.marci: ids are carried over from the old snapshot,
+/// so already-written data keeps reading correctly (the discriminant does not "drift")
 #[test]
 fn migrate_enum_reorder_preserves_data() {
   let dir = tempdir().unwrap();
@@ -272,24 +257,12 @@ fn migrate_enum_reorder_preserves_data() {
   );
   insert_data(&db, "Account", json!({ "name": "Alice", "type": "pro", "sign": "a-sign" }));
 
-  // Варианты переставлены местами — но id pro/basic должны сохраниться
+  // The variants are swapped — but the pro/basic ids must be preserved
   db.migrate_to("model Account {\n  name String\n  type AccountType\n}\n\nenum AccountType {\n  pro {\n    sign String\n  }\n  basic\n}").unwrap();
 
-  // Запись, сделанная до миграции, по-прежнему читается как pro со своим sign
+  // The record made before the migration still reads as pro with its sign
   assert_eq!(
     get_data_one(&db, "Account", json!({ "name": true, "type": true, "sign": true })),
     json!({ "name": "Alice", "type": "pro", "sign": "a-sign" })
   );
-}
-
-/// Разошедшаяся история (другой id на уже применённой позиции) отклоняется
-#[test]
-fn migrations_history_diverged_rejected() {
-  let dir = tempdir().unwrap();
-  let mut db = MarciDB::open(dir.path().to_str().unwrap());
-
-  db.apply_migrations(&[("0000_init".to_string(), snap("model User {\n  name String\n}"))]).unwrap();
-
-  let result = db.apply_migrations(&[("0000_other".to_string(), snap("model User {\n  name String\n}"))]);
-  assert!(matches!(result, Err(MigrateApplyError::HistoryDiverged { .. })));
 }

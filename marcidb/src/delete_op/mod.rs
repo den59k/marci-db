@@ -59,7 +59,7 @@ pub enum DeleteError {
   ItemNotFound,
   RestrictConstraints(String,Vec<Vec<u8>>),
   EncodeError(EncodeError),
-  /// Каскад/зависимость такой формы пока не реализованы (вложенные owned-коллекции, IndexTree-rev)
+  /// A cascade/dependency of this form is not implemented yet (nested owned collections, IndexTree-rev)
   Unsupported(&'static str),
   Storage(StorageError)
 }

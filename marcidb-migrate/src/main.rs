@@ -1,15 +1,15 @@
-//! `marci-migrate` — CLI миграций MarciDB (движок поверх materialized-снапшота).
+//! `marci-migrate` — MarciDB migration CLI (smart client, dumb server).
 //!
-//! Тонкая обёртка над крейтом `marcidb`: вся логика (материализация схемы, снапшот, сверка слотов,
-//! diff) живёт в либе и переиспользуется сервером. Здесь — разбор аргументов и работа с файлами.
-//!
-//! Файл миграции = materialized-снапшот версии схемы (плоские entities, struct развёрнуты, enum
-//! впечатан, слоты/биндинги запинены). Сервер диффит соседние снапшоты и применяет — без отдельного
-//! формата операций. Снапшот соответствует тому, что лежит в памяти marcidb, а не тексту `.marci`.
+//! A migration file (`NNNN_name.march`) is a list of SELF-CONTAINED actions (each carries the field definition).
+//! The developer sees the CHANGES in it (that's what gets reviewed); the full schema lives in `schema.marci`, there's no
+//! snapshot inside a migration. The server is dumb: `$migrate` lays the sent actions onto its state.
+//! All the smarts (what changed, what to send) live here: `generate` diffs, `plan` computes the unapplied tail.
 
-use std::{env, fs, process};
+use std::{env, fs, io::Read, process};
 
-use marcidb::{MigrateOp, Schema, diff, parse_snapshot, reconcile, serialize_snapshot, try_parse_schema};
+use marcidb::{MigrateOp, Schema, diff, evolve, parse_snapshot, reconcile, serialize_migration, serialize_snapshot, try_parse_schema};
+
+const EXT: &str = ".march";
 
 fn main() {
   let args: Vec<String> = env::args().collect();
@@ -23,6 +23,7 @@ fn main() {
       args.get(3).map(String::as_str).unwrap_or("migrations"),
       args.get(4).map(String::as_str).unwrap_or("migration"),
     ),
+    Some("plan") => cmd_plan(args.get(2).map(String::as_str).unwrap_or("migrations")),
     Some(other) => {
       eprintln!("Unknown command: {}\n", other);
       print_usage();
@@ -38,88 +39,127 @@ fn main() {
 fn print_usage() {
   eprintln!(
     "marci-migrate — MarciDB migration tool\n\nUsage:\n  \
-     marci-migrate snapshot <schema.marci> [out]                materialize schema → flat snapshot\n  \
-     marci-migrate generate <schema.marci> [dir] [name]         diff schema vs last snapshot → new migration file"
+     marci-migrate snapshot <schema.marci> [out]            materialize schema → flat snapshot\n  \
+     marci-migrate generate <schema.marci> [dir] [name]     diff schema vs history → new {EXT} migration\n  \
+     marci-migrate plan [dir]                               read server snapshot on STDIN → print actions to apply"
   );
 }
 
-/// Читает текст схемы, срезая UTF-8 BOM (иначе первый блок схемы «сползёт»)
+/// Reads the schema text, stripping the UTF-8 BOM (otherwise the first schema block "shifts")
 fn read_schema(path: &str) -> String {
-  let raw = fs::read_to_string(path).unwrap_or_else(|e| {
-    eprintln!("Cannot read {}: {}", path, e);
-    process::exit(1);
-  });
+  let raw = fs::read_to_string(path).unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", path, e); process::exit(1); });
   raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string()
 }
 
-/// Материализует `schema.marci` в плоский снапшот (struct развёрнуты, enum впечатан, биндинги/слоты явные).
-fn cmd_snapshot(schema_path: &str, out: Option<&str>) {
-  let schema = try_parse_schema(&read_schema(schema_path)).unwrap_or_else(|e| {
-    eprintln!("Schema error: {}", e);
-    process::exit(1);
-  });
-  let snapshot = serialize_snapshot(&schema);
+fn die<T, E: std::fmt::Display>(r: Result<T, E>, ctx: &str) -> T {
+  r.unwrap_or_else(|e| { eprintln!("{}: {}", ctx, e); process::exit(1); })
+}
 
+/// Materializes `schema.marci` into a flat snapshot (structs expanded, enum inlined).
+fn cmd_snapshot(schema_path: &str, out: Option<&str>) {
+  let schema = die(try_parse_schema(&read_schema(schema_path)), "Schema error");
+  let snapshot = serialize_snapshot(&schema);
   match out {
     Some(path) => {
-      fs::write(path, &snapshot).unwrap_or_else(|e| { eprintln!("Cannot write {}: {}", path, e); process::exit(1); });
+      die(fs::write(path, &snapshot), "Cannot write");
       println!("Wrote snapshot to {}", path);
     }
     None => print!("{}", snapshot),
   }
 }
 
-/// Диффит `schema.marci` против последнего снапшота (`<dir>/meta/snapshot`) → новый файл-миграцию
-/// (полный снапшот версии). Слоты/варианты наследуются от предыдущего снапшота через [`reconcile_slots`],
-/// поэтому существующие данные не ломаются. Номер берётся из числа уже существующих файлов.
+/// Replays the migration history from an empty state → snapshot text of the latest version
+fn replay_history(files: &[String]) -> String {
+  let mut snapshot = String::new();
+  for f in files {
+    let text = fs::read_to_string(f).unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", f, e); process::exit(1); });
+    snapshot = die(evolve(&snapshot, &text), &format!("Corrupt migration {}", f));
+  }
+  snapshot
+}
+
+fn snapshot_to_schema(text: &str) -> Schema {
+  if text.trim().is_empty() { Schema { models: vec![] } } else { die(parse_snapshot(text), "Corrupt snapshot") }
+}
+
+/// Diffs `schema.marci` against the replayed history → a new `NNNN_name.march`
+/// (only a list of self-contained actions — the changes). Variant slots/ids are inherited from
+/// the previous state via [`reconcile`], so the server's data doesn't break.
 fn cmd_generate(schema_path: &str, migrations_dir: &str, name: &str) {
-  let mut new_schema = try_parse_schema(&read_schema(schema_path)).unwrap_or_else(|e| {
-    eprintln!("Schema error: {}", e);
-    process::exit(1);
-  });
+  let mut new_schema = die(try_parse_schema(&read_schema(schema_path)), "Schema error");
 
-  let meta_dir = format!("{}/meta", migrations_dir);
-  let snapshot_path = format!("{}/snapshot", meta_dir);
-  let prev_text = fs::read_to_string(&snapshot_path).unwrap_or_default();
-  let prev = if prev_text.trim().is_empty() {
-    Schema { models: vec![] }
-  } else {
-    parse_snapshot(&prev_text).unwrap_or_else(|e| { eprintln!("Corrupt snapshot {}: {}", snapshot_path, e); process::exit(1); })
-  };
+  let files = list_migrations(migrations_dir);
+  let prev = snapshot_to_schema(&replay_history(&files));
 
-  // Переносим слоты/порядок/id вариантов из предыдущего снапшота, затем диффим
   reconcile(&mut new_schema, &prev);
-  let ops = diff(&prev, &new_schema).unwrap_or_else(|e| {
-    eprintln!("Migration error: {}", e);
-    process::exit(1);
-  });
+  let ops = die(diff(&prev, &new_schema), "Migration error");
 
   if ops.is_empty() {
     println!("No schema changes — migration not created");
     return;
   }
 
-  let id = format!("{:04}", count_migrations(migrations_dir));
-  let filename = format!("{}_{}.snapshot", id, name);
-  let snapshot_text = serialize_snapshot(&new_schema);
-
-  fs::create_dir_all(&meta_dir).unwrap();
-  fs::write(format!("{}/{}", migrations_dir, filename), &snapshot_text).unwrap();
-  fs::write(&snapshot_path, &snapshot_text).unwrap();
-
+  let id = format!("{:04}", files.len());
+  let filename = format!("{}_{}{}", id, name, EXT);
+  fs::create_dir_all(migrations_dir).unwrap();
+  fs::write(format!("{}/{}", migrations_dir, filename), serialize_migration(&ops, &new_schema)).unwrap();
   println!("Created migration {} ({})", filename, summarize(&ops));
 }
 
-/// Сколько файлов-миграций (`*.snapshot`) уже есть в каталоге (для следующего номера)
-fn count_migrations(dir: &str) -> usize {
-  fs::read_dir(dir)
-    .map(|entries| entries.filter_map(|e| e.ok())
-      .filter(|e| e.file_name().to_string_lossy().ends_with(".snapshot"))
-      .count())
-    .unwrap_or(0)
+/// Push planning: STDIN is the server's current snapshot (from `GET /:db/$snapshot`, empty if the DB doesn't exist).
+/// We replay migrations from the first one until the snapshot matches the server's; we print to STDOUT the actions
+/// of the not-yet-applied migrations (which is what `marcidb migrate push` sends to `$migrate`).
+fn cmd_plan(migrations_dir: &str) {
+  let mut server_raw = String::new();
+  std::io::stdin().read_to_string(&mut server_raw).ok();
+  let server = canon(server_raw.trim());
+
+  let files = list_migrations(migrations_dir);
+
+  // Find after which migration the snapshot matches the server's; start is the index of the first unapplied one
+  let mut cumulative = String::new();
+  let mut start = None;
+  if server.is_empty() {
+    start = Some(0); // server is empty — send everything
+  } else {
+    for (i, f) in files.iter().enumerate() {
+      let text = fs::read_to_string(f).unwrap_or_else(|e| { eprintln!("Cannot read {}: {}", f, e); process::exit(1); });
+      cumulative = die(evolve(&cumulative, &text), &format!("Corrupt migration {}", f));
+      if canon(&cumulative) == server { start = Some(i + 1); break; }
+    }
+  }
+
+  let Some(start) = start else {
+    eprintln!("plan: server schema doesn't match any point in the migration history — drift?");
+    process::exit(1);
+  };
+
+  let tail: Vec<String> = files[start..].iter()
+    .map(|f| fs::read_to_string(f).unwrap_or_default().trim().to_string())
+    .filter(|s| !s.is_empty())
+    .collect();
+  print!("{}", tail.join("\n\n"));
 }
 
-/// Короткая сводка операций для вывода (`2 create, 1 add field, …`)
+/// Normalizes the snapshot text to its canonical form (for comparison with the server's)
+fn canon(snapshot_text: &str) -> String {
+  if snapshot_text.trim().is_empty() { return String::new(); }
+  serialize_snapshot(&snapshot_to_schema(snapshot_text))
+}
+
+/// Paths to migration files (`*.march`), sorted by name
+fn list_migrations(dir: &str) -> Vec<String> {
+  let mut files: Vec<String> = match fs::read_dir(dir) {
+    Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path())
+      .filter(|p| p.extension().map(|x| x == "march").unwrap_or(false))
+      .filter_map(|p| p.to_str().map(String::from)).collect(),
+    Err(_) => vec![],
+  };
+  files.sort();
+  files
+}
+
+/// Short summary of the operations (`1 create entity, 2 add field`)
 fn summarize(ops: &[MigrateOp]) -> String {
   let (mut ce, mut de, mut af, mut df, mut alf, mut idx) = (0, 0, 0, 0, 0, 0);
   for op in ops {
@@ -132,9 +172,8 @@ fn summarize(ops: &[MigrateOp]) -> String {
       MigrateOp::AddIndex { .. } | MigrateOp::DropIndex { .. } => idx += 1,
     }
   }
-  let parts: Vec<String> = [
+  [
     (ce, "create entity"), (de, "drop entity"), (af, "add field"),
     (df, "drop field"), (alf, "alter field"), (idx, "index"),
-  ].iter().filter(|(n, _)| *n > 0).map(|(n, label)| format!("{} {}", n, label)).collect();
-  parts.join(", ")
+  ].iter().filter(|(n, _)| *n > 0).map(|(n, l)| format!("{} {}", n, l)).collect::<Vec<_>>().join(", ")
 }

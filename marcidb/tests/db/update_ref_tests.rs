@@ -173,8 +173,8 @@ fn update_ref_connect_test() {
 }
 
 
-/// Пока не реализованные операции над связями → типизированная `UpdateError::Unsupported`,
-/// а не паника `todo!()`. Транзакция откатывается, так что кейсы независимы
+/// Not-yet-implemented relation operations → a typed `UpdateError::Unsupported`,
+/// not a `todo!()` panic. The transaction rolls back, so the cases are independent
 #[test]
 fn update_unsupported_relation_ops() {
   use marcidb::{UpdateError, parse_id, parse_update};

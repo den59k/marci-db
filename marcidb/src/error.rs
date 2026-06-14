@@ -1,10 +1,10 @@
 use std::fmt;
 
-/// Ошибка слоя хранения (canopydb): ввод-вывод, недоступность БД и т.п.
+/// Storage layer error (canopydb): I/O, DB unavailability, etc.
 ///
-/// Обёртка нужна, потому что `canopydb::Error` не реализует `PartialEq`/`Clone`
-/// (внутри `io::Error`), а доменные ошибки (`InsertError` и пр.) сравниваются в тестах.
-/// Две storage-ошибки считаются равными, если совпадает их вариант (без учёта payload).
+/// The wrapper is needed because `canopydb::Error` doesn't implement `PartialEq`/`Clone`
+/// (it contains `io::Error` inside), while domain errors (`InsertError` and others) are compared in tests.
+/// Two storage errors are considered equal if their variant matches (ignoring the payload).
 #[derive(Debug)]
 pub struct StorageError(pub canopydb::Error);
 

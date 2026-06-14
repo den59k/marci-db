@@ -2,7 +2,7 @@ use smallvec::SmallVec;
 
 use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema}, utils::get_data};
 
-/// Увеличивает буффер на один бит
+/// Increments the buffer by one bit
 pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
   let mut end = SmallVec::<u8, 256>::from_slice_copy(start);
   for (i, b) in end.iter_mut().enumerate().rev() {
@@ -15,7 +15,7 @@ pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
   return None;
 }
 
-/// Уменьшает буффер на один бит
+/// Decrements the buffer by one bit
 pub fn decrease_bit(start: &[u8]) -> Option<Vec<u8>> {
   let mut end = SmallVec::<u8, 256>::from_slice_copy(start);
   for (i, b) in end.iter_mut().enumerate().rev() {
@@ -29,7 +29,7 @@ pub fn decrease_bit(start: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[inline]
-/// Для точного сравнения по индексу (Eq) мы сравниваем по префиксу
+/// For exact index comparison (Eq) we compare by prefix
 fn generate_prefix<'a>(val: Vec<u8>, tree_name: &String) -> Option<PrefixKey<'a>> {
   let end = increase_bit(&val);
   let fixed_size = Some(val.len());
@@ -60,7 +60,7 @@ pub fn encode_index(field: &Field, index: &FieldIndex, value: &[u8]) -> Vec<u8> 
   }
 }
 
-/// Кодирует число для лексиграфического сравнения
+/// Encodes a number for lexicographic comparison
 pub fn encode_index_number(ty: &FieldIndexNum, val: &[u8]) -> Vec<u8> {
   match ty {
     FieldIndexNum::Int64 => encode_i64(val),
@@ -70,7 +70,7 @@ pub fn encode_index_number(ty: &FieldIndexNum, val: &[u8]) -> Vec<u8> {
   }
 }
 
-/// Добавляет нуль-терминатор в конце, если размер неизвестен
+/// Appends a null terminator at the end if the size is unknown
 pub fn encode_index_data(field: &Field, val: &[u8]) -> Vec<u8> {
     // if field.get_size().is_none() && val[val.len() - 1] != b'\0' {
     if field.get_size().is_none() {
@@ -81,7 +81,7 @@ pub fn encode_index_data(field: &Field, val: &[u8]) -> Vec<u8> {
     val.to_vec()
 }
 
-/// Кодирует число для лексиграфического сравнения
+/// Encodes a number for lexicographic comparison
 fn encode_num_wh(value: &NumberValue) -> Vec<u8> {
   match value {
     NumberValue::DateTime(val) | NumberValue::Int64(val) => encode_i64(&val.to_be_bytes()),
@@ -91,7 +91,7 @@ fn encode_num_wh(value: &NumberValue) -> Vec<u8> {
   }
 }
 
-/// Обратное преобразование к encode_index_number: байты ключа индекса → be-bytes значения
+/// Inverse of encode_index_number: index key bytes → value be-bytes
 pub fn decode_index_number(ty: &FieldIndexNum, data: &[u8]) -> Vec<u8> {
   match ty {
     FieldIndexNum::Int64 => {
@@ -103,10 +103,10 @@ pub fn decode_index_number(ty: &FieldIndexNum, data: &[u8]) -> Vec<u8> {
     FieldIndexNum::Float | FieldIndexNum::Double => {
       let mut out = data.to_vec();
       if out[0] & 0x80 != 0 {
-        // Было положительное — возвращаем знаковый бит
+        // Was positive — restore the sign bit
         out[0] ^= 0x80;
       } else {
-        // Было отрицательное — инвертируем все биты обратно
+        // Was negative — invert all bits back
         for b in &mut out {
           *b = !*b;
         }
@@ -116,8 +116,8 @@ pub fn decode_index_number(ty: &FieldIndexNum, data: &[u8]) -> Vec<u8> {
   }
 }
 
-/// Извлекает значение поля из ключа индекса (encoded_value ++ id)
-/// и возвращает его в формате get_data (be-bytes значения)
+/// Extracts the field value from the index key (encoded_value ++ id)
+/// and returns it in the get_data format (value be-bytes)
 pub fn decode_index_key_value(field: &Field, index: &FieldIndex, key: &[u8]) -> Vec<u8> {
   match index {
     FieldIndex::Number { ty, .. } => {
@@ -127,7 +127,7 @@ pub fn decode_index_key_value(field: &Field, index: &FieldIndex, key: &[u8]) -> 
     FieldIndex::Value { .. } => {
       match field.get_size() {
         Some(size) => key[..size].to_vec(),
-        // Динамический размер: значение до нуль-терминатора
+        // Dynamic size: value up to the null terminator
         None => {
           let pos = key.iter().position(|&b| b == b'\0').unwrap_or(key.len());
           key[..pos].to_vec()
@@ -138,8 +138,8 @@ pub fn decode_index_key_value(field: &Field, index: &FieldIndex, key: &[u8]) -> 
   }
 }
 
-/// i64 be_bytes → лексикографически сортируемые байты
-/// Флипаем только старший бит (знаковый)
+/// i64 be_bytes → lexicographically sortable bytes
+/// Flip only the most significant (sign) bit
 pub fn encode_i64(bytes: &[u8]) -> Vec<u8> {
     debug_assert_eq!(bytes.len(), 8, "i64 must be 8 bytes");
     let mut out = bytes.to_vec();
@@ -147,23 +147,23 @@ pub fn encode_i64(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// f32 be_bytes → лексикографически сортируемые байты
+/// f32 be_bytes → lexicographically sortable bytes
 pub fn encode_f32(bytes: &[u8]) -> Vec<u8> {
     debug_assert_eq!(bytes.len(), 4, "f32 must be 4 bytes");
     let mut out = bytes.to_vec();
     if out[0] & 0x80 != 0 {
-        // Отрицательное число — флипаем все биты
+        // Negative number — flip all bits
         for b in &mut out {
             *b = !*b;
         }
     } else {
-        // Положительное — флипаем только знаковый бит
+        // Positive — flip only the sign bit
         out[0] ^= 0x80;
     }
     out
 }
 
-/// f64 be_bytes → лексикографически сортируемые байты
+/// f64 be_bytes → lexicographically sortable bytes
 pub fn encode_f64(bytes: &[u8]) -> Vec<u8> {
     debug_assert_eq!(bytes.len(), 8, "f64 must be 8 bytes");
     let mut out = bytes.to_vec();
@@ -177,23 +177,23 @@ pub fn encode_f64(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Позиция строки в индексном дереве поля: та же кодировка, в которой ключи лежат в индексе
-/// (encoded_value ++ id). Используется для keyset-курсора при скане индекса
+/// Position of a row in the field's index tree: the same encoding used for keys stored in the index
+/// (encoded_value ++ id). Used for the keyset cursor when scanning the index
 pub fn make_index_cursor_key(field: &Field, value: &[u8], id: &[u8]) -> Vec<u8> {
   let mut key = match &field.ty {
     FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
       encode_index_number(&ty.get_num_type().unwrap(), value)
     },
-    // Строки получают нуль-терминатор (как в индексах), остальное сравнивается как есть
+    // Strings get a null terminator (as in indexes), everything else is compared as is
     _ => encode_index_data(field, value)
   };
   key.extend_from_slice(id);
   key
 }
 
-/// Ключ сортировки в памяти. Байтовое сравнение ключей даёт тот же порядок,
-/// что и скан соответствующего индексного дерева (та же кодировка значений + id как tie-break).
-/// null-значения уходят в конец при asc и в начало при desc
+/// In-memory sort key. Byte comparison of keys yields the same order
+/// as scanning the corresponding index tree (the same value encoding + id as tie-break).
+/// null values go to the end with asc and to the beginning with desc
 pub fn make_sort_key(entity: &Entity, field: &Field, id: &[u8], data: &[u8], schema: &Schema) -> Vec<u8> {
   let Some(value) = get_data(entity, field, id, data, schema) else {
     let mut key = Vec::with_capacity(id.len() + 1);
@@ -208,15 +208,15 @@ pub fn make_sort_key(entity: &Entity, field: &Field, id: &[u8], data: &[u8], sch
   key
 }
 
-// Приоритеты условий для выбора индексного пути доступа (меньше — селективнее)
-const SCORE_ID: u8 = 0;          // точный первичный ключ
-const SCORE_UNIQUE_EQ: u8 = 1;   // eq по unique-индексу
-const SCORE_ID_PREFIX: u8 = 2;   // префикс составного первичного ключа
-const SCORE_EQ: u8 = 3;          // eq по обычному индексу
+// Condition priorities for choosing the index access path (lower — more selective)
+const SCORE_ID: u8 = 0;          // exact primary key
+const SCORE_UNIQUE_EQ: u8 = 1;   // eq on a unique index
+const SCORE_ID_PREFIX: u8 = 2;   // prefix of a composite primary key
+const SCORE_EQ: u8 = 3;          // eq on a regular index
 const SCORE_STARTS_WITH: u8 = 4;
 const SCORE_RANGE: u8 = 5;
 
-// Генеририрует индекс для Where
+// Generates an index for Where
 pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> Option<PrefixKey<'a>> {
   generate_prefix_scored(entity, where_op).map(|(prefix, _)| prefix)
 }
@@ -228,14 +228,14 @@ fn id_prefix_score(prefix: &PrefixKey) -> u8 {
   }
 }
 
-/// Возвращает путь доступа вместе с приоритетом. Из нескольких индексированных
-/// условий выбирается самое селективное по статическому приоритету
+/// Returns the access path along with its priority. Among several indexed
+/// conditions the most selective one is chosen by static priority
 fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(PrefixKey<'a>, u8)> {
   match where_op {
     Where::True => None,
     Where::And(items) => {
 
-      // Пробуем собрать prefix для ID
+      // Try to assemble a prefix for the ID
       let key_fields: Vec<(&Field,&Vec<u8>)> = items.iter().filter_map(|f| {
         match f {
           Where::Field(field, FieldCompare::Eq(value)) => Some((*field, value)),
@@ -263,7 +263,7 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
     Where::Or(_) => None,
     Where::Not(_) => None,
     Where::Field(field, field_compare) => {
-      // Проверяем, это может быть единственное поле для ID
+      // Check whether this could be the sole field for the ID
       if matches!(field.location, FieldLocation::Key { index } if index == 0) && let FieldCompare::Eq(value) = field_compare {
         if let Some(prefix) = try_to_generate_id_prefix(entity, vec![( field, value )]) {
           let score = id_prefix_score(&prefix);
@@ -277,7 +277,7 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
               return match field_compare {
                   FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name)
                     .map(|p| (p, if *unique { SCORE_UNIQUE_EQ } else { SCORE_EQ })),
-                  // Здесь мы не ставим нуль терминатор в конец, поскольку не обязательно, чтобы длина строк совпадала
+                  // Here we don't append a null terminator, since the string lengths don't have to match
                   FieldCompare::StringStartsWith(val) => generate_prefix_starts_with(val.clone(), tree_name)
                     .map(|p| (p, SCORE_STARTS_WITH)),
                   _ => None
@@ -303,8 +303,8 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
               }
             },
             FieldIndex::Custom { .. } => {
-              // FieldIndex::Custom — задел под vector-индексы; resolve_indexes их пока не создаёт,
-              // поэтому сюда не попадаем (атрибут @vectorindex не материализуется в индекс)
+              // FieldIndex::Custom — reserved for vector indexes; resolve_indexes doesn't create them yet,
+              // so we never reach here (the @vectorindex attribute isn't materialized into an index)
               unreachable!("custom/vector indexes are not constructed yet")
             },
         }

@@ -45,8 +45,8 @@ fn limit_skip_test() {
     assert_eq!(resp, json!([ { "name": "Bob" }, { "name": "Carol" } ]));
   }
 
-  // limit/skip применяются после фильтра. Без $order порядок задаёт скан:
-  // здесь это индексный диапазон по age (Dave 25, Alice 30, Carol 40)
+  // limit/skip are applied after the filter. Without $order the scan defines the order:
+  // here it is the index range over age (Dave 25, Alice 30, Carol 40)
   {
     let resp = get_data(&db, "User", json!({ "name": true, "$where": { "age": { "$gte": 25 } }, "$skip": 1, "$limit": 1 }));
     assert_eq!(resp, json!([ { "name": "Alice" } ]));
@@ -68,7 +68,7 @@ fn order_by_id_test() {
     assert_eq!(resp, json!([ { "name": "Dave" }, { "name": "Carol" } ]));
   }
 
-  // desc + фильтр без индексного диапазона
+  // desc + filter without an index range
   {
     let resp = get_data(&db, "User", json!({ "name": true, "$order": { "id": "desc" }, "$where": { "city": { "$not": null } } }));
     assert_eq!(resp, json!([ { "name": "Dave" }, { "name": "Carol" }, { "name": "Alice" } ]));
@@ -80,7 +80,7 @@ fn order_by_indexed_field_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Скан индекса сортировки
+  // Sort-index scan
   {
     let resp = get_data(&db, "User", json!({ "name": true, "age": true, "$order": { "age": "asc" } }));
     assert_eq!(resp, json!([
@@ -96,7 +96,7 @@ fn order_by_indexed_field_test() {
     assert_eq!(resp, json!([ { "name": "Carol" }, { "name": "Alice" } ]));
   }
 
-  // Residual-фильтр по другому полю при скане индекса сортировки
+  // Residual filter on another field during a sort-index scan
   {
     let resp = get_data(&db, "User", json!({
       "name": true, "$order": { "age": "asc" }, "$where": { "city": { "$not": null } }, "$limit": 2
@@ -104,7 +104,7 @@ fn order_by_indexed_field_test() {
     assert_eq!(resp, json!([ { "name": "Dave" }, { "name": "Alice" } ]));
   }
 
-  // Диапазон $where по тому же полю, что и сортировка — переиспользуем диапазон
+  // $where range on the same field as the sort — reuse the range
   {
     let resp = get_data(&db, "User", json!({
       "name": true, "$where": { "age": { "$gte": 25 } }, "$order": { "age": "desc" }
@@ -118,8 +118,8 @@ fn order_by_nullable_field_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Nullable поле с индексом: sparse-индекс не используется, сортировка в памяти,
-  // null-строки не теряются. asc — null в конце
+  // Nullable field with an index: the sparse index is not used, sorting is in memory,
+  // null rows are not lost. asc — nulls at the end
   {
     let resp = get_data(&db, "User", json!({ "name": true, "$order": { "rating": "asc" } }));
     assert_eq!(resp, json!([
@@ -130,7 +130,7 @@ fn order_by_nullable_field_test() {
     ]));
   }
 
-  // desc — null в начале
+  // desc — nulls at the start
   {
     let resp = get_data(&db, "User", json!({ "name": true, "$order": { "rating": "desc" } }));
     assert_eq!(resp, json!([
@@ -147,7 +147,7 @@ fn order_by_unindexed_field_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Строковое поле без индекса: сортировка в памяти, null в конце
+  // String field without an index: sorting in memory, nulls at the end
   {
     let resp = get_data(&db, "User", json!({ "name": true, "$order": { "city": "asc" }, "$limit": 3 }));
     assert_eq!(resp, json!([ { "name": "Dave" }, { "name": "Carol" }, { "name": "Alice" } ]));
@@ -182,7 +182,7 @@ fn order_in_includes_test() {
     }));
   }
 
-  // Сортировка по полю внутри include — в памяти
+  // Sorting by a field inside an include — in memory
   {
     let resp = get_data_one(&db, "User", json!({
       "name": true,
@@ -201,7 +201,7 @@ fn cursor_by_id_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Пагинация в порядке id (range по первичному дереву)
+  // Pagination in id order (range over the primary tree)
   let page1 = get_data(&db, "User", json!({ "id": true, "name": true, "$limit": 2 }));
   assert_eq!(page1[1]["name"], "Bob");
   let cursor = &page1[1]["id"];
@@ -209,12 +209,12 @@ fn cursor_by_id_test() {
   let page2 = get_data(&db, "User", json!({ "name": true, "$cursor": { "id": cursor }, "$limit": 2 }));
   assert_eq!(page2, json!([ { "name": "Carol" }, { "name": "Dave" } ]));
 
-  // Третья страница пуста
+  // The third page is empty
   let page2_ids = get_data(&db, "User", json!({ "id": true, "$cursor": { "id": cursor }, "$limit": 2 }));
   let page3 = get_data(&db, "User", json!({ "name": true, "$cursor": { "id": page2_ids[1]["id"] }, "$limit": 2 }));
   assert_eq!(page3, json!([]));
 
-  // desc по id
+  // desc by id
   let page = get_data(&db, "User", json!({ "id": true, "name": true, "$order": { "id": "desc" }, "$limit": 2 }));
   assert_eq!(page[1]["name"], "Carol");
   let page_next = get_data(&db, "User", json!({
@@ -222,11 +222,11 @@ fn cursor_by_id_test() {
   }));
   assert_eq!(page_next, json!([ { "name": "Bob" }, { "name": "Alice" } ]));
 
-  // $cursor без $order при наличии $where с индексом — порядок по id (индекс не используется)
+  // $cursor without $order when $where has an index — order by id (the index is not used)
   let page = get_data(&db, "User", json!({
     "id": true, "name": true, "$where": { "age": { "$gte": 25 } }, "$limit": 2
   }));
-  // без $order, но с $cursor порядок зафиксирован по id
+  // without $order, but with $cursor the order is fixed by id
   let first = get_data(&db, "User", json!({
     "id": true, "name": true, "$where": { "age": { "$gte": 25 } }, "$cursor": { "id": 0 }, "$limit": 2
   }));
@@ -240,7 +240,7 @@ fn cursor_by_indexed_field_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Пагинация по индексу сортировки: age asc → Bob 20, Dave 25, Alice 30, Carol 40
+  // Pagination by the sort index: age asc → Bob 20, Dave 25, Alice 30, Carol 40
   let page1 = get_data(&db, "User", json!({ "id": true, "name": true, "$order": { "age": "asc" }, "$limit": 2 }));
   assert_eq!(page1[0]["name"], "Bob");
   assert_eq!(page1[1]["name"], "Dave");
@@ -250,19 +250,19 @@ fn cursor_by_indexed_field_test() {
   }));
   assert_eq!(page2, json!([ { "name": "Alice" }, { "name": "Carol" } ]));
 
-  // desc: Carol 40, Alice 30 → курсор Alice → Dave 25, Bob 20
+  // desc: Carol 40, Alice 30 → cursor Alice → Dave 25, Bob 20
   let page1 = get_data(&db, "User", json!({ "id": true, "name": true, "$order": { "age": "desc" }, "$limit": 2 }));
   let page2 = get_data(&db, "User", json!({
     "name": true, "$order": { "age": "desc" }, "$cursor": { "id": page1[1]["id"] }, "$limit": 2
   }));
   assert_eq!(page2, json!([ { "name": "Dave" }, { "name": "Bob" } ]));
 
-  // Курсор + residual-фильтр по другому полю
+  // Cursor + residual filter on another field
   let resp = get_data(&db, "User", json!({
     "name": true, "$order": { "age": "asc" }, "$cursor": { "id": page1[1]["id"] },
     "$where": { "city": { "$not": null } }
   }));
-  // после Alice (30) с city != null: Carol (40, Oslo)
+  // after Alice (30) with city != null: Carol (40, Oslo)
   assert_eq!(resp, json!([ { "name": "Carol" } ]));
 }
 
@@ -271,18 +271,18 @@ fn cursor_post_sort_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // Сортировка в памяти (nullable rating): Bob -3, Alice 5, Dave 10, Carol null
+  // Sorting in memory (nullable rating): Bob -3, Alice 5, Dave 10, Carol null
   let page1 = get_data(&db, "User", json!({ "id": true, "name": true, "$order": { "rating": "asc" }, "$limit": 2 }));
   assert_eq!(page1[0]["name"], "Bob");
   assert_eq!(page1[1]["name"], "Alice");
 
-  // Вторая страница пересекает границу значений и null
+  // The second page crosses the boundary between values and null
   let page2 = get_data(&db, "User", json!({
     "name": true, "$order": { "rating": "asc" }, "$cursor": { "id": page1[1]["id"] }, "$limit": 2
   }));
   assert_eq!(page2, json!([ { "name": "Dave" }, { "name": "Carol" } ]));
 
-  // Курсор на null-строке (desc: Carol null, Dave 10, ...)
+  // Cursor on a null row (desc: Carol null, Dave 10, ...)
   let page1 = get_data(&db, "User", json!({ "id": true, "name": true, "$order": { "rating": "desc" }, "$limit": 1 }));
   assert_eq!(page1[0]["name"], "Carol");
   let page2 = get_data(&db, "User", json!({
@@ -300,14 +300,14 @@ fn cursor_deleted_row_test() {
 
   crate::db::delete_data(&db, "User", json!({ "id": bob["id"] }));
 
-  // Порядок по значению: позиция удалённой строки неизвестна — пустой результат
+  // Order by value: the position of the deleted row is unknown — empty result
   let resp = get_data(&db, "User", json!({ "name": true, "$order": { "age": "asc" }, "$cursor": { "id": bob["id"] } }));
   assert_eq!(resp, json!([]));
 
   let resp = get_data(&db, "User", json!({ "name": true, "$order": { "rating": "asc" }, "$cursor": { "id": bob["id"] } }));
   assert_eq!(resp, json!([]));
 
-  // Порядок по id: id и есть позиция — пагинация продолжается
+  // Order by id: id is the position itself — pagination continues
   let resp = get_data(&db, "User", json!({ "name": true, "$cursor": { "id": bob["id"] }, "$limit": 2 }));
   assert_eq!(resp, json!([ { "name": "Carol" }, { "name": "Dave" } ]));
 }
@@ -341,13 +341,13 @@ fn find_first_order_test() {
   let dir = tempdir().unwrap();
   let db = create_db(&dir);
 
-  // findFirst + desc по индексу = максимум
+  // findFirst + desc by index = maximum
   {
     let resp = get_data_one(&db, "User", json!({ "name": true, "age": true, "$order": { "age": "desc" } }));
     assert_eq!(resp, json!({ "name": "Carol", "age": 40 }));
   }
 
-  // findFirst + сортировка в памяти
+  // findFirst + sorting in memory
   {
     let resp = get_data_one(&db, "User", json!({ "name": true, "$order": { "rating": "desc" } }));
     assert_eq!(resp, json!({ "name": "Carol" }));

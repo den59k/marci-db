@@ -1,19 +1,19 @@
 type ServiceKeys = "$where" | "$order" | "$limit" | "$skip" | "$cursor";
 
-// Запрос-агрегат по связанным записям внутри select
+// Aggregate query over related records inside select
 type AggregateKeys = { $count: true } | { $sum: string } | { $avg: string } | { $min: string } | { $max: string }
 
-// Дистрибутивен по union-моделям (discriminated union у enum с payload):
-// ключи, которых нет в текущей ветке union, отбрасываются
+// Distributive over union models (discriminated union for payload enums):
+// keys not present in the current union branch are dropped
 type GetResult<TModel, TSelect extends Record<string, any>> = TModel extends any ? {
   [K in keyof Omit<TSelect, ServiceKeys> as TSelect[K] extends false | undefined ? never : K extends keyof TModel ? K : never]:
     K extends keyof TModel
       ? TSelect[K] extends true
-        ? TModel[K]                          // выбрали поле целиком
+        ? TModel[K]                          // selected the whole field
         : TSelect[K] extends Record<string, any>
           ? TModel[K] extends readonly object[]
             ? TSelect[K] extends AggregateKeys
-              ? AggregateResult<NonNullable<TModel[K][number]>, TSelect[K]>   // агрегат по связи
+              ? AggregateResult<NonNullable<TModel[K][number]>, TSelect[K]>   // aggregate over the relation
               : GetResult<NonNullable<TModel[K][number]>, TSelect[K]>[]
             : GetResult<NonNullable<TModel[K]>, TSelect[K]> | Extract<TModel[K], null>
           : TModel[K]                        // fallback
@@ -49,7 +49,7 @@ type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
 type CompareRefValue<T> = T | { "$not": T }
 type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
-// Результат aggregate: только запрошенные ключи; пустое множество даёт null (кроме count)
+// Aggregate result: only the requested keys; an empty set yields null (except count)
 type AggregateResult<TModel, T> =
   (T extends { $count: true } ? { count: number } : {}) &
   (T extends { $sum: string } ? { sum: number | null } : {}) &
@@ -57,13 +57,13 @@ type AggregateResult<TModel, T> =
   (T extends { $min: infer F } ? { min: (F extends keyof TModel ? TModel[F] : never) | null } : {}) &
   (T extends { $max: infer F } ? { max: (F extends keyof TModel ? TModel[F] : never) | null } : {})
 
-// Лениво-исполняемая операция. `await` выполняет её как одиночный запрос;
-// передача в `db.$transaction([...])` собирает её в одну атомарную транзакцию
+// A lazily-executed operation. `await` runs it as a single request;
+// passing it into `db.$transaction([...])` bundles it into one atomic transaction
 declare const __op: unique symbol
 export type Op<T> = PromiseLike<T> & { readonly [__op]: T }
 
-// Ссылка на результат предыдущей операции внутри $transaction (резолвится сервером).
-// "0.id" — поле id результата операции #0; "1.author.id" — вложенный путь
+// A reference to a previous operation's result inside $transaction (resolved by the server).
+// "0.id" — the id field of operation #0's result; "1.author.id" — a nested path
 export declare function ref(path: string): any
 
 export declare function marcidb(url: string): MarciDB;

@@ -101,7 +101,7 @@ pub fn has_items<'a, U, F>(
     for id in ids {
       let value = tree.get(&id)?.unwrap();
       let matched = process_where(&id, &value, ctx, entity, where_op)?;
-      // Every: первый не прошедший → false; Some: первый прошедший → true
+      // Every: first one that fails → false; Some: first one that passes → true
       if matched != check_all {
         return Ok(matched);
       }

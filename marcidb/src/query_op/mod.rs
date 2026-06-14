@@ -23,11 +23,11 @@ pub struct QueryOp<'a> {
   pub filter: Option<Where<'a>>,
   pub limit: Option<usize>,
   pub skip: Option<usize>,
-  /// Keyset-пагинация: id элемента, строго после которого идут результаты
+  /// Keyset pagination: id of the item strictly after which the results begin
   pub cursor: Option<Vec<u8>>,
-  /// Направление скана (выставляется планировщиком)
+  /// Scan direction (set by the planner)
   pub reverse: bool,
-  /// Скан не даёт нужного порядка — строки сортируются в памяти после фильтра
+  /// The scan does not produce the required order — rows are sorted in memory after filtering
   pub post_sort: bool,
   pub prefix_key: Option<PrefixKey<'a>>,
   pub includes: Vec<QueryInclude<'a>>
@@ -35,9 +35,9 @@ pub struct QueryOp<'a> {
 
 #[derive(Debug)]
 pub enum QueryType {
-  // Получает элемент по ID
+  // Fetches an item by ID
   One,
-  // Получает все элементы, удволетворяющие запросу
+  // Fetches all items matching the query
   Many
 }
 
@@ -68,9 +68,9 @@ pub struct QueryInclude<'a> {
 
 #[derive(Debug)]
 pub enum IncludeQuery<'a> {
-  // Вложенный select связанных записей
+  // Nested select of related records
   Query(QueryOp<'a>),
-  // Агрегация по связанным записям
+  // Aggregation over related records
   Aggregate(crate::aggregate_op::AggregateOp<'a>)
 }
 

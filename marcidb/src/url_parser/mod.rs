@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{Field, schema::{Entity, FieldLocation, FieldType, Schema}, url_parser::url_parsers::encode_primitive_value};
 
-/// Парсит ID из url строки
+/// Parses an ID from a url string
 pub fn parse_id_from_url(schema: &Schema, entity: &Entity, url: &str) -> Result<Vec<u8>,UrlParseError> {
   if !url.contains('=') {
     let field = get_one_id_field(entity)?;

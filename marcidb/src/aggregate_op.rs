@@ -5,7 +5,7 @@ pub struct AggregateOp<'a> {
   pub entity: &'a Entity,
   pub filter: Option<Where<'a>>,
   pub prefix_key: Option<PrefixKey<'a>>,
-  /// Фильтр полностью выражен диапазоном prefix_key — count можно считать по ключам, без чтения строк
+  /// The filter is fully expressed by the prefix_key range — count can be computed from keys, without reading rows
   pub fully_covered: bool,
   pub count: bool,
   pub sum: Option<&'a Field>,
@@ -19,14 +19,14 @@ impl AggregateOp<'_> {
     self.count || self.sum.is_some() || self.avg.is_some() || self.min.is_some() || self.max.is_some()
   }
 
-  /// Нужно ли читать строки, или достаточно посчитать ключи
+  /// Whether rows need to be read, or counting keys is enough
   fn needs_rows(&self) -> bool {
     self.sum.is_some() || self.avg.is_some() || self.min.is_some() || self.max.is_some()
       || (self.filter.is_some() && !self.fully_covered)
   }
 }
 
-/// Накопленная сумма: целые считаются точно (i128), дробные — в f64
+/// Accumulated sum: integers are counted exactly (i128), fractional ones — in f64
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SumValue {
   Int(i128),
@@ -36,10 +36,10 @@ pub enum SumValue {
 #[derive(Debug, Default)]
 pub struct AggregateResult {
   pub count: u64,
-  /// None — не было ни одного значения (как NULL у SUM в SQL)
+  /// None — there were no values at all (like NULL for SUM in SQL)
   pub sum: Option<SumValue>,
   pub avg: Option<f64>,
-  /// Сырые байты значения поля — декодируются на json-слое
+  /// Raw field value bytes — decoded at the json layer
   pub min: Option<Vec<u8>>,
   pub max: Option<Vec<u8>>,
 }
@@ -47,7 +47,7 @@ pub struct AggregateResult {
 pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> Result<AggregateResult, StorageError> {
   let mut result = AggregateResult::default();
 
-  // Быстрые пути: count по ключам, без чтения и декодирования строк
+  // Fast paths: count by keys, without reading and decoding rows
   if !op.needs_rows() {
     result.count = match &op.prefix_key {
       None => ctx.get_tree(&op.entity.name)?.len(),
@@ -55,7 +55,7 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
         let index_tree = ctx.get_tree(tree_name)?;
         range_keys_iter(&index_tree, start, end, false)?.try_fold(0u64, |n, k| k.map(|_| n + 1))?
       },
-      // Связи родителя: количество детей = количество ключей по префиксу parent_id
+      // Parent relations: number of children = number of keys under the parent_id prefix
       Some(PrefixKey::ParentIndexTree(tree_name)) => {
         let index_tree = ctx.get_tree(tree_name)?;
         index_tree.prefix_keys(&parent.unwrap().1)?.try_fold(0u64, |n, k| k.map(|_| n + 1))?
@@ -71,8 +71,8 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
     return Ok(result);
   }
 
-  // count по null/not-null индексированного поля: sparse-индекс не содержит null-строк,
-  // поэтому разность размеров деревьев даёт точный ответ без скана
+  // count by null/not-null of an indexed field: a sparse index doesn't contain null rows,
+  // so the difference of tree sizes gives the exact answer without a scan
   if op.sum.is_none() && op.avg.is_none() && op.min.is_none() && op.max.is_none() && op.prefix_key.is_none() {
     if let Some(Where::Field(field, compare @ (FieldCompare::EqNull | FieldCompare::NeNull))) = &op.filter
       && matches!(field.condition, FieldExistsCondition::None)
@@ -87,8 +87,8 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
     }
   }
 
-  // min/max по крайним ключам индекса: O(log n) вместо скана.
-  // Применимо без фильтра и без sum/avg, когда все запрошенные поля индексированы и non-nullable
+  // min/max via the boundary keys of the index: O(log n) instead of a scan.
+  // Applicable without a filter and without sum/avg, when all requested fields are indexed and non-nullable
   if op.filter.is_none() && op.prefix_key.is_none() && op.sum.is_none() && op.avg.is_none() {
     if let Some(fast_result) = try_minmax_by_index(op, ctx)? {
       return Ok(fast_result);
@@ -155,11 +155,11 @@ fn index_tree_name(index: &FieldIndex) -> &str {
   }
 }
 
-/// Поле пригодно для min/max по крайним ключам индекса: индексировано, non-nullable,
-/// не из enum-варианта (sparse-индекс мог бы потерять строки)
+/// A field is eligible for min/max via the boundary keys of the index: indexed, non-nullable,
+/// not from an enum variant (a sparse index could lose rows)
 fn minmax_index<'a>(field: Option<&'a Field>) -> Option<Option<(&'a Field, &'a FieldIndex)>> {
   let Some(field) = field else {
-    return Some(None); // агрегат не запрошен — ограничений нет
+    return Some(None); // aggregate not requested — no constraints
   };
   if field.nullable || !matches!(field.condition, FieldExistsCondition::None) {
     return None;
@@ -167,7 +167,7 @@ fn minmax_index<'a>(field: Option<&'a Field>) -> Option<Option<(&'a Field, &'a F
   find_usable_index(field).map(|index| Some((field, index)))
 }
 
-/// min/max через первый/последний ключ индекса, count через len()
+/// min/max via the first/last index key, count via len()
 fn try_minmax_by_index<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationContext<'a, U, F>) -> Result<Option<AggregateResult>, StorageError> {
   let Some(min_index) = minmax_index(op.min) else { return Ok(None) };
   let Some(max_index) = minmax_index(op.max) else { return Ok(None) };
@@ -195,7 +195,7 @@ struct Accumulators {
   sum: Option<SumValue>,
   avg_sum: f64,
   avg_count: u64,
-  // (ключ сравнения, сырые байты значения)
+  // (comparison key, raw value bytes)
   min: Option<(Vec<u8>, Vec<u8>)>,
   max: Option<(Vec<u8>, Vec<u8>)>,
 }
@@ -234,7 +234,7 @@ fn aggregate_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U,
   Ok(())
 }
 
-/// Байтовый ключ для сравнения min/max — та же кодировка, что в индексах
+/// Byte key for min/max comparison — the same encoding as in indexes
 fn make_compare_key(field: &Field, value: &[u8]) -> Vec<u8> {
   use crate::index_utils::encode_index_number;
   use crate::schema::FieldType;

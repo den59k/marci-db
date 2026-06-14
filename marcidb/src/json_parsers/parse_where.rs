@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{FieldCompare, FieldCompareRef, Where}, schema::{Entity, FieldType, Schema}};
 
-/// Парсит JSON объект в where условие
+/// Parses a JSON object into a where condition
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,EncodeError> {
   let Some(where_obj) = where_obj.as_object() else {
     return Err(EncodeError::NotAnObject);
@@ -169,7 +169,7 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
   }
 }
 
-// Для Eq сравнений нам достаточно бинарного представления данных
+// For Eq comparisons the binary representation of the data is enough
 fn parse_field_value_binary<'a>(field: &'a Field, v: &Value) -> Result<Vec<u8>,EncodeError> {
   let mut dst = vec![];
   match &field.ty {

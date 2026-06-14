@@ -13,8 +13,8 @@ pub use crate::schema::{schema_parse::{parse_schema,try_parse_schema}};
 pub(crate) use crate::schema::schema_parse::rebuild_caches;
 pub use crate::schema::schema_default_value::FieldDefault;
 
-/// Ошибка разбора/валидации текста схемы. Сообщение пригодно для показа пользователю (→ HTTP 400).
-/// Возвращается фоллибл-путём ([`try_parse_schema`]); инфраструктурный [`parse_schema`] на ней паникует
+/// Schema text parsing/validation error. The message is suitable for showing to the user (→ HTTP 400).
+/// Returned by the fallible path ([`try_parse_schema`]); the infrastructural [`parse_schema`] panics on it
 #[derive(Debug, PartialEq)]
 pub struct SchemaError(pub String);
 

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::{Field, FieldRef, schema::{Entity, FieldLocation, FieldType, RefBinding, SchemaError, schema_attributes::Attribute}};
 
 
-/// Связывает между собой @bind поля
+/// Links @bind fields to each other
 pub fn resolve_bind_refs(models: &mut [Entity]) -> Result<(), SchemaError> {
 
     let mut field_bindings = vec![];
@@ -38,7 +38,7 @@ pub fn resolve_bind_refs(models: &mut [Entity]) -> Result<(), SchemaError> {
         }
     }
 
-    // TODO: можно добавить @inject поля здесь
+    // TODO: @inject fields can be added here
     for (field_a_ref, field_b_ref) in field_bindings.iter() {
         check_one_to_one(models, field_a_ref, field_b_ref)?;
 
@@ -51,7 +51,7 @@ pub fn resolve_bind_refs(models: &mut [Entity]) -> Result<(), SchemaError> {
     Ok(())
 }
 
-// Для OneToOne один из полей должен быть @unique (или @id). Также одному из полей нужно проставить FieldLocation::Virtual
+// For OneToOne one of the fields must be @unique (or @id). Also one of the fields needs to be set to FieldLocation::Virtual
 fn check_one_to_one(models: &mut [Entity], field_a_ref: &FieldRef, field_b_ref: &FieldRef) -> Result<(), SchemaError> {
     if !is_one_to_one_binding(
         &models[field_a_ref.model_index].fields[field_a_ref.field_index],
@@ -102,7 +102,7 @@ fn one_to_one_error(a: &Field, b: &Field) -> SchemaError {
     }
 }
 
-/// Проставляет rev_field_idx для ref_info. Также корректирует model_index, если ссылка была на структуру
+/// Sets rev_field_idx for ref_info. Also adjusts model_index if the ref pointed to a struct
 fn update_rev_index(field: &mut Field, field_ref: &FieldRef, rev_field_ref: &FieldRef, st_refs: &HashMap<FieldRef, usize>) {
     let (FieldType::Ref(ref_info) | FieldType::RefList(ref_info)) = &mut field.ty else {
         panic!("Wrong field ty. Expected: Ref or RefList {}", field.full_name);
@@ -114,7 +114,7 @@ fn update_rev_index(field: &mut Field, field_ref: &FieldRef, rev_field_ref: &Fie
     }
 }
 
-/// Проставляет RefBinding для Ref и RefList
+/// Sets RefBinding for Ref and RefList
 pub fn resolve_ref_bindings(models: &mut [Entity]) {
     let model_names: Vec<String> = models.iter().map(|f| f.name.clone()).collect();
     for model in models.iter_mut() {
@@ -124,17 +124,17 @@ pub fn resolve_ref_bindings(models: &mut [Entity]) {
                 continue;
             };
 
-            // Мы не ставим индексы для первого поля, поскольку такой элемент можно просто найти по ключу
+            // We don't set indexes for the first field, since such an element can simply be found by key
             if field_index == 0 && key_fields_count == 1 {
                 ref_info.binding = RefBinding::CurrentId;
                 continue;
             }
-            // То же самое касается таблицы на которую ссылаемся - если поле в ней стоит первым, то этот элемент находится сразу в таблице
+            // The same applies to the table we reference - if its field comes first, then that element is located directly in the table
             if let Some(ref_field_idx) = ref_info.rev_field_idx && ref_field_idx == 0 { 
                 ref_info.binding = RefBinding::CurrentId;
                 continue;
             }
-            // Также нам незачем ставить индексы на не виртуальные поля, если нет обратной ссылки
+            // Also there's no point setting indexes on non-virtual fields if there is no back-reference
             if !matches!(field.location, FieldLocation::Virtual) {
                 ref_info.binding = RefBinding::FieldValue;
                 continue;
@@ -147,7 +147,7 @@ pub fn resolve_ref_bindings(models: &mut [Entity]) {
 }
 
 
-// Разделяет строку по последней точке (Project.users.user -> [ Project.users, user ])
+// Splits the string by the last dot (Project.users.user -> [ Project.users, user ])
 pub fn split_by_last_dot(value: &str) -> (Option<&str>,&str) {
     let Some(last_index) = value.rfind('.') else {
         return (None,value)

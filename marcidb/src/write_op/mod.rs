@@ -14,9 +14,9 @@ pub struct WriteOp<'a> {
 
 #[derive(Debug)]
 pub enum WriteDefault<'a> {
-    // Записать значение в Key в заданный offset
+    // Write the value into Key at the given offset
     Key(usize, &'a FieldDefault),
-    // Записать значение в Body в заданный offset
+    // Write the value into Body at the given offset
     Body(usize, &'a FieldDefault),
 
     KeyInsert(usize, WriteDefaultInsert),

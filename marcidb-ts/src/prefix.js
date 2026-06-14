@@ -1,6 +1,6 @@
 import { request, encodeId } from 'marcidb-client/runtime'
 
-// Ссылка на результат предыдущей операции внутри $transaction
+// Reference to the result of a previous operation inside $transaction
 export const ref = (path) => ({ $ref: path })
 
 export function marcidb(url) {
@@ -33,8 +33,8 @@ export function marcidb(url) {
     return request("POST", `${url}/${model}/aggregate`, query);
   }
 
-  // Лениво-исполняемая операция: then() выполняет одиночный запрос,
-  // а в $transaction берётся только дескриптор __op
+  // Lazily-executed operation: then() runs a single request,
+  // while $transaction takes only the __op descriptor
   const op = (descriptor, run) => ({
     __op: descriptor,
     then: (onFulfilled, onRejected) => run().then(onFulfilled, onRejected),
@@ -42,7 +42,7 @@ export function marcidb(url) {
     finally: (onFinally) => run().finally(onFinally),
   });
 
-  // Атомарная batch-транзакция: массив операций → один запрос на /$transaction
+  // Atomic batch transaction: array of operations → one request to /$transaction
   const $transaction = (ops) => request("POST", `${url}/$transaction`, ops.map((o) => o.__op));
 
   return {

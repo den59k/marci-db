@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{Field, num_utils::NumberValue, schema::{Entity, EnumInfo, FieldLocation, FieldType, PrimitiveFieldType, Schema}};
 
-/// Кодирует одно значение и дописывает в конец `dst`
+/// Encodes a single value and appends it to the end of `dst`
 pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFieldType, v: &Value) -> Result<(), EncodeError> {
     match ty {
         PrimitiveFieldType::String => {
@@ -43,7 +43,7 @@ pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFi
     Ok(())
 }
 
-// Кодирует enum в binary
+// Encodes an enum into binary
 pub fn encode_enum(dst: &mut Vec<u8>, field: &Field, enum_def: &EnumInfo, v: &Value) -> Result<(), EncodeError> {
     let Some(s) = v.as_str() else {
         return Err(EncodeError::type_mismatch(field, "string"));
@@ -67,7 +67,7 @@ fn insert_list_counter(current_len: usize, dst: &mut Vec<u8>, fixed_size: Option
     Ok(())
 }
 
-// Кодирует PrimitiveList и PrimitiveFixedList в binary
+// Encodes PrimitiveList and PrimitiveFixedList into binary
 pub fn encode_list(dst: &mut Vec<u8>, value: &Value, field: &Field, primitive_type: &PrimitiveFieldType, fixed_size: Option<usize>) -> Result<(), EncodeError> {
     let Some(arr) = value.as_array() else {
         if let Some(str) = value.as_str() {
@@ -101,7 +101,7 @@ fn encode_list_str(dst: &mut Vec<u8>, str: &str, field: &Field, primitive_type: 
     }
 }
 
-// Записывает в массив значения с переменной длиной (т.е. строки)
+// Writes variable-length values into the array (i.e. strings)
 // [item_0_start,item_1_start,item_2_start..item_n_end][item_0,item_1..item_n]
 pub fn encode_list_dynamic(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive_type: &PrimitiveFieldType, byte_start: usize) -> Result<(), EncodeError> {
 
@@ -124,7 +124,7 @@ pub fn encode_list_dynamic(buf: &mut Vec<u8>, arr: &[Value], field: &Field, prim
     return Ok(());
 }
 
-// Записывает в массив значения с фиксированной длиной
+// Writes fixed-length values into the array
 // [item_0,item_1..item_n]
 pub fn encode_list_static(buf: &mut Vec<u8>, arr: &[Value], field: &Field, primitive_type: &PrimitiveFieldType) -> Result<(), EncodeError> {
     for arr_item in arr.iter() {
@@ -189,7 +189,7 @@ pub fn encode_id_value(dst: &mut Vec<u8>, field: &Field, schema: &Schema, value:
     Ok(())
 }
 
-// Метод, который кодирует только ID (и ругается, если пропущено какое-либо поле)
+// A method that encodes only the ID (and complains if any field is missing)
 pub fn parse_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<Vec<u8>, EncodeError> {
 
     let Some(obj) = json_val.as_object() else {
@@ -270,12 +270,12 @@ pub enum EncodeError {
     NotAnArray,
     OnlyBodyKeyAvailableToEdit(String),
     RevFieldRequired(String),
-    /// `$set`/`$ensure` (вложенная запись) применены к ref-полю, хранящемуся в body (FK):
-    /// создание вложенной записи поддержано только для owned/struct-связей — используйте `$connect`
+    /// `$set`/`$ensure` (nested write) applied to a ref field stored in body (FK):
+    /// nested record creation is supported only for owned/struct relations — use `$connect`
     NestedWriteNotSupported { field: String, op: String },
-    /// Обязательное поле (non-nullable, без `@default`) отсутствует в insert
+    /// A required field (non-nullable, without `@default`) is missing in the insert
     MissingRequiredField(String),
-    /// Полю передан `null`, но оно non-nullable
+    /// `null` was passed to the field, but it is non-nullable
     NullNotAllowed(String),
 }
 

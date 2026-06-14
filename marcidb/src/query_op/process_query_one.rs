@@ -9,7 +9,7 @@ where
     U: Clone,
     F: Fn(DecodeCtx<U>) -> U,
 {
-    // Нестандартный порядок, смещение или курсор: переиспользуем механизм many с лимитом 1
+    // Non-standard order, offset or cursor: reuse the many mechanism with a limit of 1
     if query.post_sort || query.reverse || query.skip.is_some() || query.cursor.is_some() {
         return Ok(process_query_many_limited(query, ctx, parent, Some(1))?.pop());
     }
@@ -30,7 +30,7 @@ where
             let index_tree = ctx.get_tree(tree_name)?;
             let tree = ctx.get_tree(&query.entity.name)?;
 
-            // Лениво идём по диапазону до первой строки, прошедшей полный фильтр
+            // Lazily walk the range until the first row that passes the full filter
             for key in range_keys_iter(&index_tree, start, end, false)? {
                 let id = get_id_from_index_key(&key?, *fixed_size);
                 let value = tree.get(&id)?.unwrap();
@@ -45,10 +45,10 @@ where
             let schema = ctx.schema;
             let Some(prefix) = get_prefix(prefix_key, parent, schema) else { return Ok(None) };
 
-            // Связи many-to-one (FieldValue) разделяются между строками выборки —
-            // кэшируем готовый результат декода по id, чтобы не читать и не декодировать повторно.
-            // Если на первых строках не встретилось ни одного повтора, связи уникальны —
-            // кэш для этого include отключается, чтобы не платить за него впустую
+            // many-to-one relations (FieldValue) are shared across rows of the result set —
+            // cache the decoded result by id to avoid re-reading and re-decoding.
+            // If no repeats are encountered in the first rows, the relations are unique —
+            // the cache for this include is disabled so we don't pay for it in vain
             const CACHE_DISABLE_AFTER_MISSES: u32 = 256;
 
             let mut use_cache = matches!(prefix_key, PrefixKey::ParentField(_));

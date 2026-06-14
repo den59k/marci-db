@@ -152,17 +152,17 @@ fn parse_update_op<'a>(
             return Err(EncodeError::OnlyBodyKeyAvailableToEdit(field.full_name.clone()));
         };
 
-        // При смене значения enum очищаем поля других вариантов, иначе их данные
-        // останутся в body и "воскреснут" при обратной смене варианта.
-        // Эти Null-операции добавляются ДО записи самого enum: их exists_condition
-        // проверяется по ещё не изменённому значению enum
+        // When changing an enum value, we clear the fields of other variants, otherwise their data
+        // would stay in the body and "resurrect" when switching the variant back.
+        // These Null operations are added BEFORE writing the enum itself: their exists_condition
+        // is checked against the not-yet-changed enum value
         if let FieldType::Enum(enum_info) = &field.ty {
             let new_variant = value.as_str().and_then(|s| enum_info.variants_map.get(s)).copied();
             for variant_field in entity.fields.iter() {
                 let FieldExistsCondition::EnumValue { field_index: cond_field_index, variants } = &variant_field.condition else {
                     continue;
                 };
-                // Общее поле, принадлежащее и новому варианту, не очищаем
+                // A shared field that also belongs to the new variant is not cleared
                 if *cond_field_index != field_index || new_variant.is_some_and(|v| variants.contains(&v)) {
                     continue;
                 }
@@ -244,7 +244,7 @@ mod tests {
     use serde_json::json;
     use crate::{json_parsers::EncodeError, parse_schema, parse_update};
 
-    /// `$set`/`$ensure` на ref-поле в body (FK) — типизированная ошибка, а не паника (`todo!()`)
+    /// `$set`/`$ensure` on a ref field in body (FK) — a typed error, not a panic (`todo!()`)
     #[test]
     fn update_nested_write_on_body_ref_errors() {
         let schema = parse_schema("model User {\n  name String\n}\nmodel Post {\n  title String\n  author User?\n}");

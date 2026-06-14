@@ -1,5 +1,5 @@
-// Бенчмарк include-кэша: вложенный select связанной записи, разделяемой между строками.
-// Запуск: cargo bench -p marcidb
+// Include-cache benchmark: nested select of a related record shared across rows.
+// Run: cargo bench -p marcidb
 
 use std::time::Instant;
 
@@ -24,7 +24,7 @@ fn insert(db: &MarciDB, model: &str, data: Value) {
   db.insert_item(entity, &op).unwrap();
 }
 
-/// Создаёт БД: posts постов, равномерно распределённых по users авторам
+/// Creates a DB: posts posts, evenly distributed across users authors
 fn create_db(dir: &tempfile::TempDir, users: usize, posts: usize) -> MarciDB {
   let db = MarciDB::new(SCHEMA, dir.path().to_str().unwrap());
 
@@ -32,7 +32,7 @@ fn create_db(dir: &tempfile::TempDir, users: usize, posts: usize) -> MarciDB {
     insert(&db, "User", json!({ "name": format!("User {}", i) }));
   }
   for i in 0..posts {
-    // id пользователей — счётчик, начинается с 1
+    // user ids — a counter, starting from 1
     let author_id = (i % users) + 1;
     insert(&db, "Post", json!({ "title": format!("Post {}", i), "author": { "id": author_id } }));
   }
@@ -47,7 +47,7 @@ fn bench(name: &str, db: &MarciDB, expected: usize) {
     "author": { "id": true, "name": true }
   })).unwrap();
 
-  // Прогрев
+  // Warmup
   for _ in 0..3 {
     let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap()).unwrap();
     assert_eq!(items.len(), expected);
@@ -66,14 +66,14 @@ fn bench(name: &str, db: &MarciDB, expected: usize) {
 fn main() {
   const POSTS: usize = 10_000;
 
-  // Высокое разделение: 100 авторов на 10000 постов — кэш должен сильно помочь
+  // High sharing: 100 authors across 10000 posts — the cache should help a lot
   {
     let dir = tempfile::tempdir().unwrap();
     let db = create_db(&dir, 100, POSTS);
     bench("shared authors (100 users, 10k posts)", &db, POSTS);
   }
 
-  // Без разделения: у каждого поста свой автор — худший случай для кэша
+  // No sharing: each post has its own author — the worst case for the cache
   {
     let dir = tempfile::tempdir().unwrap();
     let db = create_db(&dir, POSTS, POSTS);

@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::{DeleteError, InsertError, MarciDB, MarciTransaction, StorageError, UpdateError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
 
-/// Ошибка batch-транзакции с индексом операции, на которой она произошла.
-/// `index == ops.len()` означает ошибку на коммите (после всех операций)
+/// A batch transaction error with the index of the operation on which it occurred.
+/// `index == ops.len()` means an error at commit (after all operations)
 #[derive(Debug)]
 pub struct BatchError {
   pub index: usize,
@@ -14,20 +14,20 @@ pub struct BatchError {
 
 #[derive(Debug)]
 pub enum BatchErrorKind {
-  /// Операция — не JSON-объект
+  /// The operation is not a JSON object
   NotAnObject,
-  /// Не хватает обязательного поля (`model` / `action` / `data` / `id` / `query`)
+  /// A required field is missing (`model` / `action` / `data` / `id` / `query`)
   MissingField(&'static str),
   UnknownModel(String),
   UnknownAction(String),
-  /// Невалидная ссылка `$ref` на результат предыдущей операции
+  /// Invalid `$ref` reference to the result of a previous operation
   BadRef(String),
-  /// Ошибка разбора входного JSON (encode / parse)
+  /// Error parsing the input JSON (encode / parse)
   Parse(String),
   Insert(InsertError),
   Update(UpdateError),
   Delete(DeleteError),
-  /// Ошибка хранилища (в т.ч. на коммите)
+  /// Storage error (including at commit)
   Storage(StorageError),
 }
 
@@ -39,20 +39,20 @@ impl fmt::Display for BatchError {
 
 impl std::error::Error for BatchError {}
 
-/// Выполняет список операций в одной атомарной транзакции.
+/// Executes a list of operations in a single atomic transaction.
 ///
-/// При успехе возвращает результаты по одному на операцию (в том же порядке) и коммитит.
-/// При первой же ошибке вся транзакция откатывается, а в [`BatchError`] возвращается индекс
-/// упавшей операции. Поддерживаются ссылки `{"$ref":"<i>.<path>"}` на результат операции `i`
-/// (например, сгенерированный id), которые разрешаются перед исполнением операции.
+/// On success returns the results, one per operation (in the same order), and commits.
+/// On the very first error the whole transaction is rolled back, and the index
+/// of the failed operation is returned in [`BatchError`]. References `{"$ref":"<i>.<path>"}` to the result of operation `i`
+/// are supported (for example, a generated id), which are resolved before the operation is executed.
 ///
-/// Формат результата по типам операций:
-/// * `insert` — объект id (как у одиночной вставки)
+/// Result format by operation type:
+/// * `insert` — id object (as for a single insert)
 /// * `update` — `null`
 /// * `delete` — `true`/`false`
-/// * `findFirst` — объект или `null`
-/// * `findMany` — массив объектов
-/// * `aggregate` — объект агрегатов; `count` — число
+/// * `findFirst` — object or `null`
+/// * `findMany` — array of objects
+/// * `aggregate` — aggregates object; `count` — number
 pub fn execute_batch(db: &MarciDB, ops: &[Value]) -> Result<Vec<Value>, BatchError> {
   let tx = db.begin_write();
 
@@ -62,7 +62,7 @@ pub fn execute_batch(db: &MarciDB, ops: &[Value]) -> Result<Vec<Value>, BatchErr
     results.push(result);
   }
 
-  // Любой ранний выход выше уронит tx без коммита → откат
+  // Any early exit above drops tx without a commit → rollback
   tx.commit().map_err(|e| BatchError { index: ops.len(), kind: BatchErrorKind::Storage(e) })?;
   Ok(results)
 }
@@ -126,12 +126,12 @@ fn parse_err<E: fmt::Debug>(e: E) -> BatchErrorKind {
   BatchErrorKind::Parse(format!("{:?}", e))
 }
 
-/// Разбирает строку, собранную json-слоем, обратно в `Value`. Декод всегда даёт валидный JSON
+/// Parses the string assembled by the json layer back into a `Value`. Decoding always yields valid JSON
 fn json_value(s: String) -> Value {
   serde_json::from_str(&s).expect("decoded document must be valid JSON")
 }
 
-/// Рекурсивно подставляет `{"$ref":"<i>.<path>"}` значениями из результатов предыдущих операций
+/// Recursively substitutes `{"$ref":"<i>.<path>"}` with values from the results of previous operations
 fn resolve_refs(value: &Value, prior: &[Value]) -> Result<Value, BatchErrorKind> {
   match value {
     Value::Object(map) => {
@@ -155,7 +155,7 @@ fn resolve_refs(value: &Value, prior: &[Value]) -> Result<Value, BatchErrorKind>
   }
 }
 
-/// `"0"` → результат операции 0; `"0.id"` / `"0.author.id"` — поле в нём по точечному пути
+/// `"0"` → the result of operation 0; `"0.id"` / `"0.author.id"` — a field within it by dotted path
 fn resolve_ref_path(reference: &str, prior: &[Value]) -> Result<Value, BatchErrorKind> {
   let bad = || BatchErrorKind::BadRef(reference.to_string());
 

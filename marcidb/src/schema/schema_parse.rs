@@ -2,9 +2,9 @@ use std::{collections::HashMap};
 
 use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, SchemaError, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}, schema_resolve_bindings::{resolve_bind_refs, resolve_ref_bindings}}};
 
-/// Разбирает текст схемы в сырые блоки (модели/структуры/енумы) ДО резолва ссылок,
-/// оффсетов, индексов и т.п. Используется и `parse_schema`, и движком миграций (диффу
-/// удобнее сырые модели: тип ещё `RefUnresolved(name)`, без синтетических struct-моделей)
+/// Parses schema text into raw blocks (models/structs/enums) BEFORE resolving refs,
+/// offsets, indexes, etc. Used by both `parse_schema` and the migration engine (the diff
+/// prefers raw models: the type is still `RefUnresolved(name)`, without synthetic struct models)
 pub fn collect_blocks(input: &str) -> Result<(Vec<Entity>, HashMap<String, Entity>, HashMap<String, EnumDef>), SchemaError> {
     let mut models = Vec::new();
     let mut structs: HashMap<String, Entity> = HashMap::new();
@@ -36,13 +36,13 @@ pub fn collect_blocks(input: &str) -> Result<(Vec<Entity>, HashMap<String, Entit
     Ok((models, structs, enums))
 }
 
-/// Фоллибл-разбор текста схемы: на невалидной схеме возвращает [`SchemaError`] с человекочитаемым
-/// сообщением (→ HTTP 400) вместо паники. Применяйте на НЕдоверенном вводе (схема из `$sync`).
-/// Для уже провалидированного/внутреннего ввода есть инфраструктурный [`parse_schema`]
+/// Fallible schema text parsing: on an invalid schema returns [`SchemaError`] with a human-readable
+/// message (→ HTTP 400) instead of panicking. Use on UNtrusted input (schema from `$sync`).
+/// For already-validated/internal input there is the infrastructural [`parse_schema`]
 pub fn try_parse_schema(input: &str) -> Result<Schema, SchemaError> {
     let (mut models, structs, enums) = collect_blocks(input)?;
 
-    // Добавляем всем моделям обязательный id, если его нет
+    // Add a mandatory id to every model if it doesn't have one
     for model in models.iter_mut() {
       resolve_model_id(model);
     }
@@ -59,7 +59,7 @@ pub fn try_parse_schema(input: &str) -> Result<Schema, SchemaError> {
         }
     }
 
-    // На этом этапе у нас есть конечный список моделей с конечным списком Fields. Остается только скорректировать ссылки
+    // At this point we have the final list of models with the final list of Fields. It only remains to adjust the refs
     let model_by_name = models.iter().enumerate()
         .map(|(i, m)| (m.name.clone(), i))
         .collect();
@@ -89,17 +89,17 @@ pub fn try_parse_schema(input: &str) -> Result<Schema, SchemaError> {
     Ok(Schema { models })
 }
 
-/// Инфраструктурный разбор схемы: паникует на невалидной схеме. Для внутреннего/доверенного ввода
-/// (тесты, `MarciDB::new`, реконструкция из storage в `open`). Снаружи на недоверенном вводе —
-/// [`try_parse_schema`], который вернёт [`SchemaError`] вместо паники
+/// Infrastructural schema parsing: panics on an invalid schema. For internal/trusted input
+/// (tests, `MarciDB::new`, reconstruction from storage in `open`). For external untrusted input use
+/// [`try_parse_schema`], which returns [`SchemaError`] instead of panicking
 pub fn parse_schema(input: &str) -> Schema {
     try_parse_schema(input).unwrap_or_else(|e| panic!("invalid schema: {}", e))
 }
 
-/// Пересобирает вычисляемые кэши уже-плоских моделей: байты `default`, индексы (`FieldIndex`),
-/// `counter_idx`, `rev_dependencies`. БЕЗ раскрытия сахара и БЕЗ переназначения слотов/offset'ов —
-/// для загрузки `Schema` из materialized-снапшота ([`crate::snapshot::parse_snapshot`]), где
-/// структура/слоты/биндинги уже запинены, а кэши надо восстановить.
+/// Rebuilds the computed caches of already-flat models: `default` bytes, indexes (`FieldIndex`),
+/// `counter_idx`, `rev_dependencies`. WITHOUT desugaring and WITHOUT reassigning slots/offsets —
+/// for loading a `Schema` from a materialized snapshot ([`crate::snapshot::parse_snapshot`]), where
+/// the structure/slots/bindings are already pinned and only the caches need to be restored.
 pub(crate) fn rebuild_caches(models: &mut [Entity]) -> Result<(), SchemaError> {
     for model in models.iter_mut() {
         for field in model.fields.iter_mut() {
@@ -148,16 +148,16 @@ pub fn parse_fields(lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> Res
     return Ok(fields);
 }
 
-// Добавляет generated_id для модели, если нет собственного id 
+// Adds a generated_id to the model if it has no own id
 fn resolve_model_id(entity: &mut Entity) {
   if !entity.fields.iter().any(|f| f.is_id()) {
     entity.fields.insert(0, Field::new_id());
   }
 }
 
-// Находит структуры и превращает их в модели. Также проставляет всем fields field.full_name
-// Поскольку у нас могут быть вложенные enum в struct, а также struct в enum, мы разрешаем сразу оба типа в этой функции
-// В этой функции не назначаются сами структуры, они остаются как RefUnresolved, только с другим названием
+// Finds structs and turns them into models. Also sets field.full_name for all fields
+// Since we can have enums nested in a struct, as well as a struct in an enum, we resolve both types at once in this function
+// This function does not assign the structs themselves, they stay as RefUnresolved, only with a different name
 fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Entity>, enums: &HashMap<String, EnumDef>, model_structs: &mut Vec<Entity>) -> Result<(), SchemaError> {
 
     for field in entity.fields.iter_mut(){
@@ -213,7 +213,7 @@ fn resolve_structs_and_enums(entity: &mut Entity, structs: &HashMap<String, Enti
     Ok(())
 }
 
-// Создает новую модель из Struct
+// Creates a new model from a Struct
 fn create_entity_model(field: &Field, st: &Entity, parent_name: &String) -> Entity {
     let mut entity_model = st.clone();
     entity_model.name = field.full_name.clone();
@@ -226,15 +226,15 @@ fn create_entity_model(field: &Field, st: &Entity, parent_name: &String) -> Enti
     parent_id.name = "@parent_id".to_string();
     parent_id.ty = FieldType::RefUnresolved(parent_name.to_string());
     parent_id.default_value = None;
-    // @parent_id — это Ref на родителя, у него только bind (унаследованный от new_id @default не нужен)
+    // @parent_id is a Ref to the parent, it only has bind (the @default inherited from new_id is not needed)
     parent_id.attributes = vec![Attribute::BindUnresolved(field.name.clone())];
     entity_model.fields.insert(0, parent_id);
 
     entity_model
 }
 
-/// Добавляет поля из Enum в текущую Entity.
-/// Общее поле нескольких вариантов добавляется один раз — его индекс попадает в списки всех своих вариантов
+/// Adds the Enum's fields into the current Entity.
+/// A field shared by several variants is added once — its index goes into the lists of all of its variants
 fn create_enum_info(enum_def: &EnumDef, entity: &mut Entity, field_name: &String, field_index: usize) -> Result<EnumInfo, SchemaError> {
     let variants_names_map = create_variants_names_map(&enum_def.variants_map);
 
@@ -275,7 +275,7 @@ fn create_variants_names_map(variants_map: &HashMap<String,u16>) -> HashMap<u16,
     inverted_map
 }
 
-/// Находит нужные модели и структуры для ссылок RefUnresolved и RefListUnresolved
+/// Finds the proper models and structs for RefUnresolved and RefListUnresolved refs
 fn resolve_refs(entity: &mut Entity, model_by_name: &HashMap<String, usize>) -> Result<(), SchemaError> {
     for field in entity.fields.iter_mut(){
         match &field.ty {
@@ -297,7 +297,7 @@ fn resolve_refs(entity: &mut Entity, model_by_name: &HashMap<String, usize>) -> 
     Ok(())
 }
 
-// Назначает корректные index для Key полей и offset для Body полей
+// Assigns the correct index for Key fields and offset for Body fields
 fn resolve_field_offsets(entity: &mut Entity) {
   let mut offset_index: usize = 0;
   let mut key_index: usize = 0;
@@ -321,7 +321,7 @@ fn resolve_field_offsets(entity: &mut Entity) {
   entity.payload_offset = pre_header_size + offset_index * 4;
 }
 
-// Проставляет корректные counter_idx для всех моделей
+// Sets the correct counter_idx for all models
 fn resolve_counter_idx(entity: &mut Entity, counter_id: &mut usize) {
   for field in entity.fields.iter_mut() {
     if let Some(FieldDefault::Counter(counter_idx)) = &mut field.default_value {
@@ -331,7 +331,7 @@ fn resolve_counter_idx(entity: &mut Entity, counter_id: &mut usize) {
   }
 }
 
-/// Проставляет RefConstraints для Ref и RefList
+/// Sets RefConstraints for Ref and RefList
 fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
     let mut refs: Vec<Vec<EntityDependency>> = vec![Vec::new(); models.len()];
 
@@ -346,7 +346,7 @@ fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
                     } else {
                         constraint = match &ref_info.binding {
                             RefBinding::CurrentId => {
-                                // Если это дочерний объект, то он никак не может влиять на родительский, поэтому пропускаем его
+                                // If this is a child object, it cannot affect the parent in any way, so we skip it
                                 continue;
                             },
                             RefBinding::FieldValue => DeleteConstraint::SetNull,
@@ -362,8 +362,8 @@ fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
                 }
                 FieldType::RefList(ref_info) => {
                     match &ref_info.binding {
-                        RefBinding::CurrentId => { 
-                            // Если это дочерний объект, то он никак не может влиять на родительский, поэтому пропускаем его
+                        RefBinding::CurrentId => {
+                            // If this is a child object, it cannot affect the parent in any way, so we skip it
                             continue;
                         },
                         RefBinding::FieldValue => {
@@ -440,22 +440,22 @@ fn resolve_indexes(model: &mut Entity) -> Result<(), SchemaError> {
 mod tests {
     use crate::schema::{FieldLocation, FieldType, RefBinding, parse_schema, try_parse_schema};
 
-    /// Невалидная схема → SchemaError (а не паника). По одному кейсу на каждый резолвер
+    /// Invalid schema → SchemaError (not a panic). One case per resolver
     #[test]
     fn try_parse_schema_rejects_invalid() {
         assert!(try_parse_schema("model User {\n  name String\n}").is_ok());
 
         let bad = [
-            "model A {\n  x B\n}",                                   // неизвестный тип
-            "model A {\n  x String @bogus\n}",                      // неизвестный атрибут
-            "model A {\n  x\n}",                                    // нет типа поля
-            "model A {\n  x UInt @default(abc)\n}",                 // плохой default
-            "model A {\n  x Int @index @default(zzz)\n}",           // плохой default у индексируемого
-            "model A {\n  t E\n}\nenum E {\n  a {\n    s String\n  }\n  b {\n    s String\n  }\n}", // дубль enum-поля
-            "model A {\n  b B @bind(B.nope)\n}\nmodel B {\n  x String\n}", // плохой @bind
+            "model A {\n  x B\n}",                                   // unknown type
+            "model A {\n  x String @bogus\n}",                      // unknown attribute
+            "model A {\n  x\n}",                                    // no field type
+            "model A {\n  x UInt @default(abc)\n}",                 // bad default
+            "model A {\n  x Int @index @default(zzz)\n}",           // bad default on an indexed field
+            "model A {\n  t E\n}\nenum E {\n  a {\n    s String\n  }\n  b {\n    s String\n  }\n}", // duplicate enum field
+            "model A {\n  b B @bind(B.nope)\n}\nmodel B {\n  x String\n}", // bad @bind
         ];
         for schema in bad {
-            assert!(try_parse_schema(schema).is_err(), "ожидалась ошибка для:\n{}", schema);
+            assert!(try_parse_schema(schema).is_err(), "expected an error for:\n{}", schema);
         }
     }
 
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(schema.models.len(), 4);
         // assert_eq!(schema.models[0].fields.len(), 3);
 
-        // Сформирована структура Project.users, у нее 3 поля:
+        // The Project.users struct is formed, it has 3 fields:
         // @parent_id
         // user
         // role
@@ -598,7 +598,7 @@ mod tests {
         ");
 
         let entity = &schema.models[0];
-        // id, name, type, sign, company — sign добавлен один раз, несмотря на два варианта
+        // id, name, type, sign, company — sign is added once, despite two variants
         assert_eq!(entity.fields.len(), 5);
         assert_eq!(entity.fields[3].name, "sign");
         assert_eq!(entity.fields[4].name, "company");
@@ -609,7 +609,7 @@ mod tests {
                 assert_eq!(enum_info.variants_map.get("pro"), Some(&1));
                 assert_eq!(enum_info.variants_map.get("business"), Some(&2));
 
-                // Оба варианта ссылаются на одно физическое поле sign
+                // Both variants reference the same physical field sign
                 assert_eq!(enum_info.variants.get(&0).unwrap(), &Vec::<usize>::new());
                 assert_eq!(enum_info.variants.get(&1).unwrap(), &vec![3]);
                 assert_eq!(enum_info.variants.get(&2).unwrap(), &vec![3, 4]);

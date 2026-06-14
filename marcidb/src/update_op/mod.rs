@@ -30,7 +30,7 @@ pub enum UpdateError {
   DeleteError(DeleteError),
   InsertError(InsertError),
   WriteIndexesError(WriteIndexesError),
-  /// Операция над связью пока не реализована (disconnect одиночной связи, $remove элементов списка)
+  /// The relation operation is not implemented yet (disconnect of a single relation, $remove of list items)
   Unsupported(&'static str),
   Storage(StorageError)
 }
@@ -58,26 +58,26 @@ pub struct UpdateRelation<'a> {
 
 #[derive(Debug)]
 pub enum UpdateRelationOp<'a> {
-  /// Удаляет объекты
+  /// Deletes objects
   Remove(DeleteOp<'a>),
-  /// Удаляет связи без удаления объектов
+  /// Removes relations without deleting objects
   DisconnectAll,
-  /// Заменяет все объекты на новый объект
+  /// Replaces all objects with a new object
   // Replace(WriteOp<'a>,DeleteOp<'a>),
-  /// Создает объект только там, где поле = null
+  /// Creates an object only where the field = null
   Create(WriteOp<'a>),
-  /// Обновляет объект, если он не null
+  /// Updates the object if it is not null
   Update(UpdateOp<'a>),
 
-  /// Добавляет элементы в массив
+  /// Adds elements to the array
   Push(Vec<WriteOp<'a>>),
-  // /// Заменяет все элементы на элементы из массива
+  // /// Replaces all elements with elements from the array
   RemoveAll(DeleteOp<'a>),
-  /// Удаляет элементы из массива
+  /// Removes elements from the array
   RemoveItems(Vec<Vec<u8>>,DeleteOp<'a>),
 
-  /// Связывает сущность с существующими объектами
+  /// Links the entity to existing objects
   Connect(Vec<Vec<u8>>),
-  /// Удаляет связи с существующими объектами
+  /// Removes relations to existing objects
   Disconnect(Vec<Vec<u8>>),
 }

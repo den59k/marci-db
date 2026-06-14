@@ -10,7 +10,7 @@ export async function request(method: string, url: string, body?: any) {
     throw new Error(`MarciDB [${res.status}]: ${text}`);
   }
 
-  // 204 No Content — delete/update могут не возвращать тело
+  // 204 No Content — delete/update may not return a body
   // const contentType = res.headers.get("content-type");
   // if (res.status === 204 || !contentType?.includes("application/json")) {
   //   return undefined;
@@ -22,8 +22,8 @@ export async function request(method: string, url: string, body?: any) {
 
 export function encodeId(id: any) {
   if (typeof id === "object" && id !== null) {
-    // Составной ключ: вложенные объекты (связь в @id) разворачиваются в dot-путь,
-    // как ждёт сервер — `chat.id=1&id=1`, а не `chat=[object Object]&id=1`
+    // Composite key: nested objects (a relation in @id) are expanded into a dot-path,
+    // as the server expects — `chat.id=1&id=1`, not `chat=[object Object]&id=1`
     const parts: string[] = [];
     const walk = (obj: Record<string, any>, prefix: string) => {
       for (const [k, v] of Object.entries(obj)) {

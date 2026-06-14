@@ -8,8 +8,8 @@ import fs from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Платформенный суффикс пребилт-бинарей. `marci-generate` генерит TS-типы,
-// `marci-migrate` — файлы миграций (отдельный бинарь после рефактора миграций).
+// Platform suffix for the prebuilt binaries. `marci-generate` generates TS types,
+// `marci-migrate` — migration files (a separate binary after the migration refactor).
 const PLATFORM = {
   "linux-x64":    "linux-x64",
   "darwin-arm64": "darwin-arm64",
@@ -26,7 +26,7 @@ function binPath(base) {
   return path.join(__dirname, "bin", `${base}-${suffix}`);
 }
 
-// Разбирает позиционные аргументы и флаги (--flag value | --flag)
+// Parses positional arguments and flags (--flag value | --flag)
 function parseArgs(args) {
   const positional = [];
   const flags = {};
@@ -58,7 +58,11 @@ Commands:
     --name <name>                 migration name (default: migration)
     --no-migrations               types only, skip the migration file
 
-  migrate push <db> [options]     Push migration files (.snapshot) to a server; it applies the new ones
+  migrate push <db> [options]     Push migration files (.march) to a server; it applies the new ones
+    --url <url>                   server url (default: http://localhost:3000)
+    --migrations <dir>            migrations directory (default: migrations)
+
+  migrate check <db> [options]    Compare the server's current snapshot with your latest migration
     --url <url>                   server url (default: http://localhost:3000)
     --migrations <dir>            migrations directory (default: migrations)
 
@@ -66,6 +70,7 @@ Examples:
   marcidb generate
   marcidb generate schema.marci --name add_users
   marcidb migrate push myapp --url http://localhost:3000
+  marcidb migrate check myapp
 `);
 }
 
@@ -74,7 +79,7 @@ function cmdGenerate(args) {
   const schema = positional[0] ?? "schema.marci";
   const output = positional[1] ?? path.join(__dirname, "..", ".marcidb", "client");
 
-  // 1) TypeScript-типы (всегда — без них миграция бессмысленна)
+  // 1) TypeScript types (always — without them a migration is pointless)
   if (fs.existsSync(output)) {
     fs.rmSync(output, { recursive: true, force: true });
   }
@@ -86,7 +91,7 @@ function cmdGenerate(args) {
   "types": "index.d.ts"
 }`);
 
-  // 2) Файл миграции (полный снапшот версии) — отдельным бинарём marci-migrate
+  // 2) Migration file (full snapshot of the version) — via the separate marci-migrate binary
   if (!flags["no-migrations"]) {
     const dir = flags.migrations ?? "migrations";
     const name = flags.name ?? "migration";
@@ -99,55 +104,77 @@ function cmdGenerate(args) {
 async function cmdMigrate(args) {
   const [sub, ...rest] = args;
   if (sub === "push") return migratePush(rest);
-  console.error(`marcidb migrate: unknown subcommand "${sub ?? ""}" (expected "push")`);
+  if (sub === "check") return migrateCheck(rest);
+  console.error(`marcidb migrate: unknown subcommand "${sub ?? ""}" (expected "push" or "check")`);
   help();
   process.exit(1);
 }
 
-// Императивный push: отправляет .mig-файлы; сервер по ledger'у применяет только новые
+// The server's current snapshot ("" if the DB doesn't exist yet)
+async function fetchServerSnapshot(url, db) {
+  const res = await fetch(`${url}/${db}/$snapshot`);
+  if (res.ok) return await res.text();
+  if (res.status === 404) return "";
+  console.error(`Cannot read server snapshot [${res.status}]: ${await res.text()}`);
+  process.exit(1);
+}
+
+// Smart client: marci-migrate plan (STDIN = server snapshot) → actions of the not-yet-applied migrations
+function planActions(dir, serverSnapshot) {
+  try {
+    return { out: execFileSync(binPath("marci-migrate"), ["plan", dir], { input: serverSnapshot, encoding: "utf8" }) };
+  } catch (e) {
+    return { error: (e.stderr || e.message || "").toString().trim() };
+  }
+}
+
+// Push: the client computes the unapplied tail and sends it to the dumb $migrate (the server just applies it)
 async function migratePush(rest) {
   const { positional, flags } = parseArgs(rest);
   const db = positional[0];
-  if (!db) {
-    console.error("marcidb migrate push: <db> name required");
-    process.exit(1);
-  }
+  if (!db) { console.error("marcidb migrate push: <db> name required"); process.exit(1); }
 
   const url = (flags.url ?? "http://localhost:3000").replace(/\/+$/, "");
   const dir = flags.migrations ?? "migrations";
-
   if (!fs.existsSync(dir)) {
     console.error(`marcidb migrate push: migrations directory "${dir}" not found — run "marcidb generate" first`);
     process.exit(1);
   }
 
-  // Все .snapshot по порядку имён → [{ id, ops }]; id — имя файла без расширения.
-  // `ops` — это materialized-снапшот версии (сервер диффит соседние снапшоты и применяет)
-  const migrations = fs.readdirSync(dir)
-    .filter((f) => f.endsWith(".snapshot"))
-    .sort()
-    .map((f) => ({ id: f.replace(/\.snapshot$/, ""), ops: fs.readFileSync(path.join(dir, f), "utf8") }));
-
-  if (migrations.length === 0) {
-    console.log("No migration files — nothing to push");
-    return;
-  }
+  const serverSnap = await fetchServerSnapshot(url, db);
+  const plan = planActions(dir, serverSnap);
+  if (plan.error !== undefined) { console.error(`Migration planning failed: ${plan.error}`); process.exit(1); }
+  if (!plan.out.trim()) { console.log(`'${db}' is up to date — nothing to push`); return; }
 
   const res = await fetch(`${url}/${db}/$migrate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(migrations),
+    headers: { "Content-Type": "text/plain" },
+    body: plan.out,
   });
+  if (!res.ok) { console.error(`Migration failed [${res.status}]: ${await res.text()}`); process.exit(1); }
+  console.log(`Applied pending migrations to '${db}'`);
+}
 
-  if (!res.ok) {
-    console.error(`Migration failed [${res.status}]: ${await res.text()}`);
+// Check: whether the server matches the latest local migration (same planner: empty plan = matched)
+async function migrateCheck(rest) {
+  const { positional, flags } = parseArgs(rest);
+  const db = positional[0];
+  if (!db) { console.error("marcidb migrate check: <db> name required"); process.exit(1); }
+
+  const url = (flags.url ?? "http://localhost:3000").replace(/\/+$/, "");
+  const dir = flags.migrations ?? "migrations";
+
+  const serverSnap = await fetchServerSnapshot(url, db);
+  const plan = planActions(dir, serverSnap);
+  if (plan.error !== undefined) {
+    console.error(`'${db}' has DIVERGED — the server schema isn't a point in your migration history.`);
     process.exit(1);
   }
-  const { applied } = await res.json();
-  if (applied && applied.length) {
-    console.log(`Applied ${applied.length} migration(s) to '${db}': ${applied.join(", ")}`);
+  if (!plan.out.trim()) {
+    console.log(`'${db}' matches your latest migration ✓`);
   } else {
-    console.log(`'${db}' is up to date — no new migrations`);
+    console.error(`'${db}' is behind — there are pending migrations (run "marcidb migrate push ${db}").`);
+    process.exit(1);
   }
 }
 

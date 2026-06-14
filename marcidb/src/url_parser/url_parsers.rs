@@ -57,11 +57,11 @@ pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFi
 }
 
 pub fn parse_datetime(value: &str, field: &Field) -> Result<i64, UrlParseError> {
-    // Сначала пробуем как i64 epoch
+    // First try as an i64 epoch
     if let Ok(n) = value.parse::<i64>() {
         return Ok(n);
     }
-    // Иначе пробуем как ISO-8601
+    // Otherwise try as ISO-8601
     let dt: DateTime<Utc> = value.parse().map_err(|_| {
         UrlParseError::type_mismatch(field, "ISO-8601 datetime string or int64 epoch")
     })?;

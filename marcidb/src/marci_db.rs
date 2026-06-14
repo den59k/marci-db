@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
 use canopydb::{Database, Transaction, Tree};
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, diff, reconcile}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, try_parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees, diff, evolve, migration_ops, reconcile}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, try_parse_schema}, snapshot::{parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
@@ -13,8 +13,8 @@ pub struct MarciDB {
 
 impl MarciDB {
 
-  /// Создаёт/открывает БД со схемой из текста (schema-first путь, используется встраиванием и тестами).
-  /// Схема пишется в `__marci_meta__`, чтобы её можно было реконструировать через [`MarciDB::open`]
+  /// Creates/opens a DB with a schema from text (the schema-first path, used by embedding and tests).
+  /// The schema is written to `__marci_meta__` so it can be reconstructed via [`MarciDB::open`]
   pub fn new(schema_str: &str, path: &str) -> MarciDB {
     let schema = parse_schema(schema_str);
 
@@ -28,8 +28,8 @@ impl MarciDB {
     }
 
     {
-      // В `__marci_meta__` хранится materialized-снапшот (плоские entities), а не текст `.marci`:
-      // open() реконструирует схему из него без повторного раскрытия сахара и с теми же слотами
+      // `__marci_meta__` stores the materialized snapshot (flat entities), not the `.marci` text:
+      // open() reconstructs the schema from it without re-expanding sugar and with the same slots
       let mut meta = tx.get_or_create_tree(META_TREE).unwrap();
       meta.insert(b"schema", serialize_snapshot(&schema).as_bytes()).unwrap();
       meta.insert(b"version", &1u64.to_be_bytes()).unwrap();
@@ -41,9 +41,9 @@ impl MarciDB {
     MarciDB { db, schema, counters, model_by_name }
   }
 
-  /// Открывает БД, реконструируя схему из `__marci_meta__` (состояние, оставшееся после миграций).
-  /// Для новой/пустой БД схема пустая — модели появятся после первой [`MarciDB::migrate_to`].
-  /// Это open-time self-migrate: миграции переживают рестарт
+  /// Opens a DB, reconstructing the schema from `__marci_meta__` (the state left after migrations).
+  /// For a new/empty DB the schema is empty — models appear after the first [`MarciDB::migrate_to`].
+  /// This is an open-time self-migrate: migrations survive a restart
   pub fn open(path: &str) -> MarciDB {
     let db = canopydb::Database::new(path).unwrap();
 
@@ -55,7 +55,7 @@ impl MarciDB {
         .unwrap_or_default()
     };
 
-    // Снапшот уже плоский и провалидированный — parse_snapshot восстанавливает схему один-в-один
+    // The snapshot is already flat and validated — parse_snapshot restores the schema one-to-one
     let schema = parse_snapshot(&snapshot_text).expect("stored snapshot must be valid");
     let model_by_name = schema.build_model_name_map();
 
@@ -98,7 +98,7 @@ impl MarciDB {
 
   pub fn aggregate(&self, op: &AggregateOp) -> Result<AggregateResult, StorageError> {
     let rx = self.db.begin_read().unwrap();
-    // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
+    // Aggregations don't need row decoding — the stub callback is only needed for the context type
     let mut ctx: TransationContext<(), _> = TransationContext::new(&rx, &self.schema, |_: DecodeCtx<()>| ());
     return process_aggregate(op, &mut ctx, None);
   }
@@ -109,16 +109,16 @@ impl MarciDB {
     return tree.len();
   }
 
-  /// Открывает write-транзакцию уровня API. Несколько операций внутри неё применяются
-  /// атомарно; для фиксации нужно вызвать [`MarciTransaction::commit`], иначе при `drop`
-  /// произойдёт откат. Пока транзакция открыта, она держит эксклюзивную write-блокировку
+  /// Opens an API-level write transaction. Several operations within it are applied
+  /// atomically; to commit you must call [`MarciTransaction::commit`], otherwise a rollback
+  /// happens on `drop`. While the transaction is open, it holds an exclusive write lock
   pub fn begin_write(&self) -> MarciTransaction<'_> {
     MarciTransaction::new(self, self.db.begin_write().unwrap())
   }
 
-  /// Выполняет блок в одной транзакции: при `Ok` — коммит, при `Err` или панике — откат.
-  /// Удобная обёртка над [`MarciDB::begin_write`], когда не нужно ручное управление коммитом.
-  /// Ошибка коммита оборачивается в `E` (поэтому требуется `E: From<StorageError>`)
+  /// Runs a block in a single transaction: on `Ok` — commit, on `Err` or panic — rollback.
+  /// A convenient wrapper over [`MarciDB::begin_write`] when manual commit control isn't needed.
+  /// A commit error is wrapped into `E` (hence the `E: From<StorageError>` requirement)
   pub fn transaction<T, E, F>(&self, f: F) -> Result<T, E> where F: FnOnce(&MarciTransaction) -> Result<T, E>, E: From<StorageError> {
     let tx = self.begin_write();
     let result = f(&tx)?;
@@ -147,12 +147,12 @@ impl MarciDB {
     Ok(is_delete)
   }
 
-  /// Декларативная миграция к новой схеме (`$sync` / встраивание): материализует присланный текст
-  /// `.marci`, сверяет слоты со старым снапшотом ([`reconcile_slots`]), диффит против текущей схемы
-  /// и атомарно применяет. В `__marci_meta__` пишется новый materialized-снапшот.
+  /// Declarative migration to a new schema (`$sync` / embedding): materializes the supplied `.marci`
+  /// text, checks slots against the old snapshot ([`reconcile_slots`]), diffs against the current schema
+  /// and applies atomically. A new materialized snapshot is written to `__marci_meta__`.
   ///
-  /// Совместимые изменения — метаданные/индексы; смена типа/ключа, сдвиг слота, деструктивное
-  /// изменение enum и drop field возвращают `MigrateApplyError` (транзакция откатывается).
+  /// Compatible changes are metadata/indexes; a type/key change, slot shift, destructive
+  /// enum change, and drop field return `MigrateApplyError` (the transaction is rolled back).
   pub fn migrate_to(&mut self, new_schema_text: &str) -> Result<(), MigrateApplyError> {
     let mut new_schema = try_parse_schema(new_schema_text)?;
     reconcile(&mut new_schema, &self.schema);
@@ -160,54 +160,23 @@ impl MarciDB {
     self.commit_schema(new_schema, &ops)
   }
 
-  /// Императивная миграция по ledger'у (`$migrate`). `incoming` — ВСЕ миграции клиента по порядку
-  /// `(id, materialized-снапшот)`. Сервер хранит ledger применённых id в `__marci_meta__/applied`
-  /// и применяет только идущие ПОСЛЕ уже применённых; применённые должны быть префиксом присланных
-  /// (иначе [`MigrateApplyError::HistoryDiverged`]). Весь пуш — одна атомарная транзакция: каждый
-  /// снапшот диффится против текущего и применяется. Возвращает id применённых в этом пуше.
-  pub fn apply_migrations(&mut self, incoming: &[(String, String)]) -> Result<Vec<String>, MigrateApplyError> {
-    let applied = read_ledger(&self.db)?;
-
-    for (i, applied_id) in applied.iter().enumerate() {
-      let incoming_id = incoming.get(i).map(|(id, _)| id.as_str()).unwrap_or("<missing>");
-      if incoming_id != applied_id {
-        return Err(MigrateApplyError::HistoryDiverged {
-          position: i, applied: applied_id.clone(), incoming: incoming_id.to_string(),
-        });
-      }
-    }
-
-    let pending = &incoming[applied.len()..];
-    if pending.is_empty() {
-      return Ok(vec![]);
-    }
-
-    // Реплей всех новых снапшотов в одной транзакции
-    let tx = self.db.begin_write().unwrap();
-    let mut cur = self.schema.clone();
-    for (_, snapshot_text) in pending.iter() {
-      let new_schema = parse_snapshot(snapshot_text)?; // снапшот уже плоский, слоты запинены — без reconcile
-      let ops = diff(&cur, &new_schema)?;
-      apply(&tx, &cur, &new_schema, &ops)?;
-      cur = new_schema;
-    }
-
-    let all_ids: Vec<&str> = applied.iter().map(String::as_str)
-      .chain(pending.iter().map(|(id, _)| id.as_str())).collect();
-    {
-      let mut meta = tx.get_or_create_tree(META_TREE)?;
-      meta.insert(b"schema", serialize_snapshot(&cur).as_bytes())?;
-      meta.insert(b"applied", all_ids.join("\n").as_bytes())?;
-      meta.insert(b"version", &(all_ids.len() as u64).to_be_bytes())?;
-    }
-    tx.commit()?;
-
-    self.swap_schema(cur);
-    Ok(pending.iter().map(|(id, _)| id.clone()).collect())
+  /// Imperative migration (`$migrate`): takes the text of a migration file (self-contained actions),
+  /// applies it onto its current state via [`evolve`] and applies it physically.
+  ///
+  /// A dumb executor: NO ledger and no decisions about "what to apply" — whatever was sent is executed.
+  /// Which actions exactly to send (the tail of unapplied ones) is decided by the `marci-migrate` client,
+  /// checking against `GET /:db/$snapshot`. An incompatible action (creating an existing entity, etc.) → error,
+  /// the transaction is rolled back.
+  pub fn apply_migration(&mut self, migration_text: &str) -> Result<(), MigrateApplyError> {
+    let cur_text = serialize_snapshot(&self.schema);
+    let new_text = evolve(&cur_text, migration_text)?;       // actions → new snapshot text
+    let new_schema = parse_snapshot(&new_text)?;             // → resolved schema
+    let ops = migration_ops(migration_text)?;                // physical operations from the actions
+    self.commit_schema(new_schema, &ops)
   }
 
-  /// Атомарно применяет ops к БД, пишет новый снапшот+версию в `__marci_meta__` и переключает
-  /// in-memory схему. При ошибке транзакция откатывается, состояние не меняется.
+  /// Atomically applies ops to the DB, writes the new snapshot+version to `__marci_meta__` and switches
+  /// the in-memory schema. On error the transaction is rolled back and state is unchanged.
   fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::migrate::MigrateOp]) -> Result<(), MigrateApplyError> {
     let tx = self.db.begin_write().unwrap();
     apply(&tx, &self.schema, &new_schema, ops)?;
@@ -226,7 +195,7 @@ impl MarciDB {
     Ok(())
   }
 
-  /// Пересобирает counters/индекс имён под новую схему и переключает in-memory схему
+  /// Rebuilds counters/name index for the new schema and switches the in-memory schema
   fn swap_schema(&mut self, new_schema: Schema) {
     let rx = self.db.begin_read().unwrap();
     self.counters = build_counters(&new_schema, &rx);
@@ -234,18 +203,6 @@ impl MarciDB {
     self.model_by_name = new_schema.build_model_name_map();
     self.schema = new_schema;
   }
-}
-
-/// Читает ledger применённых миграций (`__marci_meta__/applied`, id через `\n`)
-fn read_ledger(db: &Database) -> Result<Vec<String>, MigrateApplyError> {
-  let rx = db.begin_read().unwrap();
-  let applied = rx.get_tree(META_TREE)?
-    .and_then(|m| m.get(b"applied").unwrap())
-    .map(|v| String::from_utf8(v.to_vec()).unwrap())
-    .filter(|s| !s.is_empty())
-    .map(|s| s.split('\n').map(String::from).collect())
-    .unwrap_or_default();
-  Ok(applied)
 }
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {

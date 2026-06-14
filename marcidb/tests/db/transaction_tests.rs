@@ -22,7 +22,7 @@ fn make_db() -> (tempfile::TempDir, MarciDB) {
   (dir, db)
 }
 
-/// Вставка внутри транзакции с возвратом декодированного id (зеркало insert_data)
+/// Insert inside a transaction returning the decoded id (mirror of insert_data)
 fn tx_insert(tx: &MarciTransaction, db: &MarciDB, model: &str, data: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let op = parse_insert(&db.schema, entity, &data).unwrap();
@@ -30,7 +30,7 @@ fn tx_insert(tx: &MarciTransaction, db: &MarciDB, model: &str, data: Value) -> V
   Value::from_str(&decode_id(&id, entity, &db.schema)).unwrap()
 }
 
-/// Запрос внутри транзакции (видит её незакоммиченные изменения)
+/// Query inside a transaction (sees its uncommitted changes)
 fn tx_query(tx: &MarciTransaction, db: &MarciDB, model: &str, q: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let query = parse_query(&db.schema, entity, &q).unwrap();
@@ -49,7 +49,7 @@ fn transaction_commit_test() {
   tx_insert(&tx, &db, "Post", json!({ "title": "First", "author": alice }));
   tx_insert(&tx, &db, "Post", json!({ "title": "Second", "author": alice }));
 
-  // Изнутри транзакции изменения видны (read-your-writes)...
+  // From inside the transaction the changes are visible (read-your-writes)...
   assert_eq!(tx.count(user).unwrap(), 1);
   assert_eq!(tx.count(post).unwrap(), 2);
   assert_eq!(
@@ -57,13 +57,13 @@ fn transaction_commit_test() {
     json!([{ "name": "Alice", "posts": [{ "title": "First" }, { "title": "Second" }] }])
   );
 
-  // ...но другим читателям до коммита — нет (изоляция снепшота)
+  // ...but not to other readers before commit (snapshot isolation)
   assert_eq!(db.count(user).unwrap(), 0);
   assert_eq!(db.count(post).unwrap(), 0);
 
   tx.commit().unwrap();
 
-  // После коммита всё видно, связь author→posts тоже на месте
+  // After commit everything is visible, the author→posts relation is in place too
   assert_eq!(db.count(user).unwrap(), 1);
   assert_eq!(db.count(post).unwrap(), 2);
 }
@@ -77,7 +77,7 @@ fn transaction_rollback_on_drop_test() {
     let tx = db.begin_write();
     tx_insert(&tx, &db, "User", json!({ "name": "Ghost" }));
     assert_eq!(tx.count(user).unwrap(), 1);
-    // tx выходит из области видимости без commit → откат
+    // tx goes out of scope without commit → rollback
   }
 
   assert_eq!(db.count(user).unwrap(), 0);
@@ -115,9 +115,9 @@ fn transaction_closure_rolls_back_on_err_test() {
   let (_dir, db) = make_db();
   let user = db.get_model("User").unwrap();
 
-  // Несколько успешных вставок, затем Err — вся транзакция откатывается атомарно.
-  // Тип ошибки замыкания должен реализовывать From<StorageError> (для проброса ошибки коммита) —
-  // доменные ошибки БД это умеют
+  // Several successful inserts, then Err — the whole transaction rolls back atomically.
+  // The closure's error type must implement From<StorageError> (to propagate the commit error) —
+  // the DB's domain errors do
   let result: Result<(), InsertError> = db.transaction(|tx| {
     tx_insert(tx, &db, "User", json!({ "name": "Alice" }));
     tx_insert(tx, &db, "User", json!({ "name": "Bob" }));

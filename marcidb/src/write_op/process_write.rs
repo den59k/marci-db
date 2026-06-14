@@ -33,8 +33,8 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
   let mut write_id = insert.id.clone();
   let mut temp_data: Option<Vec<u8>> = None;
   
-  // Сначала заполняем counter-значения: их смещения записаны относительно исходного буфера.
-  // Вставка parent_id (splice) идёт второй фазой и сдвигает уже заполненные байты
+  // First fill in the counter values: their offsets are recorded relative to the original buffer.
+  // The parent_id insertion (splice) is the second phase and shifts the already-filled bytes
   for field in insert.defaults.iter() {
     match field {
       WriteDefault::Key(offset, FieldDefault::Counter(counter_idx)) => {

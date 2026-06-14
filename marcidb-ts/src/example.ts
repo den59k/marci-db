@@ -54,12 +54,12 @@ type UserInfoModelUpdate = {
 }
 
 
-// Магия: выводим тип результата из select
+// Magic: infer the result type from select
 type GetResult<TModel, TSelect extends Record<string, any>> = {
   [K in keyof TSelect as TSelect[K] extends false | undefined ? never : K]:
     K extends keyof TModel
       ? TSelect[K] extends true
-        ? TModel[K]                          // выбрали поле целиком
+        ? TModel[K]                          // selected the whole field
         : TSelect[K] extends Record<string, any>
           ? GetResult<NonNullable<TModel[K]>, TSelect[K]> | (null extends TModel[K] ? null : never)
           : TModel[K]                        // fallback
@@ -93,7 +93,7 @@ export interface UserActions{
   insert(data: UserInfoModelInsert): Promise<UserModelId>
 }
 
-// Функция
+// Function
 // function findMany<T extends UserSelect>(select: T): Promise<GetResult<UserModel, T>[]> {
   
 //   return [] as any

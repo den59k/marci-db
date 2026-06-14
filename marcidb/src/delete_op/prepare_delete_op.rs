@@ -113,7 +113,7 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity, ig
       }
     };
 
-    // Если обратное поле существует - нам повезло, можно сразу найти элементы, которые связаны с элементом. Если нет - придется перебирать все элементы
+    // If the reverse field exists we are lucky — we can immediately find the items linked to this item. If not — we have to iterate over all items
     if let Some(field_idx) = rev_ref_info.rev_field_idx {
       let field = &entity.fields[field_idx];
       let (FieldType::Ref(ref_info) | FieldType::RefList(ref_info)) = &field.ty else {

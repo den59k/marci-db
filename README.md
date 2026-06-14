@@ -32,7 +32,7 @@ const posts = await db.post.findMany({
 - **Secondary indexes** with a query planner: range scans, `$order` by index, keyset pagination (`$cursor`)
 - **Aggregations**: `count` / `$sum` / `$avg` / `$min` / `$max`, including aggregates over relations inside a select (`posts: { $count: true }` — counted by index keys, without reading rows)
 - **Atomic batch transactions**: `db.$transaction([...])` applies several operations as all-or-nothing, with `ref("0.id")` to feed a generated id into later operations
-- **Migrations as files**: `marcidb generate` diffs the schema into a `.mig` file; `marcidb migrate push` ships your migrations and the server replays the new ones, tracking an applied ledger — adding fields and indexes without rewriting existing rows
+- **Migrations as files**: `marcidb generate` diffs the schema into a `.march` file (a reviewable action list + a snapshot of the resulting schema); `marcidb migrate push` ships your migrations and the server applies the new ones, tracking an applied ledger — adding fields and indexes without rewriting existing rows
 - **Compact binary row format** with zero-copy field access — filters and aggregates read only the bytes they need
 
 ## Quick start

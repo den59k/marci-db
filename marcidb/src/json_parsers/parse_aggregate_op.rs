@@ -19,7 +19,7 @@ pub fn parse_aggregate<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Va
     }
   }
 
-  // Одиночное условие, из которого получен диапазон — фильтр покрыт диапазоном целиком
+  // A single condition that produced the range — the filter is fully covered by the range
   let fully_covered = prefix_key.is_some() && matches!(&filter, Some(Where::Field(_, _)));
 
   let count = match obj.get("$count") {
@@ -53,7 +53,7 @@ fn parse_aggregate_field<'a>(entity: &'a Entity, obj: &Map<String, Value>, key: 
     return Err(ParseError::UnknownField(field_name.to_string()));
   };
 
-  // Только обычные примитивные поля: без Virtual и без полей enum-вариантов
+  // Only regular primitive fields: no Virtual and no enum-variant fields
   let valid = matches!(field.location, FieldLocation::Key { .. } | FieldLocation::Body { .. })
     && matches!(field.condition, FieldExistsCondition::None)
     && match &field.ty {
@@ -75,7 +75,7 @@ fn is_numeric(ty: &PrimitiveFieldType) -> bool {
   matches!(ty, PrimitiveFieldType::Int64 | PrimitiveFieldType::UInt64 | PrimitiveFieldType::Float | PrimitiveFieldType::Double)
 }
 
-/// Собирает JSON-объект результата: только запрошенные агрегаты
+/// Builds the result JSON object: only the requested aggregates
 pub fn aggregate_to_json(op: &AggregateOp, result: &AggregateResult) -> String {
   let mut parts: Vec<String> = vec![];
 
@@ -102,7 +102,7 @@ fn sum_to_json(sum: &Option<SumValue>) -> String {
   match sum {
     None => "null".to_string(),
     Some(SumValue::Int(value)) => {
-      // Сумма может выйти за пределы i64/u64 — тогда отдаём как f64
+      // The sum may exceed i64/u64 — in that case return it as f64
       if let Ok(v) = i64::try_from(*value) {
         v.to_string()
       } else if let Ok(v) = u64::try_from(*value) {

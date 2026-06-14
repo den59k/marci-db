@@ -80,28 +80,39 @@ returns `"posts": { "count": 3, "max": 25 }` instead of an array.
 
 ## Migrations
 
-A database evolves through **migration files**. Locally, `marcidb generate` diffs `schema.marci` against the last snapshot and writes a `NNNN_name.mig` file describing the change. `POST /:db/$migrate` ships those files to the server, which replays the ones it hasn't applied yet.
+A database evolves through **migration files**. Locally, `marcidb generate` diffs `schema.marci` against the replayed history and writes a `NNNN_name.march` file — a list of **self-contained actions** (each carrying its field definition). `POST /:db/$migrate` applies actions to the server.
 
-The body is a JSON array of the migration files, in order — each `{ "id", "ops" }`, where `id` is the file name (without `.mig`) and `ops` is its text. The server keeps a **ledger** of applied ids in its own storage and applies only the new ones, in a single atomic transaction. The response lists what it applied this push:
+`$migrate` is a **dumb executor**: its body is migration-action text, and the server lays those actions onto its current state and applies them — no ledger, no deciding what to skip. Choosing *which* actions to send is the **client's** job:
 
-```jsonc
-// POST /myapp/$migrate
-[
-  { "id": "0000_init",    "ops": "create model User {\n  name String\n}" },
-  { "id": "0001_add_age", "ops": "add field User.age UInt" }
-]
-// → { "applied": ["0001_add_age"] }   — 0000_init was already applied
+1. `GET /:db/$snapshot` returns the server's current materialized snapshot (`""` if the database doesn't exist yet).
+2. `marci-migrate plan` replays the local `.march` files from empty until a step matches the server's snapshot, then prints the unapplied tail.
+3. That tail is POSTed to `$migrate`.
+
+```bash
+# the CLI wraps all three steps:
+npx marcidb migrate push myapp --url http://localhost:3000
+```
+
+```
+# POST /myapp/$migrate   (Content-Type: text/plain — the planned actions)
+add field User.age UInt @slot(12)
+add index User.email
+# → 200 OK
 ```
 
 Properties:
-- **Idempotent** — re-pushing the same list applies nothing (`{ "applied": [] }`).
-- **Ordered & verified** — the applied ledger must be a prefix of what you push; a mismatched id (rewritten history) is rejected with `400` (`HistoryDiverged`).
-- **Survives restarts** — ledger and schema live in the database, reconstructed on open.
+- **Reviewable** — each action shows exactly what changes; an accidental drop is visible before you push.
+- **Idempotent & ordered — client-side** — `plan` only emits the unapplied tail, so re-pushing sends nothing; if the server's schema isn't a point in your history, `plan` reports drift.
+- **Survives restarts** — the materialized schema lives in the database, reconstructed on open.
 
-v1 ops cover adding fields, adding/dropping indexes and creating/dropping models; dropping a field, renaming, or reordering fields is rejected with `400`. Normally the CLI does this, not raw curl:
+v1 actions cover creating/dropping entities, adding fields, and adding/dropping indexes; dropping a field, type changes, or removing an enum variant are rejected with `400`.
+
+### Checking for drift — `$snapshot`
+
+`GET /:db/$snapshot` returns the server's current materialized snapshot. `marcidb migrate check` runs the same planner: an empty plan means up-to-date, a non-empty plan means pending migrations, and a planning failure means the server has drifted from your history:
 
 ```bash
-npx marcidb migrate push myapp --url http://localhost:3000
+npx marcidb migrate check myapp --url http://localhost:3000
 ```
 
 ### Bootstrapping from a schema — `$sync`

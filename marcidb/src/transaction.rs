@@ -2,19 +2,19 @@ use canopydb::WriteTransaction;
 
 use crate::{MarciDB, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
 
-/// Открытая write-транзакция уровня API.
+/// An open API-level write transaction.
 ///
-/// Оборачивает одну canopydb write-транзакцию: все insert/update/delete и запросы
-/// внутри `MarciTransaction` применяются атомарно. Изменения становятся видимы
-/// другим читателям только после [`MarciTransaction::commit`]. При `drop` без коммита
-/// (в том числе при выходе по ошибке или панике) транзакция откатывается.
+/// Wraps a single canopydb write transaction: all insert/update/delete and queries
+/// within `MarciTransaction` are applied atomically. Changes become visible
+/// to other readers only after [`MarciTransaction::commit`]. On `drop` without a commit
+/// (including on exit via an error or a panic) the transaction is rolled back.
 ///
-/// Методы запросов (`find_many` / `find_first` / `aggregate` / `count`) читают
-/// собственные незакоммиченные изменения транзакции (read-your-writes).
+/// Query methods (`find_many` / `find_first` / `aggregate` / `count`) read
+/// the transaction's own uncommitted changes (read-your-writes).
 ///
-/// Пока транзакция открыта, она держит эксклюзивную write-блокировку БД — другие
-/// писатели (включая короткоживущие методы [`MarciDB`]) ждут её завершения, поэтому
-/// транзакции стоит держать недолго и не вызывать write-методы самого `MarciDB` внутри.
+/// While the transaction is open, it holds an exclusive write lock on the DB — other
+/// writers (including the short-lived methods of [`MarciDB`]) wait for it to finish, so
+/// transactions should be kept short and the write methods of `MarciDB` itself should not be called inside.
 pub struct MarciTransaction<'db> {
   db: &'db MarciDB,
   tx: WriteTransaction,
@@ -49,7 +49,7 @@ impl<'db> MarciTransaction<'db> {
   }
 
   pub fn aggregate(&self, op: &AggregateOp) -> Result<AggregateResult, StorageError> {
-    // Декод строк агрегациям не нужен — колбэк-заглушка нужна только для типа контекста
+    // Aggregations don't need row decoding — the callback stub is only needed for the context type
     let mut ctx: TransationContext<(), _> = TransationContext::new(&self.tx, &self.db.schema, |_: DecodeCtx<()>| ());
     return process_aggregate(op, &mut ctx, None);
   }
@@ -59,14 +59,14 @@ impl<'db> MarciTransaction<'db> {
     return Ok(tree.len());
   }
 
-  /// Фиксирует все изменения транзакции. После коммита они видны новым читателям
+  /// Commits all the transaction's changes. After the commit they are visible to new readers
   pub fn commit(self) -> Result<(), StorageError> {
     self.tx.commit()?;
     Ok(())
   }
 
-  /// Явно откатывает транзакцию. Эквивалентно простому `drop`, но возвращает ошибку,
-  /// если откат не удался
+  /// Explicitly rolls back the transaction. Equivalent to a plain `drop`, but returns an error
+  /// if the rollback failed
   pub fn rollback(self) -> Result<(), StorageError> {
     self.tx.rollback()?;
     Ok(())

@@ -34,7 +34,7 @@ fn get_model_aggregate_name(model: &Entity) -> String {
   format!("{}ModelAggregateQuery", model.name.replace('.', "_"))
 }
 
-/// Имена полей, доступных агрегациям (зеркало parse_aggregate_field)
+/// Names of fields available to aggregations (mirror of parse_aggregate_field)
 fn get_aggregate_fields_union(model: &Entity, numeric: bool) -> String {
   let names: Vec<String> = model.fields.iter()
     .filter(|field| {
@@ -105,7 +105,7 @@ fn get_field_ty(ty: &FieldType, schema: &Schema) -> String {
   }
 }
 
-/// Enum, у которого хотя бы один вариант содержит поля — в типах превращается в discriminated union
+/// An enum where at least one variant contains fields — in the types it becomes a discriminated union
 fn is_payload_enum(field: &Field) -> bool {
   if !matches!(field.location, FieldLocation::Body { .. }) { return false; }
   match &field.ty {
@@ -114,12 +114,12 @@ fn is_payload_enum(field: &Field) -> bool {
   }
 }
 
-/// Поле, инжектированное в модель из варианта enum
+/// A field injected into the model from an enum variant
 fn is_variant_field(field: &Field) -> bool {
   matches!(field.condition, FieldExistsCondition::EnumValue { .. })
 }
 
-/// Варианты enum в порядке их объявления вместе с инжектированными полями
+/// Enum variants in declaration order together with their injected fields
 fn enum_variants_sorted<'a>(entity: &'a Entity, enum_info: &'a EnumInfo) -> Vec<(&'a String, Vec<&'a Field>)> {
   let mut keys: Vec<u16> = enum_info.variants.keys().copied().collect();
   keys.sort();
@@ -155,8 +155,8 @@ fn get_field_str(field: &Field, schema: &Schema) -> String {
   format!("  {}: {}{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
 }
 
-// В Id-типе ссылки сужаются до ModelId: для параметров update/delete и результата insert
-// нужен только ключ. Полный тип ссылки доборно прописывается в самом Model
+// In the Id type, refs are narrowed to ModelId: for update/delete params and the insert result
+// only the key is needed. The full ref type is additionally written out in the Model itself
 fn get_field_id_str(field: &Field, schema: &Schema) -> String {
   if field.format.is_none() {
     if let FieldType::Ref(ref_info) = &field.ty {
@@ -166,7 +166,7 @@ fn get_field_id_str(field: &Field, schema: &Schema) -> String {
   get_field_str(field, schema)
 }
 
-/// Содержимое веток union для типа Model (без скобок): `role: "admin", sign: string`
+/// The contents of the union branches for the Model type (without braces): `role: "admin", sign: string`
 fn get_model_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> Vec<String> {
   let FieldType::Enum(enum_info) = &field.ty else { panic!("Expected enum field") };
   let mut branches = vec![];
@@ -183,7 +183,7 @@ fn get_model_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> V
   branches
 }
 
-/// Ветки union для типа Insert: поля выбранного варианта обязательны, поля других вариантов запрещены
+/// Union branches for the Insert type: fields of the chosen variant are required, fields of other variants are forbidden
 fn get_insert_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> Vec<String> {
   let FieldType::Enum(enum_info) = &field.ty else { panic!("Expected enum field") };
   let variants = enum_variants_sorted(entity, enum_info);
@@ -196,7 +196,7 @@ fn get_insert_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> 
     push_never_fields(&mut parts, &variants, Some(variant_name));
     branches.push(format!("{{ {} }}", parts.join(", ")));
   }
-  // Если enum можно не указывать (nullable или есть default) — ветка без полей вариантов
+  // If the enum can be omitted (nullable or has a default) — a branch without variant fields
   if field.nullable || field.default_value.is_some() {
     let enum_part = if field.nullable {
       format!("{}?: null", field.name)
@@ -210,8 +210,8 @@ fn get_insert_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> 
   branches
 }
 
-/// Ветки union для типа Update: либо enum не трогаем (поля текущего варианта можно менять частично),
-/// либо меняем вместе с полным набором полей нового варианта
+/// Union branches for the Update type: either we leave the enum alone (the current variant's fields can be changed partially),
+/// or we change it together with the full set of fields of the new variant
 fn get_update_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> Vec<String> {
   let FieldType::Enum(enum_info) = &field.ty else { panic!("Expected enum field") };
   let variants = enum_variants_sorted(entity, enum_info);
@@ -221,7 +221,7 @@ fn get_update_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> 
   let mut seen: Vec<&str> = vec![];
   for (_, variant_fields) in variants.iter() {
     for variant_field in variant_fields {
-      // Общее поле нескольких вариантов добавляем один раз
+      // A field shared by several variants is added once
       if seen.contains(&variant_field.name.as_str()) { continue; }
       seen.push(variant_field.name.as_str());
       parts.push(get_field_update_str(variant_field, schema).trim_start().to_string());
@@ -246,9 +246,9 @@ fn get_update_enum_branches(field: &Field, entity: &Entity, schema: &Schema) -> 
   branches
 }
 
-/// Добавляет `field?: never` для полей всех вариантов, кроме текущего —
-/// закрывает ветку union от полей чужих вариантов.
-/// Общее поле нескольких вариантов не запрещаем, если текущий вариант — один из них
+/// Adds `field?: never` for the fields of all variants except the current one —
+/// closes the union branch off from other variants' fields.
+/// A field shared by several variants is not forbidden if the current variant is one of them
 fn push_never_fields(parts: &mut Vec<String>, variants: &[(&String, Vec<&Field>)], current_variant: Option<&String>) {
   let current_fields: Vec<&str> = variants.iter()
     .filter(|(name, _)| Some(*name) == current_variant)
@@ -267,7 +267,7 @@ fn push_never_fields(parts: &mut Vec<String>, variants: &[(&String, Vec<&Field>)
   }
 }
 
-/// Дописывает в выходной файл union-блоки вида `} & (\n  {...}\n  | {...}\n)` для Insert/Update
+/// Appends union blocks of the form `} & (\n  {...}\n  | {...}\n)` to the output file for Insert/Update
 fn push_union_blocks(lines: &mut Vec<String>, payload_enums: &[&Field], branches_list: Vec<Vec<String>>) {
   if payload_enums.is_empty() {
     lines.push("}".to_string());
@@ -377,8 +377,8 @@ fn main() {
       args.get(2).map(String::as_str).unwrap_or("schema.marci"),
       args.get(3).map(String::as_str).unwrap_or("."),
     ),
-    // Обратная совместимость: `marcidb-ts <schema> <output>` = генерация типов.
-    // Миграции переехали в отдельный бинарь `marci-migrate`.
+    // Backward compatibility: `marcidb-ts <schema> <output>` = type generation.
+    // Migrations moved to a separate binary `marci-migrate`.
     _ => generate_types(
       args.get(1).map(String::as_str).unwrap_or("schema.marci"),
       args.get(2).map(String::as_str).unwrap_or("."),
@@ -397,12 +397,12 @@ fn generate_types(input: &str, output_dir: &str) {
 
     lines.push(format!("// {}", model.name));
 
-    // Enum с полями в вариантах превращаются в discriminated union
+    // Enums with fields in variants are turned into a discriminated union
     let payload_enums: Vec<&Field> = model.fields.iter()
       .filter(|field| !field.name.starts_with("@") && is_payload_enum(field))
       .collect();
 
-    // Заполняем поля от ID
+    // Fill in the fields from the ID
     lines.push(format!("type {} = {{", get_model_id_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
@@ -412,9 +412,9 @@ fn generate_types(input: &str, output_dir: &str) {
     }
     lines.push("}".to_string());
 
-    // Заполняем поля от body
-    // При наличии payload enum генерируем XModelBase + union, чтобы GetResult дистрибутивно
-    // выводил поля варианта только при соответствующем значении enum
+    // Fill in the fields from the body
+    // When there's a payload enum we generate XModelBase + union, so that GetResult distributively
+    // infers a variant's fields only for the corresponding enum value
     let model_base_name = if payload_enums.is_empty() {
       get_model_name(model)
     } else {
@@ -424,7 +424,7 @@ fn generate_types(input: &str, output_dir: &str) {
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
       if matches!(field.location, FieldLocation::Key { .. }) {
-        // Ref-ключи в Id-типе сужены до ModelId — здесь возвращаем им полный тип
+        // Ref keys in the Id type are narrowed to ModelId — here we give them back their full type
         if matches!(field.ty, FieldType::Ref(_)) {
           lines.push(get_field_str(field, &schema));
         }
@@ -436,7 +436,7 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push("}".to_string());
 
     if !payload_enums.is_empty() {
-      // Декартово произведение веток всех payload enum модели
+      // Cartesian product of the branches of all the model's payload enums
       let mut combos: Vec<String> = vec![String::new()];
       for field in payload_enums.iter() {
         let branches = get_model_enum_branches(field, model, &schema);
@@ -452,7 +452,7 @@ fn generate_types(input: &str, output_dir: &str) {
       }
     }
 
-    // Заполняем поля для Insert
+    // Fill in the fields for Insert
     lines.push(format!("type {} = {{", get_model_insert_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
@@ -462,7 +462,7 @@ fn generate_types(input: &str, output_dir: &str) {
     push_union_blocks(&mut lines, &payload_enums,
       payload_enums.iter().map(|field| get_insert_enum_branches(field, model, &schema)).collect());
 
-    // Заполняем поля для Update
+    // Fill in the fields for Update
     lines.push(format!("type {} = {{", get_model_update_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
@@ -473,7 +473,7 @@ fn generate_types(input: &str, output_dir: &str) {
       payload_enums.iter().map(|field| get_update_enum_branches(field, model, &schema)).collect());
 
     
-    // Заполняем поля для select
+    // Fill in the fields for select
     lines.push(format!("type {} = {{", get_model_select_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
@@ -481,7 +481,7 @@ fn generate_types(input: &str, output_dir: &str) {
     }
     lines.push("}".to_string());
 
-    // Заполняем поля для Where
+    // Fill in the fields for Where
     lines.push(format!("type {} = {{", get_model_where_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
@@ -489,7 +489,7 @@ fn generate_types(input: &str, output_dir: &str) {
     }
     lines.push("}".to_string());
 
-    // Заполняем поля для Order (зеркало parse_order: ключевые поля + примитивы/enum из body)
+    // Fill in the fields for Order (mirror of parse_order: key fields + primitives/enums from body)
     lines.push(format!("type {} = {{", get_model_order_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
@@ -504,7 +504,7 @@ fn generate_types(input: &str, output_dir: &str) {
     }
     lines.push("}".to_string());
 
-    // Заполняем поля для Query
+    // Fill in the fields for Query
     lines.push(format!("type {} = {} & {{", get_model_query_name(model), get_model_select_name(model)));
     lines.push(format!("  $where?: {}", get_model_where_name(model)));
     lines.push(format!("  $order?: {}", get_model_order_name(model)));
@@ -513,7 +513,7 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("  $cursor?: {}", get_model_id_name(model)));
     lines.push("}".to_string());
 
-    // Заполняем поля для Aggregate
+    // Fill in the fields for Aggregate
     lines.push(format!("type {} = {{", get_model_aggregate_name(model)));
     lines.push(format!("  $where?: {}", get_model_where_name(model)));
     lines.push("  $count?: true".to_string());
@@ -539,8 +539,8 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("    aggregate<T extends {}>(query: T): Op<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
     lines.push("  }".to_string());
   }
-  // Атомарная batch-транзакция: операции применяются все или ни одной; результаты —
-  // кортеж по числу операций. Используйте ref("0.id") для ссылок на предыдущие результаты
+  // Atomic batch transaction: operations are applied all or none; the results are
+  // a tuple sized by the number of operations. Use ref("0.id") to reference previous results
   lines.push("  $transaction<P extends readonly Op<any>[]>(ops: [...P]): Promise<{ [K in keyof P]: P[K] extends Op<infer T> ? T : never }>".to_string());
   lines.push("}".to_string());
 
@@ -548,7 +548,7 @@ fn generate_types(input: &str, output_dir: &str) {
   lines.insert(0, prefix);
   let types_out = lines.join("\n");
   
-  // Создаем index.js файл
+  // Create the index.js file
   let mut lines: Vec<String> = vec![];
   for model in schema.models.iter() { 
     if model.name.contains(".") { continue; };

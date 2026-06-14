@@ -42,7 +42,7 @@ pub fn get_first_id_by_prefix(index_tree: &Tree, item_id: &[u8]) -> Result<Optio
   }
 }
 
-/// Итератор для опционально-обратного обхода без аллокаций
+/// Iterator for optionally-reversed traversal without allocations
 pub enum MaybeRev<I> {
   Fwd(I),
   Rev(std::iter::Rev<I>)
@@ -64,7 +64,7 @@ pub fn maybe_rev<I: DoubleEndedIterator>(iter: I, reverse: bool) -> MaybeRev<I> 
   if reverse { MaybeRev::Rev(iter.rev()) } else { MaybeRev::Fwd(iter) }
 }
 
-/// Ленивый обход ключей индексного дерева в заданном диапазоне и направлении
+/// Lazy traversal of index tree keys within a given range and direction
 pub fn range_keys_iter<'t>(
     index_tree: &'t Tree,
     start: &Option<Vec<u8>>,
@@ -75,7 +75,7 @@ pub fn range_keys_iter<'t>(
       (Some(s), Some(e)) => index_tree.range_keys(s..e),
       (Some(s), None) => index_tree.range_keys(s..),
       (None, Some(e)) => index_tree.range_keys(..e),
-      // Полный обход: диапазон от пустого ключа покрывает всё дерево
+      // Full traversal: a range from the empty key covers the whole tree
       (None, None) => index_tree.range_keys((&[] as &[u8])..),
   }?;
 
@@ -94,7 +94,7 @@ pub fn get_id_from_index_key(key: &[u8], fixed_size: Option<usize>) -> Vec<u8> {
   }
 }
 
-// Обрабатывает данные. Если элемент не подходит по условию, возвращает None
+// Processes the data. Returns None if the item does not match the condition
 pub fn process_data<'a, 'b, U, F>(
   id: &'b [u8],
   data: &'b [u8],
@@ -109,7 +109,7 @@ pub fn process_data<'a, 'b, U, F>(
   Ok(Some(decode_row(id, data, ctx, query)?))
 }
 
-// Декодирует строку вместе с includes. Фильтр должен быть проверен до вызова
+// Decodes the row together with its includes. The filter must be checked before calling
 pub fn decode_row<'a, 'b, U, F>(
   id: &'b [u8],
   data: &'b [u8],
@@ -146,8 +146,8 @@ pub fn decode_row<'a, 'b, U, F>(
   return Ok((ctx.f)(DecodeCtx { id, data, entity: query.entity, mask: &query.mask, includes, schema: ctx.schema }));
 }
 
-/// Кэш include-результатов одного вложенного запроса (id записи → результат декода).
-/// Хранится U — сейчас это JSON-строка, при переходе на бинарный формат код не меняется
+/// Cache of include results for a single nested query (record id → decode result).
+/// Stores U — currently a JSON string; the code won't change when switching to a binary format
 pub struct IncludeCache<U> {
   pub hits: u32,
   pub misses: u32,
@@ -162,13 +162,13 @@ impl<U> Default for IncludeCache<U> {
 
 pub struct TransationContext<'a, U, F> {
   pub trees: HashMap<String, Arc<Tree<'a>>>,
-  /// Любая транзакция, поддерживающая чтение. ReadTransaction и WriteTransaction
-  /// разыменовываются в &Transaction, поэтому запросы работают и внутри write-транзакции
-  /// (видят её незакоммиченные изменения — read-your-writes)
+  /// Any transaction that supports reading. ReadTransaction and WriteTransaction
+  /// dereference to &Transaction, so queries also work inside a write transaction
+  /// (they see its uncommitted changes — read-your-writes)
   pub rx: &'a Transaction,
   pub schema: &'a Schema,
   pub f: F,
-  /// Кэши include-результатов на время одного запроса, по идентичности вложенного запроса
+  /// Caches of include results for the duration of a single query, keyed by nested query identity
   pub include_cache: HashMap<usize, IncludeCache<U>>
 }
 
@@ -199,6 +199,6 @@ pub enum IncludeResult<'a, U> {
   None(&'a Field),
   One(&'a Field,U),
   Many(&'a Field,Vec<U>),
-  // Агрегация по связанным записям: форматируется на json-слое
+  // Aggregation over related records: formatted at the json layer
   Aggregate(&'a Field, &'a AggregateOp<'a>, AggregateResult)
 }

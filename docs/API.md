@@ -198,7 +198,7 @@ import { marcidb } from "marcidb-client"
 const db = marcidb("http://localhost:3000/myapp")
 ```
 
-`npx marcidb generate` produces both the typed client (from `schema.marci`) and a `.mig` migration file; `npx marcidb migrate push myapp` ships your migration files and the server replays the new ones (creating the database on first push). The client talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same set of methods:
+`npx marcidb generate` produces both the typed client (from `schema.marci`) and a `.march` migration file (a reviewable action list + a snapshot of the resulting schema); `npx marcidb migrate push myapp` ships your migration files and the server applies the new ones (creating the database on first push). The client talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same set of methods:
 
 ```ts
 db.<model>.findMany(query)        // Promise<Result[]>

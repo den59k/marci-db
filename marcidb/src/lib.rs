@@ -24,7 +24,7 @@ pub use crate::marci_db::MarciDB;
 pub use crate::transaction::MarciTransaction;
 pub use crate::error::StorageError;
 pub use crate::batch::{execute_batch, BatchError, BatchErrorKind};
-pub use crate::migrate::{diff, reconcile, apply, MigrateOp, MigrateError, MigrateApplyError};
+pub use crate::migrate::{diff, reconcile, apply, serialize_migration, migration_ops, evolve, MigrateOp, MigrateError, MigrateApplyError};
 pub use crate::snapshot::{serialize_snapshot, parse_snapshot};
 
 pub use crate::query_op::DecodeCtx;

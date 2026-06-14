@@ -6,14 +6,14 @@ use hyper_util::rt::TokioIo;
 use marcidb::MarciDB;
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_sync, handle_transaction, handle_update}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_snapshot, handle_sync, handle_transaction, handle_update}};
 
 mod handlers;
 mod errors;
 mod helpers;
 
-/// Хостит несколько БД из одной директории. БД открывается лениво при первом обращении;
-/// `$migrate` создаёт её, если ещё нет. Каждая БД под своим `RwLock` (миграция эксклюзивна, данные — shared)
+/// Hosts multiple DBs from a single directory. A DB is opened lazily on first access;
+/// `$migrate` creates it if it doesn't exist yet. Each DB has its own `RwLock` (migration is exclusive, data is shared)
 pub struct ServerContext {
     root: PathBuf,
     dbs: Mutex<HashMap<String, Arc<RwLock<MarciDB>>>>,
@@ -24,7 +24,7 @@ impl ServerContext {
         ServerContext { root, dbs: Mutex::new(HashMap::new()) }
     }
 
-    /// БД по имени. `allow_create` (для `$migrate`) создаёт пустую БД; иначе несуществующая → NotFound
+    /// DB by name. `allow_create` (for `$migrate`) creates an empty DB; otherwise a nonexistent one → NotFound
     pub fn get_db(&self, name: &str, allow_create: bool) -> Result<Arc<RwLock<MarciDB>>, ApiError> {
         if !is_valid_db_name(name) {
             return Err(ApiError::BadRequest(format!("invalid database name '{}'", name)));
@@ -40,7 +40,7 @@ impl ServerContext {
             return Err(ApiError::NotFound(format!("database '{}' not found", name)));
         }
 
-        // canopydb требует существующую директорию БД
+        // canopydb requires an existing DB directory
         std::fs::create_dir_all(&path).map_err(|e| ApiError::Internal(e.to_string()))?;
 
         let db = Arc::new(RwLock::new(MarciDB::open(path.to_str().unwrap())));
@@ -49,12 +49,12 @@ impl ServerContext {
     }
 }
 
-/// Имя БД — сегмент пути, поэтому без слешей/точек (защита от path traversal)
+/// The DB name is a path segment, so no slashes/dots (protection against path traversal)
 fn is_valid_db_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-// Публичный хэндлер — перехватывает все ошибки, hyper видит только Ok
+// Public handler — catches all errors, hyper only ever sees Ok
 pub async fn handle(
     req: Request<hyper::body::Incoming>,
     ctx: Arc<ServerContext>,
@@ -76,6 +76,11 @@ async fn handle_inner(
     let (db_name, rest) = path.split_once('/')
         .ok_or_else(|| ApiError::BadRequest("expected path /<db>/...".to_string()))?;
     let db_name = db_name.to_string();
+
+    // Current server snapshot (for client-side reconciliation) — a read, hence GET
+    if method == Method::GET && rest == "$snapshot" {
+        return handle_snapshot(ctx, db_name).await;
+    }
 
     if method == Method::POST {
         match rest {
@@ -117,7 +122,7 @@ async fn main() {
     fs::create_dir_all(&data_dir).await.unwrap();
     let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(PathBuf::from(data_dir)));
 
-    // 0.0.0.0 — чтобы сервер был доступен снаружи контейнера; порт из env PORT
+    // 0.0.0.0 — so the server is reachable from outside the container; port from env PORT
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await.unwrap();

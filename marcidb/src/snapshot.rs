@@ -1,22 +1,23 @@
-//! Materialized snapshot схемы: текстовая проекция ПЛОСКОГО массива `Schema.models` —
-//! ровно того представления, что marcidb держит в памяти. struct уже развёрнуты в модели
-//! (`Parent.field` с `@parent_id`), enum впечатан в поля (дискриминант + payload с `@variant`),
-//! ссылки несут полный резолвнутый `RefInfo`. Снапшот — источник истины для diff/apply миграций.
+//! Materialized snapshot of the schema: a textual projection of the FLAT `Schema.models`
+//! array — exactly the representation that marcidb keeps in memory. structs are already
+//! expanded into models (`Parent.field` with `@parent_id`), enum is inlined into fields
+//! (discriminant + payload with `@variant`), refs carry the fully resolved `RefInfo`.
+//! The snapshot is the source of truth for diff/apply of migrations.
 //!
-//! Что ПИНИТСЯ (физика/история, парсер сам бы выдал по порядку объявления — нестабильно):
-//!   слоты Body-полей, id вариантов enum, локация, биндинги ссылок.
-//! Что ВЫВОДИТСЯ на load (позиционная разводка имён, без принятия решений):
-//!   model_index, rev_field_idx, parent_index, индексные деревья, байты default, payload_offset.
+//! What is PINNED (physics/history, which the parser would emit in declaration order — unstable):
+//!   Body field slots, enum variant ids, location, ref bindings.
+//! What is DERIVED on load (positional name resolution, no decisions made):
+//!   model_index, rev_field_idx, parent_index, index trees, default bytes, payload_offset.
 
 use crate::schema::{
   Attribute, DeleteConstraint, EnumInfo, FieldCustomFormat, FieldLocation, FieldType,
   PrimitiveFieldType, RefBinding, Schema,
 };
 
-// ─────────────────────────────── сериализация ───────────────────────────────
+// ─────────────────────────────── serialization ───────────────────────────────
 
-/// Канонический текст снапшота из резолвнутой `Schema`. Детерминированный порядок:
-/// entities как в массиве, поля как в entity, варианты enum по id.
+/// Canonical snapshot text from a resolved `Schema`. Deterministic order:
+/// entities as in the array, fields as in the entity, enum variants by id.
 pub fn serialize_snapshot(schema: &Schema) -> String {
   let mut out = String::new();
   for (i, entity) in schema.models.iter().enumerate() {
@@ -34,21 +35,21 @@ pub fn serialize_snapshot(schema: &Schema) -> String {
   out
 }
 
-fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crate::schema::Field) -> String {
+pub(crate) fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crate::schema::Field) -> String {
   let mut tokens: Vec<String> = vec![field.name.clone(), serialize_type(schema, field)];
 
   if field.nullable {
     tokens.push("@nullable".to_string());
   }
 
-  // локация
+  // location
   match &field.location {
     FieldLocation::Key { .. } => tokens.push("@id".to_string()),
     FieldLocation::Body { offset_pos } => tokens.push(format!("@slot({})", offset_pos)),
     FieldLocation::Virtual => tokens.push("@virtual".to_string()),
   }
 
-  // биндинг ссылки (запинен)
+  // ref binding (pinned)
   if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
     tokens.push(serialize_binding(&ref_info.binding));
     if let Some(rev_idx) = ref_info.rev_field_idx {
@@ -60,7 +61,7 @@ fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crat
     }
   }
 
-  // @variant(disc: a|b) — поле-payload варианта enum
+  // @variant(disc: a|b) — payload field of an enum variant
   if let crate::schema::FieldExistsCondition::EnumValue { field_index, variants } = &field.condition {
     let disc = &entity.fields[*field_index];
     let FieldType::Enum(enum_info) = &disc.ty else { panic!("EnumValue condition points to non-enum field") };
@@ -70,7 +71,7 @@ fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crat
     tokens.push(format!("@variant({}:{})", disc.name, names.join("|")));
   }
 
-  // структурные атрибуты (id → локация; bind → запинен в биндинге; оба пропускаем)
+  // structural attributes (id → location; bind → pinned in the binding; both are skipped)
   for attr in field.attributes.iter() {
     if let Some(rendered) = serialize_attr(attr) {
       tokens.push(rendered);
@@ -93,7 +94,7 @@ pub(crate) fn serialize_type(schema: &Schema, field: &crate::schema::Field) -> S
   }
 }
 
-/// `Enum(creator=0, admin=1)` — имена с явными id, по возрастанию id (канонический порядок)
+/// `Enum(creator=0, admin=1)` — names with explicit ids, ordered by ascending id (canonical order)
 fn serialize_enum_type(enum_info: &EnumInfo) -> String {
   let mut pairs: Vec<(u16, &String)> = enum_info.variants_names_map.iter().map(|(id, name)| (*id, name)).collect();
   pairs.sort_by_key(|(id, _)| *id);
@@ -109,8 +110,8 @@ fn serialize_binding(binding: &RefBinding) -> String {
   }
 }
 
-/// Структурные атрибуты, которые нужны для повторной сборки кэшей на load.
-/// `Id` → даёт локация; `BindUnresolved` → заменён запиненным биндингом; оба → None.
+/// Structural attributes needed to rebuild caches on load.
+/// `Id` → provided by location; `BindUnresolved` → replaced by the pinned binding; both → None.
 fn serialize_attr(attr: &Attribute) -> Option<String> {
   Some(match attr {
     Attribute::Id | Attribute::BindUnresolved(_) => return None,
@@ -146,12 +147,12 @@ fn delete_constraint_name(c: &DeleteConstraint) -> &'static str {
   }
 }
 
-// ─────────────────────────────── парсинг ───────────────────────────────
+// ─────────────────────────────── parsing ───────────────────────────────
 
 use crate::schema::{Entity, Field, FieldExistsCondition, RefInfo, SchemaError};
 use std::collections::HashMap;
 
-/// Промежуточный тип поля — ссылки/enum хранят имена, индексы разводятся во 2-й фазе
+/// Intermediate field type — refs/enum hold names, indices are resolved in the 2nd phase
 enum SnapType {
   Primitive(PrimitiveFieldType),
   PrimitiveList(PrimitiveFieldType, Option<usize>),
@@ -160,7 +161,7 @@ enum SnapType {
   Enum(Vec<(String, u16)>),
 }
 
-/// Поле снапшота в промежуточной форме (имена вместо индексов)
+/// A snapshot field in intermediate form (names instead of indices)
 struct SnapField {
   name: String,
   ty: SnapType,
@@ -168,9 +169,9 @@ struct SnapField {
   location: FieldLocation,
   attributes: Vec<Attribute>,
   binding: Option<RefBinding>,
-  rev: Option<String>,      // имя rev-поля в целевой entity
-  parent: Option<String>,   // имя parent-entity (для struct-ссылок)
-  variant_of: Option<(String, Vec<String>)>, // (имя дискриминанта, имена вариантов)
+  rev: Option<String>,      // name of the rev field in the target entity
+  parent: Option<String>,   // name of the parent entity (for struct refs)
+  variant_of: Option<(String, Vec<String>)>, // (discriminant name, variant names)
 }
 
 struct SnapEntity {
@@ -178,8 +179,8 @@ struct SnapEntity {
   fields: Vec<SnapField>,
 }
 
-/// Разбирает текст снапшота обратно в плоскую `Schema`. Без раскрытия сахара и без переназначения
-/// слотов/биндингов — всё это уже запинено в тексте; на load делаем только разводку имён в индексы.
+/// Parses snapshot text back into a flat `Schema`. Without expanding sugar and without reassigning
+/// slots/bindings — all of that is already pinned in the text; on load we only resolve names into indices.
 pub fn parse_snapshot(text: &str) -> Result<Schema, SchemaError> {
   let snap_entities = parse_blocks(text)?;
   let name_to_idx: HashMap<&str, usize> = snap_entities.iter().enumerate().map(|(i, e)| (e.name.as_str(), i)).collect();
@@ -191,7 +192,7 @@ pub fn parse_snapshot(text: &str) -> Result<Schema, SchemaError> {
     let mut fields: Vec<Field> = Vec::with_capacity(se.fields.len());
 
     for sf in se.fields.iter() {
-      // Key{index} назначается по порядку ключевых полей внутри entity
+      // Key{index} is assigned by the order of key fields within the entity
       let location = match &sf.location {
         FieldLocation::Key { .. } => { let i = key_index; key_index += 1; FieldLocation::Key { index: i } }
         other => other.clone(),
@@ -207,9 +208,9 @@ pub fn parse_snapshot(text: &str) -> Result<Schema, SchemaError> {
         location,
         nullable: sf.nullable,
         attributes: sf.attributes.clone(),
-        default_value: None,           // кэш — восстановит rebuild_caches ниже
-        indexes: vec![],               // кэш — восстановит rebuild_caches ниже
-        condition: FieldExistsCondition::None, // enum-условия заполнит resolve_variants (нужны индексы полей)
+        default_value: None,           // cache — restored by rebuild_caches below
+        indexes: vec![],               // cache — restored by rebuild_caches below
+        condition: FieldExistsCondition::None, // enum conditions filled by resolve_variants (needs field indices)
         format,
       });
     }
@@ -226,10 +227,10 @@ pub fn parse_snapshot(text: &str) -> Result<Schema, SchemaError> {
     models.push(entity);
   }
 
-  // 2-я фаза: enum-условия (нужны индексы полей и map вариантов дискриминанта)
+  // 2nd phase: enum conditions (needs field indices and the discriminant's variant map)
   resolve_variants(&mut models, &snap_entities)?;
 
-  // Восстанавливаем вычисляемые кэши (default-байты, индексы, counter_idx, rev_dependencies)
+  // Rebuild the computed caches (default bytes, indexes, counter_idx, rev_dependencies)
   crate::schema::rebuild_caches(&mut models)?;
 
   Ok(Schema { models })
@@ -263,10 +264,10 @@ fn build_field_type(sf: &SnapField, entity_name: &str, name_to_idx: &HashMap<&st
   })
 }
 
-/// Проставляет `@rev` (индексы целевых полей) и enum-условия + наполняет `variants` дискриминанта.
-/// Чтение и запись разнесены на два прохода — иначе borrow-конфликт на `models`.
+/// Sets `@rev` (target field indices) and enum conditions + populates the discriminant's `variants`.
+/// Reads and writes are split into two passes — otherwise a borrow conflict on `models`.
 fn resolve_variants(models: &mut [Entity], snap: &[SnapEntity]) -> Result<(), SchemaError> {
-  // rev_field_idx: имя rev-поля в целевой entity → индекс (models[ei] == snap[ei], порядок сохранён)
+  // rev_field_idx: name of the rev field in the target entity → index (models[ei] == snap[ei], order preserved)
   let mut rev_updates: Vec<(usize, usize, usize)> = vec![];
   for (ei, se) in snap.iter().enumerate() {
     for (fi, sf) in se.fields.iter().enumerate() {
@@ -286,7 +287,7 @@ fn resolve_variants(models: &mut [Entity], snap: &[SnapEntity]) -> Result<(), Sc
     }
   }
 
-  // enum-условия: @variant(disc:a|b) → EnumValue + наполнение variants дискриминанта
+  // enum conditions: @variant(disc:a|b) → EnumValue + populating the discriminant's variants
   let mut variant_updates: Vec<(usize, usize, usize, Vec<u16>)> = vec![];
   for (ei, se) in snap.iter().enumerate() {
     for (fi, sf) in se.fields.iter().enumerate() {
@@ -315,7 +316,7 @@ fn resolve_variants(models: &mut [Entity], snap: &[SnapEntity]) -> Result<(), Sc
   Ok(())
 }
 
-// ─────────── разбор текста в промежуточную форму ───────────
+// ─────────── parsing text into intermediate form ───────────
 
 fn parse_blocks(text: &str) -> Result<Vec<SnapEntity>, SchemaError> {
   let mut entities = vec![];
@@ -340,7 +341,7 @@ fn parse_blocks(text: &str) -> Result<Vec<SnapEntity>, SchemaError> {
 }
 
 fn parse_field_line(line: &str) -> Result<SnapField, SchemaError> {
-  // name и type — первые два токена без внутренних пробелов; остальное — @-атрибуты
+  // name and type are the first two tokens without internal spaces; the rest are @-attributes
   let line = line.trim();
   let (name, rest) = line.split_once(char::is_whitespace)
     .ok_or_else(|| SchemaError(format!("snapshot: expected '<name> <type>' in: \"{}\"", line)))?;
@@ -369,8 +370,8 @@ fn parse_field_line(line: &str) -> Result<SnapField, SchemaError> {
   Ok(sf)
 }
 
-/// Разбивает строку атрибутов на `@`-токены, НЕ дробя по `@` внутри скобок
-/// (значение может содержать `@`, напр. `@rev(@parent_id)`)
+/// Splits the attribute string into `@` tokens, WITHOUT splitting on `@` inside parentheses
+/// (a value may contain `@`, e.g. `@rev(@parent_id)`)
 fn split_attr_tokens(s: &str) -> Vec<String> {
   let mut tokens = vec![];
   let mut cur = String::new();
@@ -525,8 +526,8 @@ struct UserRole {
 }
 ";
 
-  /// Round-trip: snapshot материализованной схемы → parse → re-serialize даёт тот же текст.
-  /// Идемпотентность доказывает, что parse_snapshot восстановил всё, что читает serialize.
+  /// Round-trip: snapshot of a materialized schema → parse → re-serialize yields the same text.
+  /// Idempotence proves that parse_snapshot restored everything that serialize reads.
   #[test]
   fn snapshot_round_trip_root() {
     let schema = parse_schema(ROOT_SCHEMA);
@@ -535,10 +536,10 @@ struct UserRole {
 
     let reparsed = parse_snapshot(&s1).unwrap();
     let s2 = serialize_snapshot(&reparsed);
-    assert_eq!(s1, s2, "round-trip разошёлся:\n--- s1 ---\n{}\n--- s2 ---\n{}", s1, s2);
+    assert_eq!(s1, s2, "round-trip diverged:\n--- s1 ---\n{}\n--- s2 ---\n{}", s1, s2);
   }
 
-  /// Точечная проверка, что parse_snapshot восстановил резолвнутое состояние (не только текст)
+  /// Targeted check that parse_snapshot restored the resolved state (not just the text)
   #[test]
   fn snapshot_parse_rebuilds_resolved_state() {
     let schema = parse_snapshot(&serialize_snapshot(&parse_schema(ROOT_SCHEMA))).unwrap();
@@ -546,19 +547,19 @@ struct UserRole {
     let by_name: std::collections::HashMap<&str, usize> =
       schema.models.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
 
-    // struct развёрнут в синтетические модели
+    // struct expanded into synthetic models
     assert!(by_name.contains_key("User.info"));
     assert!(by_name.contains_key("Project.users"));
 
-    // enum впечатан в Project.users: дискриминант role + payload-поля level/sign с условиями
+    // enum inlined into Project.users: discriminant role + payload fields level/sign with conditions
     let pu = &schema.models[by_name["Project.users"]];
     let role = pu.fields.iter().find(|f| f.name == "role").unwrap();
-    let FieldType::Enum(ei) = &role.ty else { panic!("role не enum") };
+    let FieldType::Enum(ei) = &role.ty else { panic!("role is not an enum") };
     assert_eq!(ei.variants_map.len(), 2);
     let sign = pu.fields.iter().find(|f| f.name == "sign").unwrap();
     assert!(matches!(sign.condition, FieldExistsCondition::EnumValue { .. }));
 
-    // биндинг ссылки запинен: User.posts — IndexTree, Post.author — FieldValue
+    // ref binding is pinned: User.posts — IndexTree, Post.author — FieldValue
     let user = &schema.models[by_name["User"]];
     let posts = user.fields.iter().find(|f| f.name == "posts").unwrap();
     assert!(matches!(&posts.ty, FieldType::RefList(ri) if matches!(ri.binding, RefBinding::IndexTree(_))));

@@ -10,7 +10,7 @@ pub enum ApiError {
     Internal(String),
 }
 
-// Конвертация ошибки → Response — один раз и навсегда
+// Error → Response conversion — once and for all
 impl ApiError {
     pub fn into_response(self) -> Response<Full<Bytes>> {
         let (status, msg) = match self {
@@ -24,7 +24,7 @@ impl ApiError {
     }
 }
 
-// MarciDbError → ApiError автоматически через ?
+// MarciDbError → ApiError automatically via ?
 impl From<InsertError> for ApiError {
     fn from(e: InsertError) -> Self {
         ApiError::Internal(format!("{:?}", e))

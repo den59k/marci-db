@@ -136,7 +136,7 @@ pub fn parse_inject_attrs(s: &str) -> Vec<(String,String)> {
 pub fn split_once_end(s: &str, c: char) -> Option<(&str, &str)> {
     s.rfind(c).map(|idx| {
         let (left, right_with_char) = s.split_at(idx);
-        let right = &right_with_char[c.len_utf8()..]; // убрать сам разделитель
+        let right = &right_with_char[c.len_utf8()..]; // remove the separator itself
         (left, right)
     })
 }

@@ -64,8 +64,8 @@ impl Field {
             ty: FieldType::Primitive(PrimitiveFieldType::UInt64),
             nullable: false,
             location: FieldLocation::Key { index: 0 },
-            // @default(autoincrement()) делает дефолт явным атрибутом — так он переживает
-            // сериализацию в снапшот (serialize_snapshot рендерит default из атрибутов)
+            // @default(autoincrement()) makes the default an explicit attribute — this way it survives
+            // serialization into a snapshot (serialize_snapshot renders default from attributes)
             attributes: vec![Attribute::Default("autoincrement()".to_string())],
             indexes: vec![],
             default_value: Some(FieldDefault::Counter(0)),
@@ -145,12 +145,12 @@ impl fmt::Display for PrimitiveFieldType {
 #[derive(Debug, Clone)]
 pub enum FieldType {
     Primitive(PrimitiveFieldType),
-    // Unresolved тип используется только при парсинге
+    // The Unresolved type is used only during parsing
     RefUnresolved(String),
     RefListUnresolved(String),
-    // Ref хранит в себе ID от model_index
+    // Ref stores the ID from model_index
     Ref(RefInfo),
-    // RefList - это всегда Virtual поле, то есть он хранит инфо только в индексе
+    // RefList is always a Virtual field, i.e. it stores info only in the index
     RefList(RefInfo),
     PrimitiveList(PrimitiveFieldType, Option<usize>),
     Enum(EnumInfo)
@@ -160,7 +160,7 @@ pub enum FieldType {
 pub struct EnumInfo {
     pub variants: HashMap<u16,Vec<usize>>,
     pub variants_map: HashMap<String,u16>,
-    pub variants_names_map: HashMap<u16,String> // Обратная map к variants_map
+    pub variants_names_map: HashMap<u16,String> // Inverse map of variants_map
 }
 
 impl EnumInfo {
@@ -194,7 +194,7 @@ impl RefInfo {
     }
 }
 
-/// Место хранения связи между таблицами
+/// The storage location of the relation between tables
 #[derive(Debug, Clone,PartialEq)]
 pub enum RefBinding {
     CurrentId,
@@ -203,8 +203,8 @@ pub enum RefBinding {
 }
 
 #[derive(Debug,Clone)]
-/// Структура для проверки существования поля в Entity.
-/// Общее поле enum принадлежит нескольким вариантам сразу
+/// Struct for checking the existence of a field in an Entity.
+/// A shared enum field belongs to several variants at once
 pub enum FieldExistsCondition {
     None,
     EnumValue { field_index: usize, variants: Vec<u16> }
@@ -217,7 +217,7 @@ fn is_valid_string(s: &str) -> bool {
 }
 
 pub fn parse_field_raw(line: &str) -> Result<Field, SchemaError> {
-    // имя и тип
+    // name and type
     let mut parts = line.split_whitespace();
 
     let name = parts.next()
@@ -234,12 +234,12 @@ pub fn parse_field_raw(line: &str) -> Result<Field, SchemaError> {
 
     let nullable = type_str.ends_with('?') || matches!(ty, FieldType::RefListUnresolved(_));
 
-    // атрибуты: всё, что осталось в строке, интерпретируем как атрибуты
-    // Каждое слово, начинающееся с '@', — отдельный атрибут
+    // attributes: everything left in the line is interpreted as attributes
+    // Each word starting with '@' is a separate attribute
     let attributes: Vec<Attribute> = line
         .split('@')
-        .skip(1)         // игнорируем часть до первого @
-        .map(str::trim)  // убираем пробелы
+        .skip(1)         // ignore the part before the first @
+        .map(str::trim)  // strip whitespace
         .filter(|s| !s.is_empty())
         .map(parse_attribute)
         .collect::<Result<Vec<_>, _>>()?;

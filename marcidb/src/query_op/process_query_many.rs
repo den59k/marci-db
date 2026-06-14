@@ -6,19 +6,19 @@ pub fn process_query_many<'a, U, F>
   process_query_many_limited(query, ctx, parent, None)
 }
 
-/// hard_limit — дополнительный потолок количества строк (используется findFirst)
+/// hard_limit — additional cap on the number of rows (used by findFirst)
 pub fn process_query_many_limited<'a, U, F>
   (query: &'a QueryOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>, hard_limit: Option<usize>) -> Result<Vec<U>, StorageError>
   where U: Clone, F: Fn(DecodeCtx<U>) -> U {
 
-  // Граница курсора для путей без позиционирования диапазоном:
-  // post_sort сравнивает ключи сортировки, ленивые id-сканы — сами id
+  // Cursor boundary for paths without range positioning:
+  // post_sort compares sort keys, lazy id scans compare the ids themselves
   let mut cursor_gate: Option<Vec<u8>> = None;
   if let Some(cursor_id) = &query.cursor {
     if query.post_sort {
       let Some(sort) = &query.sort else { return Ok(vec![]) };
       let tree = ctx.get_tree(&query.entity.name)?;
-      // Строка курсора удалена — позиция в порядке сортировки неизвестна
+      // The cursor row was deleted — its position in sort order is unknown
       let Some(row) = tree.get(cursor_id)? else { return Ok(vec![]) };
       cursor_gate = Some(make_sort_key(query.entity, sort.field(), cursor_id, &row, ctx.schema));
     } else {
@@ -46,21 +46,21 @@ pub fn process_query_many_limited<'a, U, F>
       let index_tree = ctx.get_tree(tree_name)?;
       let tree = ctx.get_tree(&query.entity.name)?;
 
-      // Курсор при скане индекса: продолжаем диапазон от ключа строки курсора
+      // Cursor during an index scan: continue the range from the cursor row's key
       let cursor_bound: Option<Vec<u8>>;
       let (start, end) = if let Some(cursor_id) = &query.cursor && !query.post_sort {
-        // Строка курсора удалена — её позиция в индексе неизвестна
+        // The cursor row was deleted — its position in the index is unknown
         let Some(row) = tree.get(cursor_id)? else { return Ok(vec![]) };
         let sort_field = query.sort.as_ref().unwrap().field();
         let Some(value) = get_data(query.entity, sort_field, cursor_id, &row, ctx.schema) else { return Ok(vec![]) };
         let mut key = make_index_cursor_key(sort_field, value, cursor_id);
 
         if query.reverse {
-          // desc: всё строго до ключа курсора (правая граница диапазона эксклюзивна)
+          // desc: everything strictly before the cursor key (the range's right bound is exclusive)
           cursor_bound = Some(key);
           (start, &cursor_bound)
         } else {
-          // asc: минимальный ключ строго после курсора
+          // asc: smallest key strictly after the cursor
           key.push(0);
           cursor_bound = Some(key);
           (&cursor_bound, end)
@@ -75,7 +75,7 @@ pub fn process_query_many_limited<'a, U, F>
           let value = tree.get(&id)?.unwrap();
           Ok((id, value))
         });
-      // Без post_sort курсор уже учтён границами диапазона; id-граница здесь неприменима
+      // Without post_sort the cursor is already accounted for by the range bounds; an id boundary is not applicable here
       let gate = if query.post_sort { cursor_gate } else { None };
       collect_rows(iter, ctx, query, hard_limit, gate)
     },
@@ -90,13 +90,13 @@ pub fn process_query_many_limited<'a, U, F>
     None => {
       let tree = ctx.get_tree(&query.entity.name)?;
 
-      // Курсор в порядке id: id и есть ключ первичного дерева — позиционируемся диапазоном
+      // Cursor in id order: the id is the primary tree's key — position via a range
       if let Some(cursor_id) = &query.cursor && !query.post_sort {
         let iter = if query.reverse {
           maybe_rev(tree.range(..cursor_id.as_slice())?, true)
         } else {
           let mut start = cursor_id.clone();
-          start.push(0); // минимальный ключ строго после курсора
+          start.push(0); // smallest key strictly after the cursor
           maybe_rev(tree.range(start.as_slice()..)?, false)
         };
         return collect_rows(iter, ctx, query, hard_limit, None);
@@ -117,9 +117,9 @@ fn effective_limit(query: &QueryOp, hard_limit: Option<usize>) -> usize {
   }
 }
 
-/// Прогоняет строки скана через фильтр, курсор, skip/limit и декод.
-/// Ленивый путь даёт ранний выход по limit; post_sort сортирует строки в памяти до декода.
-/// cursor_gate: в post_sort-пути — ключ сортировки строки курсора, в ленивом — её id
+/// Runs scanned rows through the filter, cursor, skip/limit and decode.
+/// The lazy path exits early on limit; post_sort sorts rows in memory before decoding.
+/// cursor_gate: in the post_sort path — the cursor row's sort key, in the lazy path — its id
 fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F>, query: &'a QueryOp, hard_limit: Option<usize>, cursor_gate: Option<Vec<u8>>) -> Result<Vec<U>, StorageError>
   where U: Clone, F: Fn(DecodeCtx<U>) -> U, I: Iterator<Item = Result<(A, B), canopydb::Error>>, A: AsRef<[u8]>, B: AsRef<[u8]> {
 
@@ -132,7 +132,7 @@ fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F
   if query.post_sort && let Some(sort) = &query.sort {
     let sort_field = sort.field();
 
-    // Собираем прошедшие фильтр строки вместе с ключом сортировки
+    // Collect rows that passed the filter together with their sort key
     let mut rows: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = vec![];
     for item in iter {
       let (id, data) = item?;
@@ -141,7 +141,7 @@ fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F
         continue;
       }
       let key = make_sort_key(query.entity, sort_field, id, data, ctx.schema);
-      // Оставляем только строки строго после позиции курсора в порядке сортировки
+      // Keep only rows strictly after the cursor position in sort order
       if let Some(gate) = &cursor_gate {
         let after_cursor = if sort.is_desc() { &key < gate } else { &key > gate };
         if !after_cursor { continue; }
@@ -157,13 +157,13 @@ fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F
     return Ok(results);
   }
 
-  // Ленивый путь: курсор → фильтр → skip → декод, ранний выход по limit
+  // Lazy path: cursor → filter → skip → decode, with an early exit on limit
   let mut results = Vec::new();
   let mut skipped = 0;
   for item in iter {
     let (id, data) = item?;
     let (id, data) = (id.as_ref(), data.as_ref());
-    // Скан идёт в порядке id — отбрасываем строки до позиции курсора
+    // The scan runs in id order — drop rows before the cursor position
     if let Some(gate) = &cursor_gate {
       let after_cursor = if query.reverse { id < gate.as_slice() } else { id > gate.as_slice() };
       if !after_cursor { continue; }

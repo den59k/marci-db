@@ -71,7 +71,7 @@ fn enum_variant_update_test() {
     assert_eq!(resp, json!([ { "name": "Alice", "type": "pro", "sign": "alice-sign" } ]));
   }
 
-  // Смена варианта enum очищает поля старого варианта
+  // Changing the enum variant clears the fields of the old variant
   {
     update_data(&db, "Account", &account, json!({ "type": "basic" }));
 
@@ -79,7 +79,7 @@ fn enum_variant_update_test() {
     assert_eq!(resp, json!([ { "name": "Alice", "type": "basic" } ]));
   }
 
-  // Старое значение sign не "воскресает" при обратной смене варианта
+  // The old sign value does not "come back to life" when switching the variant back
   {
     update_data(&db, "Account", &account, json!({ "type": "pro" }));
 
@@ -87,7 +87,7 @@ fn enum_variant_update_test() {
     assert_eq!(resp, json!([ { "name": "Alice", "type": "pro", "sign": null } ]));
   }
 
-  // Обновление поля чужого варианта игнорируется и не пишет данные в body
+  // Updating a field of a foreign variant is ignored and does not write data into the body
   {
     update_data(&db, "Account", &account, json!({ "type": "basic" }));
     update_data(&db, "Account", &account, json!({ "sign": "sneaky" }));
@@ -100,7 +100,7 @@ fn enum_variant_update_test() {
     assert_eq!(resp, json!([ { "sign": null } ]));
   }
 
-  // Смена варианта вместе с установкой его полей в одном update
+  // Changing the variant together with setting its fields in a single update
   {
     update_data(&db, "Account", &account, json!({ "type": "pro", "sign": "new-sign" }));
 
@@ -140,7 +140,7 @@ fn enum_shared_field_update_test() {
     assert_eq!(resp, json!([ { "type": "business", "sign": "alice-sign", "company": "ACME" } ]));
   }
 
-  // Смена варианта внутри группы общего поля: company очищается, sign перезаписывается новым payload
+  // Changing the variant within a shared-field group: company is cleared, sign is overwritten with the new payload
   {
     update_data(&db, "Account", &account, json!({ "type": "pro", "sign": "pro-sign" }));
 
@@ -148,7 +148,7 @@ fn enum_shared_field_update_test() {
     assert_eq!(resp, json!([ { "type": "pro", "sign": "pro-sign" } ]));
   }
 
-  // Общее поле не очищается при смене внутри группы, даже если не передано
+  // The shared field is not cleared when switching within the group, even if not provided
   {
     update_data(&db, "Account", &account, json!({ "type": "business", "company": "ACME" }));
 
@@ -156,7 +156,7 @@ fn enum_shared_field_update_test() {
     assert_eq!(resp, json!([ { "type": "business", "sign": "pro-sign", "company": "ACME" } ]));
   }
 
-  // Смена на вариант вне группы очищает общее поле
+  // Switching to a variant outside the group clears the shared field
   {
     update_data(&db, "Account", &account, json!({ "type": "basic" }));
 
@@ -164,7 +164,7 @@ fn enum_shared_field_update_test() {
     assert_eq!(resp, json!([ { "type": "basic" } ]));
   }
 
-  // Общее поле не "воскресает" при возврате в группу
+  // The shared field does not "come back to life" when returning to the group
   {
     update_data(&db, "Account", &account, json!({ "type": "pro" }));
 
@@ -172,7 +172,7 @@ fn enum_shared_field_update_test() {
     assert_eq!(resp, json!([ { "type": "pro", "sign": null } ]));
   }
 
-  // Обновление общего поля без смены варианта работает из любого варианта группы
+  // Updating the shared field without changing the variant works from any variant in the group
   {
     update_data(&db, "Account", &account, json!({ "sign": "updated-sign" }));
 
@@ -180,7 +180,7 @@ fn enum_shared_field_update_test() {
     assert_eq!(resp, json!([ { "type": "pro", "sign": "updated-sign" } ]));
   }
 
-  // Вне группы обновление общего поля игнорируется
+  // Outside the group, updating the shared field is ignored
   {
     update_data(&db, "Account", &account, json!({ "type": "basic" }));
     update_data(&db, "Account", &account, json!({ "sign": "sneaky" }));
