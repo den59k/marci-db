@@ -1,7 +1,7 @@
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex, RwLock}};
 
 use http_body_util::Full;
-use hyper::{Method, Request, Response, body::Bytes, server::conn::http1, service::service_fn};
+use hyper::{Method, Request, Response, StatusCode, body::Bytes, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use marcidb::MarciDB;
 use tokio::{fs, net::TcpListener};
@@ -54,14 +54,20 @@ fn is_valid_db_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-// Public handler — catches all errors, hyper only ever sees Ok
+// Public handler — catches all errors (hyper only ever sees Ok) and logs the request
 pub async fn handle(
     req: Request<hyper::body::Incoming>,
     ctx: Arc<ServerContext>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let start = std::time::Instant::now();
+
     let response = handle_inner(req, ctx)
         .await
         .unwrap_or_else(|e| e.into_response());
+
+    log_request(&method, &path, response.status(), start.elapsed());
     Ok(response)
 }
 
@@ -119,29 +125,94 @@ async fn handle_inner(
 #[tokio::main]
 async fn main() {
     let data_dir = std::env::var("MARCI_DATA").unwrap_or_else(|_| "./data".to_string());
-    fs::create_dir_all(&data_dir).await.unwrap();
-    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(PathBuf::from(data_dir)));
+    if let Err(e) = fs::create_dir_all(&data_dir).await {
+        eprintln!("MarciDB Server: cannot create data dir '{}': {}", data_dir, e);
+        std::process::exit(1);
+    }
+    let root = PathBuf::from(&data_dir);
+    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(root.clone()));
 
     // 0.0.0.0 — so the server is reachable from outside the container; port from env PORT
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("MarciDB Server: failed to bind {} ({}). Is the port already in use?", addr, e);
+            std::process::exit(1);
+        }
+    };
 
-    println!("MarciDB is running on http://{}", addr);
+    print_banner(&addr, &root, &list_databases(&root));
 
     loop {
-        let (stream, _) = listener.accept().await.unwrap();
-        let io = TokioIo::new(stream);
-        let ctx = ctx.clone();
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(conn) => conn,
+                    Err(e) => { eprintln!("  accept error: {}", e); continue; }
+                };
+                let io = TokioIo::new(stream);
+                let ctx = ctx.clone();
 
-        tokio::task::spawn(async move {
-            let resp = http1::Builder::new()
-                .serve_connection(io, service_fn(move |req| { handle(req, ctx.clone()) }))
-                .await;
+                tokio::task::spawn(async move {
+                    let resp = http1::Builder::new()
+                        .serve_connection(io, service_fn(move |req| { handle(req, ctx.clone()) }))
+                        .await;
 
-            if let Err(err) = resp {
-                eprintln!("Error serving connection: {:?}", err);
+                    if let Err(err) = resp {
+                        eprintln!("  connection error: {}", err);
+                    }
+                });
             }
-        });
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n  Shutting down MarciDB Server. Bye!");
+                break;
+            }
+        }
     }
+}
+
+/// Startup banner: version, where to reach it, and what's already on disk
+fn print_banner(addr: &SocketAddr, data_dir: &std::path::Path, dbs: &[String]) {
+    println!();
+    println!("  MarciDB Server v{}", env!("CARGO_PKG_VERSION"));
+    println!("  ----------------------------------------");
+    println!("  Local      http://localhost:{}", addr.port());
+    println!("  Network    http://{}", addr);
+    println!("  Data dir   {}", display_path(data_dir));
+    if dbs.is_empty() {
+        println!("  Databases  none yet (created on first migration)");
+    } else {
+        println!("  Databases  {} ({})", dbs.len(), dbs.join(", "));
+    }
+    println!();
+    println!("  Ready. Press Ctrl+C to stop.");
+    println!();
+}
+
+/// One line per request: `<time>  <method>  <status>  <ms>  <path>`
+fn log_request(method: &Method, path: &str, status: StatusCode, elapsed: std::time::Duration) {
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    println!("  {ts}  {m:<6} {code:>3}  {ms:>6.1} ms  {path}", m = method.as_str(), code = status.as_u16());
+}
+
+/// Names of databases already present in the data directory (each DB is a sub-directory)
+fn list_databases(root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Absolute path for display, stripped of Windows' `\\?\` extended-length prefix
+fn display_path(p: &std::path::Path) -> String {
+    let s = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).display().to_string();
+    s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
