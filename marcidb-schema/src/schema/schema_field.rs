@@ -13,7 +13,9 @@ pub enum FieldLocation {
 pub enum FieldIndex {
     Value { tree_name: String, unique: bool },
     Number { tree_name: String, unique: bool, ty: FieldIndexNum },
-    Custom { tree_name: String, index_idx: usize }
+    /// A module-provided index (vector, full-text, …). `name` selects the provider at runtime;
+    /// `args` is the provider-specific config carried verbatim from `@custom(name, args)`.
+    Custom { tree_name: String, name: String, args: String }
 }
 
 impl FieldIndex {

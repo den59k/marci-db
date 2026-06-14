@@ -56,8 +56,9 @@ fn diff_fields(
     for f in new_fields.iter() {
         if !old_by.contains_key(f.name.as_str()) {
             ops.push(MigrateOp::AddField { entity: entity.to_string(), field: f.name.clone() });
-            if let Some(unique) = index_kind(f) {
-                ops.push(MigrateOp::AddIndex { entity: entity.to_string(), field: f.name.clone(), unique });
+            let sig = index_sig(f);
+            if sig_has_index(&sig) {
+                ops.push(MigrateOp::AddIndex { entity: entity.to_string(), field: f.name.clone(), unique: sig_unique(&sig) });
             }
         }
     }
@@ -106,14 +107,14 @@ fn diff_fields(
             ops.push(MigrateOp::AlterField { entity: entity.to_string(), field: f.name.clone() });
         }
 
-        // Index: drop the old one / add the new one
-        let (old_idx, new_idx) = (index_kind(old_f), index_kind(f));
-        if old_idx != new_idx {
-            if let Some(unique) = old_idx {
-                ops.push(MigrateOp::DropIndex { entity: entity.to_string(), field: f.name.clone(), unique });
+        // Index: drop the old one / add the new one (covers regular and `@custom` module indexes)
+        let (old_sig, new_sig) = (index_sig(old_f), index_sig(f));
+        if old_sig != new_sig {
+            if sig_has_index(&old_sig) {
+                ops.push(MigrateOp::DropIndex { entity: entity.to_string(), field: f.name.clone(), unique: sig_unique(&old_sig) });
             }
-            if let Some(unique) = new_idx {
-                ops.push(MigrateOp::AddIndex { entity: entity.to_string(), field: f.name.clone(), unique });
+            if sig_has_index(&new_sig) {
+                ops.push(MigrateOp::AddIndex { entity: entity.to_string(), field: f.name.clone(), unique: sig_unique(&new_sig) });
             }
         }
     }
@@ -121,8 +122,9 @@ fn diff_fields(
     // Removed fields
     for f in old_fields.iter() {
         if !new_by.contains_key(f.name.as_str()) {
-            if let Some(unique) = index_kind(f) {
-                ops.push(MigrateOp::DropIndex { entity: entity.to_string(), field: f.name.clone(), unique });
+            let sig = index_sig(f);
+            if sig_has_index(&sig) {
+                ops.push(MigrateOp::DropIndex { entity: entity.to_string(), field: f.name.clone(), unique: sig_unique(&sig) });
             }
             ops.push(MigrateOp::DropField { entity: entity.to_string(), field: f.name.clone() });
         }
@@ -350,6 +352,23 @@ fn index_kind(field: &Field) -> Option<bool> {
     kind
 }
 
+/// Full index signature for diffing: the regular index kind plus the sorted set of `@custom` (module)
+/// indexes. Any change here drives Drop/Add of the field's index trees (a `@custom` args change ⇒ rebuild).
+type IndexSig = (Option<bool>, Vec<(String, String)>);
+
+fn index_sig(field: &Field) -> IndexSig {
+    let mut customs: Vec<(String, String)> = field.attributes.iter().filter_map(|a| {
+        if let Attribute::Custom { name, args } = a { Some((name.clone(), args.clone())) } else { None }
+    }).collect();
+    customs.sort();
+    (index_kind(field), customs)
+}
+
+fn sig_has_index(sig: &IndexSig) -> bool { sig.0.is_some() || !sig.1.is_empty() }
+
+/// `unique` flag carried on the Add/Drop op (informational, for `.march` rendering). Custom-only → false.
+fn sig_unique(sig: &IndexSig) -> bool { sig.0.unwrap_or(false) }
+
 fn default_attr(field: &Field) -> Option<&str> {
     field.attributes.iter().find_map(|a| if let Attribute::Default(s) = a { Some(s.as_str()) } else { None })
 }
@@ -436,6 +455,29 @@ mod tests {
         let old = "model A {\n  t E\n}\nenum E {\n  a\n  b\n}";
         let new = "model A {\n  t E\n}\nenum E {\n  a\n}";
         assert!(matches!(diff_text(old, new), Err(MigrateError::UnsupportedEnumChange { .. })));
+    }
+
+    #[test]
+    fn diff_custom_index_add_remove_and_argchange() {
+        let none = "model Doc {\n  v Float[4]\n}";
+        let cosine = "model Doc {\n  v Float[4] @custom(vector, cosine)\n}";
+        let euclid = "model Doc {\n  v Float[4] @custom(vector, euclidean)\n}";
+
+        // add @custom ⇒ AddIndex
+        assert_eq!(diff_text(none, cosine).unwrap(), vec![
+            MigrateOp::AddIndex { entity: "Doc".into(), field: "v".into(), unique: false },
+        ]);
+        // remove @custom ⇒ DropIndex
+        assert_eq!(diff_text(cosine, none).unwrap(), vec![
+            MigrateOp::DropIndex { entity: "Doc".into(), field: "v".into(), unique: false },
+        ]);
+        // args change ⇒ Drop + Add (rebuild)
+        assert_eq!(diff_text(cosine, euclid).unwrap(), vec![
+            MigrateOp::DropIndex { entity: "Doc".into(), field: "v".into(), unique: false },
+            MigrateOp::AddIndex { entity: "Doc".into(), field: "v".into(), unique: false },
+        ]);
+        // unchanged ⇒ empty
+        assert!(diff_text(cosine, cosine).unwrap().is_empty());
     }
 
     #[test]

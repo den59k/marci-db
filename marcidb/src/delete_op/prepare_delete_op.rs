@@ -1,4 +1,4 @@
-use crate::{Field, delete_op::{DeleteOp, DeleteIndex, DependencyAction, DependencyActionType, RefToDelete}, index_utils::encode_index, schema::{DeleteConstraint, Entity, FieldLocation, FieldType, RefBinding, Schema}, utils::get_next_id_value};
+use crate::{Field, delete_op::{DeleteOp, DeleteIndex, DependencyAction, DependencyActionType, RefToDelete}, index_utils::encode_index, schema::{DeleteConstraint, Entity, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}, utils::get_next_id_value};
 
 // pub fn parse_delete<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<DeleteOp<'a>, EncodeError> {
 //   let id = encode_id(schema, entity, json_val)?;
@@ -24,20 +24,22 @@ pub fn collect_indexes_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, id:
         if let Some(id) = id {
           let value = get_next_id_value(field, &id, schema, offset);
           for index in field.indexes.iter() {
+            if matches!(index, FieldIndex::Custom { .. }) { continue; }
             indexes_to_delete.push(DeleteIndex::Value { index, key: [ &encode_index(field, index, value), id ].concat() });
           }
           offset += value.len();
         } else {
           for index in field.indexes.iter() {
+            if matches!(index, FieldIndex::Custom { .. }) { continue; }
             indexes_to_delete.push(DeleteIndex::KeyValue { index, field });
           }
         }
       },
       FieldLocation::Body { offset_pos } => {
-        if field.indexes.is_empty() {
-          continue;
-        }
+        // Module (`@custom`) indexes are not maintained on the write path in v1 (populated via `$reindex`),
+        // so they produce no delete entry — only value/number indexes are cleaned up inline.
         for index in field.indexes.iter() {
+          if matches!(index, FieldIndex::Custom { .. }) { continue; }
           indexes_to_delete.push(DeleteIndex::BodyValue { index, field, offset_pos });
         }
       },

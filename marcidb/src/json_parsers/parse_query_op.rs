@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_aggregate_op::parse_aggregate, parse_where::parse_where, parsers::parse_id}, query_op::{IncludeQuery, PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_aggregate_op::parse_aggregate, parse_where::parse_where, parsers::parse_id}, query_op::{FieldCompare, IncludeQuery, PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
 
 const AGGREGATE_KEYS: [&str; 5] = ["$count", "$sum", "$avg", "$min", "$max"];
 
@@ -19,15 +19,18 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   let mut mask = bitvec![0; entity.fields.len()];
   let mut includes = vec![];
   let mut prefix_key = None;
-  
+
   let mut filter = None;
+  let mut search = None;
   if let Some(where_value) = json_val.get("$where") {
     let where_op = parse_where(schema, entity, where_value)
       .map_err(|err| ParseError::WhereError(err))?;
 
-    if !matches!(where_op, Where::True) {
-      prefix_key = generate_prefix_from_where(entity, &where_op);
-      filter = Some(where_op);
+    // Lift a module-index search (`$near`/`$search`) out of the filter: it drives execution, not the scan.
+    let residual = split_search(where_op, &mut search).map_err(ParseError::WhereError)?;
+    if !matches!(residual, Where::True) {
+      prefix_key = generate_prefix_from_where(entity, &residual);
+      filter = Some(residual);
     }
   }
 
@@ -78,7 +81,57 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false })
+  Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false, search })
+}
+
+/// Lifts a single module-index search (`$near`/`$search`) out of the where tree, returning the residual
+/// (search node replaced by `Where::True`) and writing the `(field, payload)` into `out`. v1 supports the
+/// search at the top level or inside the top-level `$and`; inside `$or`/`$not` it is rejected (the ranked
+/// candidate set cannot be negated/unioned coherently yet).
+fn split_search<'a>(where_op: Where<'a>, out: &mut Option<(&'a Field, Value)>) -> Result<Where<'a>, EncodeError> {
+  match where_op {
+    Where::Field(field, FieldCompare::Search(payload)) => {
+      if out.is_some() {
+        return Err(EncodeError::UnsupportedOperation("only one $near/$search clause is supported".to_string()));
+      }
+      *out = Some((field, payload));
+      Ok(Where::True)
+    }
+    Where::And(items) => {
+      let mut rest = Vec::with_capacity(items.len());
+      for item in items {
+        let residual = split_search(item, out)?;
+        if !matches!(residual, Where::True) { rest.push(residual); }
+      }
+      Ok(match rest.len() {
+        0 => Where::True,
+        1 => rest.into_iter().next().unwrap(),
+        _ => Where::And(rest),
+      })
+    }
+    Where::Or(items) => {
+      if items.iter().any(where_has_search) {
+        return Err(EncodeError::UnsupportedOperation("$near/$search cannot be used inside $or".to_string()));
+      }
+      Ok(Where::Or(items))
+    }
+    Where::Not(inner) => {
+      if where_has_search(&inner) {
+        return Err(EncodeError::UnsupportedOperation("$near/$search cannot be used inside $not".to_string()));
+      }
+      Ok(Where::Not(inner))
+    }
+    other => Ok(other),
+  }
+}
+
+fn where_has_search(where_op: &Where) -> bool {
+  match where_op {
+    Where::Field(_, FieldCompare::Search(_)) => true,
+    Where::And(items) | Where::Or(items) => items.iter().any(where_has_search),
+    Where::Not(inner) => where_has_search(inner),
+    _ => false,
+  }
 }
 
 fn has_aggregate_keys(val: &Value) -> bool {

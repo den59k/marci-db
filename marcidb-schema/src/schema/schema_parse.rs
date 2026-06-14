@@ -440,6 +440,16 @@ fn resolve_indexes(model: &mut Entity) -> Result<(), SchemaError> {
                 _ => return Err(SchemaError(format!("Wrong type for index in field {}", field.full_name)))
             }
         }
+
+        // Module (`@custom`) indexes: materialize each into a FieldIndex::Custom. The schema layer stays
+        // provider-agnostic — validation of field type/args is the engine's job (IndexProvider::validate).
+        let customs: Vec<(String, String)> = field.attributes.iter().filter_map(|a| {
+            if let Attribute::Custom { name, args } = a { Some((name.clone(), args.clone())) } else { None }
+        }).collect();
+        for (name, args) in customs {
+            let tree_name = format!("custom_{}_{}", name, field.full_name);
+            field.indexes.push(FieldIndex::Custom { tree_name, name, args });
+        }
     }
     Ok(())
 }
@@ -465,6 +475,28 @@ mod tests {
         for schema in bad {
             assert!(try_parse_schema(schema).is_err(), "expected an error for:\n{}", schema);
         }
+    }
+
+    #[test]
+    fn parse_materializes_custom_index() {
+        use crate::schema::FieldIndex;
+
+        let schema = try_parse_schema("model Doc {\n  embedding Float[8] @custom(vector, cosine)\n}").unwrap();
+        let f = schema.models[0].fields.iter().find(|f| f.name == "embedding").unwrap();
+        assert!(matches!(f.ty, FieldType::PrimitiveList(_, Some(8))));
+        let custom = f.indexes.iter().find_map(|i| match i {
+            FieldIndex::Custom { name, args, tree_name } => Some((name.as_str(), args.as_str(), tree_name.as_str())),
+            _ => None,
+        }).expect("custom index not materialized");
+        assert_eq!(custom, ("vector", "cosine", "custom_vector_Doc.embedding"));
+
+        // @custom with no args ⇒ empty args
+        let s2 = try_parse_schema("model Doc {\n  body String @custom(fulltext)\n}").unwrap();
+        let b = s2.models[0].fields.iter().find(|f| f.name == "body").unwrap();
+        assert!(b.indexes.iter().any(|i| matches!(i, FieldIndex::Custom { name, args, .. } if name == "fulltext" && args.is_empty())));
+
+        // @custom() with no provider name is rejected
+        assert!(try_parse_schema("model Doc {\n  x String @custom()\n}").is_err());
     }
 
     #[test]

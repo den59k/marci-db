@@ -1,6 +1,6 @@
 use std::{env, fs, path::Path};
 
-use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
+use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
 
 fn get_model_id_name(model: &Entity) -> String {
   format!("{}ModelId", model.name.replace('.', "_"))
@@ -295,9 +295,23 @@ fn get_field_select_str(field: &Field, schema: &Schema) -> String {
   }
 }
 
+/// A `@custom`-indexed field also accepts `$near`/`$search` in `$Where`. The payload type is the provider's:
+/// vectors get a typed `VectorSearch`, other providers a generic `CustomSearch` (extend this match per module).
+fn get_custom_search_str(field: &Field) -> Option<String> {
+  let name = field.indexes.iter().find_map(|i| match i {
+    FieldIndex::Custom { name, .. } => Some(name.as_str()),
+    _ => None,
+  })?;
+  let payload = match name {
+    "vector" => "VectorSearch",
+    _ => "CustomSearch",
+  };
+  Some(format!(" | CustomSearchValue<{}>", payload))
+}
+
 fn get_field_where_str(field: &Field, schema: &Schema) -> String {
   let field_nullable = if field.nullable { " | null" } else { "" };
-  match &field.ty {
+  let line = match &field.ty {
     FieldType::Ref(ref_info) => {
       format!("  {}?: CompareRefValue<{}{}>", field.name, get_model_where_name(&schema.models[ref_info.model_index]), field_nullable)
     },
@@ -314,6 +328,10 @@ fn get_field_where_str(field: &Field, schema: &Schema) -> String {
       }
     },
     _ => format!("  {}?: CompareValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
+  };
+  match get_custom_search_str(field) {
+    Some(suffix) => format!("{}{}", line, suffix),
+    None => line,
   }
 }
 

@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 use crate::{Field, FieldLocation, num_utils::NumberValue, query_op::PrefixKey, schema::Entity};
 
 #[derive(Debug, Clone)]
@@ -23,7 +25,11 @@ pub enum FieldCompare<'a> {
     Lt(NumberValue),
     Lte(NumberValue),
     StringStartsWith(Vec<u8>),
-    StringIncludes(Vec<u8>)
+    StringIncludes(Vec<u8>),
+    /// A module-index search operator (`$near`/`$search`) on a `@custom`-indexed field. The raw payload is
+    /// interpreted by the provider. This is lifted out of the filter into `QueryOp.search` before planning;
+    /// if it ever reaches row evaluation (e.g. inside an include), it matches everything (a no-op residual).
+    Search(Value)
 }
 
 #[derive(Debug, Clone)]

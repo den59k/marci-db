@@ -12,7 +12,7 @@ pub use process_query_one::process_query_one;
 pub use process_query_many::process_query_many;
 pub use r#where::{Where,FieldCompare,FieldCompareRef};
 
-pub(crate) use process_query::{ParentData, get_id_from_index_key, get_prefix, range_keys_iter};
+pub(crate) use process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, range_keys_iter};
 pub(crate) use process_where::process_where;
 
 #[derive(Debug)]
@@ -30,7 +30,11 @@ pub struct QueryOp<'a> {
   /// The scan does not produce the required order — rows are sorted in memory after filtering
   pub post_sort: bool,
   pub prefix_key: Option<PrefixKey<'a>>,
-  pub includes: Vec<QueryInclude<'a>>
+  pub includes: Vec<QueryInclude<'a>>,
+  /// A module-index search (`$near`/`$search`) lifted out of `filter`: the indexed field + raw payload.
+  /// When set, execution resolves ranked ids via the provider and returns rows in that order, applying
+  /// the residual `filter` as a post-condition (see `MarciDB::find_many`).
+  pub search: Option<(&'a Field, serde_json::Value)>,
 }
 
 #[derive(Debug)]
@@ -112,7 +116,8 @@ impl<'a> QueryOp<'a> {
       reverse: false,
       post_sort: false,
       prefix_key: None,
-      includes: vec![]
+      includes: vec![],
+      search: None,
     }
   }
 }

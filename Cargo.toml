@@ -3,7 +3,8 @@
 resolver = "3"
 members = [
     "marcidb",
-    # "marci-vector",
+    "marci-vector",
+    "marci-vector-index",
     "marcidb-schema",
     "marcidb-server",
     "marcidb-ts",

@@ -2,12 +2,30 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, serialize_snapshot};
+use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, serialize_snapshot};
 use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body}};
 
 type HandlerResult = Result<Response<Full<Bytes>>, ApiError>;
+
+/// A `@custom` index error → HTTP status. Storage faults are 5xx; a bad payload, missing provider, or
+/// non-custom field are client errors (4xx).
+fn reindex_error(e: ReindexError) -> ApiError {
+    match &e {
+        ReindexError::Storage(_) | ReindexError::Provider(ProviderError::Storage(_)) => ApiError::Internal(e.to_string()),
+        _ => ApiError::BadRequest(e.to_string()),
+    }
+}
+
+/// A read-query error → HTTP status. Plain storage faults are 5xx; a `$near`/`$search` problem maps like a
+/// reindex error (bad payload / missing provider → 4xx).
+fn query_error(e: QueryError) -> ApiError {
+    match e {
+        QueryError::Storage(e) => ApiError::Internal(format!("{:?}", e)),
+        QueryError::Search(e) => reindex_error(e),
+    }
+}
 
 /// Opens the DB by name (read-lock) and runs an operation against it
 fn with_db<T>(ctx: &ServerContext, db_name: &str, f: impl FnOnce(&MarciDB) -> Result<T, ApiError>) -> Result<T, ApiError> {
@@ -129,7 +147,7 @@ pub async fn handle_find_many(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
         let query_op = parse_query(&db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
         let items = db.find_many(&query_op, |ctx| decode_document(ctx).unwrap())
-            .map_err(|e| ApiError::Internal(format!("{}", e)))?;
+            .map_err(query_error)?;
         Ok(array_to_json(&items))
     })).await?;
 
@@ -144,7 +162,7 @@ pub async fn handle_find_first(req: Request<hyper::body::Incoming>, ctx: Arc<Ser
         let query_op = parse_query(&db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
         let item = db.find_first(&query_op, |ctx| decode_document(ctx).unwrap())
-            .map_err(|e| ApiError::Internal(format!("{}", e)))?;
+            .map_err(query_error)?;
         Ok(item.unwrap_or_else(|| "null".to_string()))
     })).await?;
 
@@ -215,4 +233,28 @@ pub async fn handle_delete(item_id: String, ctx: Arc<ServerContext>, db_name: St
     })).await?;
 
     Ok(ok_response(Vec::new()))
+}
+
+/// Rebuilds all `@custom` (module) indexes of one model from current data. Registry-driven, so any provider
+/// (vector today, FTS later) is covered without a route change. Returns `{ ok, indexed: <tree count> }`.
+pub async fn handle_reindex(ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {
+    let count = blocking(move || with_db(&ctx, &db_name, |db| {
+        let entity = model(db, &model_name)?;
+        db.reindex_entity(entity).map_err(reindex_error)
+    })).await?;
+
+    Ok(ok_response(format!("{{\"ok\":true,\"indexed\":{}}}", count)))
+}
+
+/// Rebuilds the `@custom` indexes of every model in the DB.
+pub async fn handle_reindex_all(ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
+    let count = blocking(move || with_db(&ctx, &db_name, |db| {
+        let mut total = 0;
+        for entity in db.schema.models.iter() {
+            total += db.reindex_entity(entity).map_err(reindex_error)?;
+        }
+        Ok(total)
+    })).await?;
+
+    Ok(ok_response(format!("{{\"ok\":true,\"indexed\":{}}}", count)))
 }

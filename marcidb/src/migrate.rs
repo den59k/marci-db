@@ -7,7 +7,7 @@
 use canopydb::WriteTransaction;
 
 use crate::index_utils::{encode_full_index, encode_index};
-use crate::schema::{Entity, Field, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
+use crate::schema::{Entity, Field, FieldIndex, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
 use crate::utils::get_data;
 use crate::StorageError;
 
@@ -130,8 +130,23 @@ fn build_index(tx: &WriteTransaction, schema: &Schema, entity: &str, field_name:
     return Err(MigrateApplyError::Unsupported("indexing a field of this type is not supported yet"));
   }
 
+  // Module (`@custom`) indexes: just create the (empty) tree — population is via `$reindex` (batch, v1),
+  // not inline backfill (a vector index needs global clustering). Value/number indexes are backfilled below.
+  let mut has_backfill = false;
+  for index in field.indexes.iter() {
+    if let FieldIndex::Custom { .. } = index {
+      tx.get_or_create_tree(index.tree_name())?;
+    } else {
+      has_backfill = true;
+    }
+  }
+  if !has_backfill {
+    return Ok(());
+  }
+
   let model_tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
   for index in field.indexes.iter() {
+    if matches!(index, FieldIndex::Custom { .. }) { continue; }
     let mut index_tree = tx.get_or_create_tree(index.tree_name())?;
     for row in model_tree.iter()? {
       let (id, body) = row?;

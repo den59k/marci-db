@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -211,6 +211,9 @@ fn parse_write_op<'a>(
         }
 
         for index in field.indexes.iter() {
+            // Module (`@custom`) indexes are not maintained on the write path in v1 (populated via
+            // `$reindex`); only value/number indexes get an inline write entry here.
+            if matches!(index, FieldIndex::Custom { .. }) { continue; }
             write_indexes.push(WriteIndex::Value(field, index, encode_index(field, index, value_data)));
         }
    }

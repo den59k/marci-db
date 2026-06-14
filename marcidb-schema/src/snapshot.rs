@@ -127,7 +127,10 @@ fn serialize_attr(attr: &Attribute) -> Option<String> {
     Attribute::Format(FieldCustomFormat::Uuid) => "@format(uuid)".to_string(),
     Attribute::Format(FieldCustomFormat::Hex) => "@format(hex)".to_string(),
     Attribute::OnDelete(c) => format!("@onDelete({})", delete_constraint_name(c)),
-    Attribute::VectorIndex(_) | Attribute::InjectUnresolved(_) => return None,
+    // Module index — must round-trip so the custom index survives open()/migrations
+    Attribute::Custom { name, args } =>
+      if args.is_empty() { format!("@custom({})", name) } else { format!("@custom({}, {})", name, args) },
+    Attribute::InjectUnresolved(_) => return None,
   })
 }
 
@@ -452,6 +455,14 @@ fn apply_attr_token(sf: &mut SnapField, token: &str) -> Result<(), SchemaError> 
           "RemoveItem" => DeleteConstraint::RemoveItem,
           _ => return Err(SchemaError(format!("snapshot: unknown onDelete: {}", c))),
         }));
+      } else if let Some(c) = inside(token, "custom") {
+        // Mirror parse_attribute: first comma-separated token is the provider name, rest = raw args.
+        let (name, args) = match c.split_once(',') {
+          Some((n, a)) => (n.trim().to_string(), a.trim().to_string()),
+          None => (c.trim().to_string(), String::new()),
+        };
+        if name.is_empty() { return Err(SchemaError(format!("snapshot: @custom requires a provider name: {}", token))); }
+        sf.attributes.push(Attribute::Custom { name, args });
       } else {
         return Err(SchemaError(format!("snapshot: unknown attribute: @{}", token)));
       }
@@ -554,6 +565,26 @@ struct UserRole {
     let reparsed = parse_snapshot(&s1).unwrap();
     let s2 = serialize_snapshot(&reparsed);
     assert_eq!(s1, s2, "round-trip diverged:\n--- s1 ---\n{}\n--- s2 ---\n{}", s1, s2);
+  }
+
+  /// A `@custom` module index must survive the snapshot (it was silently dropped before): the attribute
+  /// round-trips textually AND the FieldIndex::Custom is rebuilt from it on load.
+  #[test]
+  fn snapshot_round_trips_custom_index() {
+    use crate::FieldIndex;
+
+    let schema = parse_schema("model Doc {\n  embedding Float[4] @custom(vector, cosine)\n  body String @custom(fulltext)\n}");
+    let s1 = serialize_snapshot(&schema);
+    assert!(s1.contains("@custom(vector, cosine)"), "snapshot lost custom args:\n{}", s1);
+    assert!(s1.contains("@custom(fulltext)"), "snapshot lost argless custom:\n{}", s1);
+
+    let reparsed = parse_snapshot(&s1).unwrap();
+    assert_eq!(s1, serialize_snapshot(&reparsed), "custom round-trip diverged:\n{}", s1);
+
+    let emb = reparsed.models[0].fields.iter().find(|f| f.name == "embedding").unwrap();
+    assert!(emb.indexes.iter().any(|i|
+      matches!(i, FieldIndex::Custom { name, args, .. } if name == "vector" && args == "cosine")),
+      "custom index not rebuilt from snapshot: {:?}", emb.indexes);
   }
 
   /// Targeted check that parse_snapshot restored the resolved state (not just the text)

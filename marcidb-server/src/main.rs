@@ -3,10 +3,10 @@ use std::{collections::HashMap, convert::Infallible, net::{IpAddr, SocketAddr}, 
 use http_body_util::Full;
 use hyper::{Method, Request, Response, StatusCode, body::Bytes, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
-use marcidb::MarciDB;
+use marcidb::{MarciDB, ProviderRegistry};
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_snapshot, handle_sync, handle_transaction, handle_update}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_transaction, handle_update}};
 
 mod handlers;
 mod errors;
@@ -17,11 +17,13 @@ mod helpers;
 pub struct ServerContext {
     root: PathBuf,
     dbs: Mutex<HashMap<String, Arc<RwLock<MarciDB>>>>,
+    /// `@custom` index providers, shared into every DB this server opens. Built once at startup.
+    providers: Arc<ProviderRegistry>,
 }
 
 impl ServerContext {
     fn new(root: PathBuf) -> Self {
-        ServerContext { root, dbs: Mutex::new(HashMap::new()) }
+        ServerContext { root, dbs: Mutex::new(HashMap::new()), providers: build_providers() }
     }
 
     /// DB by name. `allow_create` (for `$migrate`) creates an empty DB; otherwise a nonexistent one → NotFound
@@ -43,10 +45,21 @@ impl ServerContext {
         // canopydb requires an existing DB directory
         std::fs::create_dir_all(&path).map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        let db = Arc::new(RwLock::new(MarciDB::open(path.to_str().unwrap())));
+        let db = Arc::new(RwLock::new(MarciDB::open(path.to_str().unwrap()).with_providers(self.providers.clone())));
         dbs.insert(name.to_string(), db.clone());
         Ok(db)
     }
+}
+
+/// Builds the `@custom` index-provider registry. Modules are compiled in behind cargo features so the
+/// default build stays dependency-light (and stable-toolchain friendly): `--features vector` adds the
+/// vector index (`@custom(vector, …)`); future modules (full-text, …) register here the same way.
+fn build_providers() -> Arc<ProviderRegistry> {
+    #[allow(unused_mut)]
+    let mut reg = ProviderRegistry::new();
+    #[cfg(feature = "vector")]
+    reg.register(Box::new(marci_vector_index::VectorIndexProvider::new()));
+    Arc::new(reg)
 }
 
 /// The DB name is a path segment, so no slashes/dots (protection against path traversal)
@@ -93,6 +106,8 @@ async fn handle_inner(
             "$migrate" => return handle_migrate(req, ctx, db_name).await,
             "$sync" => return handle_sync(req, ctx, db_name).await,
             "$transaction" => return handle_transaction(req, ctx, db_name).await,
+            // Rebuild every model's @custom indexes
+            "$reindex" => return handle_reindex_all(ctx, db_name).await,
             _ => {}
         }
     }
@@ -118,6 +133,8 @@ async fn handle_inner(
             let Some(id) = id else { return Err(ApiError::BadRequest("Param :itemId required".to_string())) };
             handle_delete(id, ctx, db_name, model).await
         },
+        // Rebuild this model's @custom indexes
+        (&Method::POST, "$reindex") => handle_reindex(ctx, db_name, model).await,
         _ => Err(ApiError::NotFound(format!("Route {} /{} not found", method, path))),
     }
 }

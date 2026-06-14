@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, delete_op::process_delete, index_utils::{encode_full_index, encode_index}, schema::{Entity, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, delete_op::process_delete, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -12,6 +12,8 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
 
   let resp = update_fields(&update.update_fields, id, &data, entity, &db.schema, | field, old_value, new_value | {
     for field_index in field.indexes.iter() {
+      // Module (`@custom`) indexes are not maintained on the write path in v1 (populated via `$reindex`).
+      if matches!(field_index, FieldIndex::Custom { .. }) { continue; }
       let mut tree = tx.get_tree(field_index.tree_name())?.unwrap();
 
       if let Some(old_value) = old_value {

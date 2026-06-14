@@ -8,7 +8,10 @@ pub enum Attribute {
     Id,
     Default(String),
     Unique,
-    VectorIndex(VectorIndexType),
+    /// A module-provided index, e.g. `@custom(vector, cosine)` or `@custom(fulltext, english)`.
+    /// `name` selects the index provider; `args` is the raw remainder, parsed by the provider itself
+    /// (the schema layer stays provider-agnostic). Materialized into [`super::FieldIndex::Custom`].
+    Custom { name: String, args: String },
     InjectUnresolved(Vec<(String,String)>),
     OnDelete(DeleteConstraint),
     Format(FieldCustomFormat)
@@ -28,12 +31,6 @@ pub enum DeleteConstraint {
     RemoveItem
 }
 
-#[derive(Debug,Clone,PartialEq)]
-pub enum VectorIndexType {
-    Euclidean,
-    Cosine
-}
-
 pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
     if s.starts_with("index") {
         return Ok(Attribute::Index)
@@ -51,12 +48,12 @@ pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
         return Ok(Attribute::Default(inside.to_string()))
     }
 
-    if s.starts_with("vectorindex") {
-        let opt = s.strip_prefix("vectorindex(").and_then(|x| x.strip_suffix(')')).map(|f|f.to_uppercase());
-        return Ok(match opt.as_deref() {
-            Some("COSINE") => Attribute::VectorIndex(VectorIndexType::Cosine),
-            _ => Attribute::VectorIndex(VectorIndexType::Euclidean)
-        })
+    if let Some(inside) = s.strip_prefix("custom(").and_then(|x| x.strip_suffix(')')) {
+        let (name, args) = split_custom_args(inside);
+        if name.is_empty() {
+            return Err(SchemaError(format!("@custom requires a provider name: {}", s)));
+        }
+        return Ok(Attribute::Custom { name, args })
     }
 
     if let Some(inside) = s.strip_prefix("bind(").and_then(|x| x.strip_suffix(')')) {
@@ -86,6 +83,15 @@ pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
     }
 
     Err(SchemaError(format!("Unknown attribute: {}", s)))
+}
+
+/// Splits the inside of `@custom(...)` into `(name, args)`: the first comma-separated token is the
+/// provider name, the (trimmed) remainder is handed verbatim to the provider. `@custom(vector)` → args "".
+pub fn split_custom_args(inside: &str) -> (String, String) {
+    match inside.split_once(',') {
+        Some((name, args)) => (name.trim().to_string(), args.trim().to_string()),
+        None => (inside.trim().to_string(), String::new()),
+    }
 }
 
 pub fn parse_inject_attrs(s: &str) -> Vec<(String,String)> {

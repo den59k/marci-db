@@ -49,6 +49,11 @@ type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
 type CompareRefValue<T> = T | { "$not": T }
 type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
+// Module-index search (@custom): $near/$search hand a raw payload to the field's index provider.
+type VectorSearch = { vector: number[], k?: number, threshold?: number }      // @custom(vector, …)
+type CustomSearch = Record<string, any>                                       // other providers
+type CustomSearchValue<P> = { "$near": P } | { "$search": P }
+
 // Aggregate result: only the requested keys; an empty set yields null (except count)
 type AggregateResult<TModel, T> =
   (T extends { $count: true } ? { count: number } : {}) &

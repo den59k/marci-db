@@ -74,6 +74,10 @@ pub fn process_where<'a, 'b, U, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Trans
         FieldCompare::StringStartsWith(value) => data.starts_with(value),
         FieldCompare::StringIncludes(value) => memmem::find(data, value).is_some(),
 
+        // Module search is resolved up front via the provider (QueryOp.search); a residual occurrence
+        // here (e.g. inside an include) is a match-everything no-op.
+        FieldCompare::Search(_) => true,
+
         _ => false
       })
     },

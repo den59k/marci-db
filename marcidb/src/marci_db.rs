@@ -1,14 +1,18 @@
 use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 
-use canopydb::{Database, Transaction, Tree};
+use canopydb::{Database, Transaction, Tree, WriteTransaction};
+use serde_json::Value;
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::{Entity, FieldDefault, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 pub struct MarciDB {
   pub schema: Schema,
   db: Database,
   pub(crate) counters: Vec<Arc<AtomicU64>>,
   model_by_name: HashMap<String, usize>,
+  /// Registered `@custom` index providers (vector, full-text, …). Empty by default; the host installs them
+  /// via [`MarciDB::with_providers`]. Shared across DBs that the same host opens.
+  providers: Arc<ProviderRegistry>,
 }
 
 impl MarciDB {
@@ -42,7 +46,14 @@ impl MarciDB {
     let counters = build_counters(&schema, &tx);
     tx.commit().unwrap();
 
-    MarciDB { db, schema, counters, model_by_name }
+    MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()) }
+  }
+
+  /// Installs the `@custom` index providers (builder style). The same registry is typically shared across
+  /// every DB a host opens: `MarciDB::open(path).with_providers(registry.clone())`.
+  pub fn with_providers(mut self, providers: Arc<ProviderRegistry>) -> Self {
+    self.providers = providers;
+    self
   }
 
   /// Opens a DB, reconstructing the schema from `__marci_meta__` (the state left after migrations).
@@ -67,7 +78,7 @@ impl MarciDB {
     let counters = build_counters(&schema, &rx);
     drop(rx);
 
-    MarciDB { db, schema, counters, model_by_name }
+    MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()) }
   }
 
   pub fn get_model(&self, name: &str) -> Option<&Entity> {
@@ -82,16 +93,68 @@ impl MarciDB {
     return &self.schema.models[index]
   }
 
-  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+  pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, QueryError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+    if let Some((field, payload)) = &query.search {
+      return self.run_search(query, field, payload, f, None);
+    }
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
-    return process_query_many(query, &mut ctx, None);
+    Ok(process_query_many(query, &mut ctx, None)?)
   }
 
-  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Result<Option<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+  pub fn find_first<U, F>(&self, query: &QueryOp, f: F) -> Result<Option<U>, QueryError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+    if let Some((field, payload)) = &query.search {
+      return Ok(self.run_search(query, field, payload, f, Some(1))?.into_iter().next());
+    }
     let rx = self.db.begin_read().unwrap();
     let mut ctx = TransationContext::new(&rx, &self.schema, f);
-    return process_query_one(query, &mut ctx, None);
+    Ok(process_query_one(query, &mut ctx, None)?)
+  }
+
+  /// Executes a `$near`/`$search` query: resolve ranked ids from the provider, then fetch rows in that
+  /// order, applying the residual `query.filter` as a post-condition and honouring `skip`/`limit`. `max`
+  /// caps the result count (used by `find_first`). Both the provider lookup and the row fetch share one
+  /// read transaction. Stale index entries (row since deleted) are skipped.
+  fn run_search<U, F>(&self, query: &QueryOp, field: &Field, payload: &Value, f: F, max: Option<usize>) -> Result<Vec<U>, QueryError>
+    where U: Clone, F: Fn(DecodeCtx<U>) -> U {
+    let rx = self.db.begin_read()?;
+
+    let hits = {
+      let (tree_name, name, args) = field.indexes.iter().find_map(|i| match i {
+        FieldIndex::Custom { tree_name, name, args } => Some((tree_name, name, args)),
+        _ => None,
+      }).ok_or_else(|| ReindexError::NotCustom(field.full_name.clone()))?;
+      let provider = self.providers.get(name).ok_or_else(|| ReindexError::NoProvider(name.clone()))?;
+      let tree = rx.get_tree(tree_name.as_bytes())?
+        .ok_or_else(|| ReindexError::NotCustom(field.full_name.clone()))?;
+      let store = IndexTree::new(tree);
+      provider.search(field, args, payload, &store).map_err(ReindexError::Provider)?
+    };
+
+    let mut ctx = TransationContext::new(&rx, &self.schema, f);
+    let entity = query.entity;
+    let skip = query.skip.unwrap_or(0);
+    let limit = max.or(query.limit);
+
+    let mut out = Vec::new();
+    let mut matched = 0usize;
+    for hit in hits {
+      let body = {
+        let tree = ctx.get_tree(&entity.name)?;
+        match tree.get(&hit.id)? {
+          Some(b) => b.to_vec(),
+          None => continue, // stale index entry — row was deleted since the last $reindex
+        }
+      };
+      if let Some(filter) = &query.filter {
+        if !process_where(&hit.id, &body, &mut ctx, entity, filter)? { continue; }
+      }
+      matched += 1;
+      if matched <= skip { continue; }
+      out.push(decode_row(&hit.id, &body, &mut ctx, query)?);
+      if let Some(limit) = limit && out.len() >= limit { break; }
+    }
+    Ok(out)
   }
 
   pub fn count(&self, entity: &Entity) -> Result<u64, StorageError> {
@@ -175,6 +238,62 @@ impl MarciDB {
     Ok(())
   }
 
+  // ─────────────────────────────── module (`@custom`) indexes ───────────────────────────────
+
+  /// Rebuilds every `@custom` index of `entity` from current data, in one write transaction.
+  /// Returns the number of index trees rebuilt. The engine primitive behind the server's `$reindex`.
+  pub fn reindex_entity(&self, entity: &Entity) -> Result<usize, ReindexError> {
+    let tx = self.db.begin_write()?;
+    let mut count = 0;
+    for field in entity.fields.iter() {
+      count += self.reindex_field_in_tx(&tx, entity, field)?;
+    }
+    tx.commit()?;
+    Ok(count)
+  }
+
+  /// Rebuilds the `@custom` indexes of a single field, in its own transaction. Returns trees rebuilt.
+  pub fn reindex_field(&self, entity: &Entity, field: &Field) -> Result<usize, ReindexError> {
+    let tx = self.db.begin_write()?;
+    let count = self.reindex_field_in_tx(&tx, entity, field)?;
+    tx.commit()?;
+    Ok(count)
+  }
+
+  fn reindex_field_in_tx(&self, tx: &WriteTransaction, entity: &Entity, field: &Field) -> Result<usize, ReindexError> {
+    let mut count = 0;
+    for index in field.indexes.iter() {
+      let FieldIndex::Custom { tree_name, name, args } = index else { continue };
+      let provider = self.providers.get(name).ok_or_else(|| ReindexError::NoProvider(name.clone()))?;
+      provider.validate(field, args).map_err(ReindexError::Provider)?;
+
+      let mut store = IndexTree::new(tx.get_or_create_tree(tree_name.as_bytes())?);
+      store.clear().map_err(ReindexError::Provider)?;
+
+      let model_tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
+      let scan = RowScan::new(Box::new(model_tree.iter()?), entity, field, &self.schema);
+      provider.rebuild(field, args, scan, &mut store).map_err(ReindexError::Provider)?;
+      count += 1;
+    }
+    Ok(count)
+  }
+
+  /// Runs a `@custom` index search on `field` with the raw operator `payload`, returning ranked hits.
+  /// Used by the query executor (`$near`/`$match`) and callable directly for tests/tools.
+  pub fn search_custom(&self, field: &Field, payload: &Value) -> Result<Vec<SearchHit>, ReindexError> {
+    let (tree_name, name, args) = field.indexes.iter().find_map(|i| match i {
+      FieldIndex::Custom { tree_name, name, args } => Some((tree_name, name, args)),
+      _ => None,
+    }).ok_or_else(|| ReindexError::NotCustom(field.full_name.clone()))?;
+
+    let provider = self.providers.get(name).ok_or_else(|| ReindexError::NoProvider(name.clone()))?;
+    let rx = self.db.begin_read()?;
+    let tree = rx.get_tree(tree_name.as_bytes())?
+      .ok_or_else(|| ReindexError::NotCustom(field.full_name.clone()))?;
+    let store = IndexTree::new(tree);
+    provider.search(field, args, payload, &store).map_err(ReindexError::Provider)
+  }
+
   /// Rebuilds counters/name index for the new schema and switches the in-memory schema
   fn swap_schema(&mut self, new_schema: Schema) {
     let rx = self.db.begin_read().unwrap();
@@ -184,6 +303,54 @@ impl MarciDB {
     self.schema = new_schema;
   }
 }
+
+/// Failure of a `@custom` index reindex/search.
+#[derive(Debug)]
+pub enum ReindexError {
+  /// No provider registered for the field's `@custom(<name>)` (module not compiled in / not registered).
+  NoProvider(String),
+  /// `search_custom` was called on a field that has no `@custom` index.
+  NotCustom(String),
+  Provider(ProviderError),
+  Storage(StorageError),
+}
+
+impl std::fmt::Display for ReindexError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      ReindexError::NoProvider(name) => write!(f, "no index provider registered for '@custom({})'", name),
+      ReindexError::NotCustom(field) => write!(f, "field '{}' has no @custom index", field),
+      ReindexError::Provider(e) => write!(f, "{}", e),
+      ReindexError::Storage(e) => write!(f, "{:?}", e),
+    }
+  }
+}
+impl std::error::Error for ReindexError {}
+
+impl From<canopydb::Error> for ReindexError { fn from(e: canopydb::Error) -> Self { ReindexError::Storage(StorageError(e)) } }
+impl From<StorageError> for ReindexError { fn from(e: StorageError) -> Self { ReindexError::Storage(e) } }
+
+/// Error from a read query. `Storage` → a 5xx; `Search` carries the provider/registry error for a
+/// `$near`/`$search` (a bad payload or missing provider is a 4xx — see the server's mapping).
+#[derive(Debug)]
+pub enum QueryError {
+  Storage(StorageError),
+  Search(ReindexError),
+}
+
+impl std::fmt::Display for QueryError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      QueryError::Storage(e) => write!(f, "{:?}", e),
+      QueryError::Search(e) => write!(f, "{}", e),
+    }
+  }
+}
+impl std::error::Error for QueryError {}
+
+impl From<StorageError> for QueryError { fn from(e: StorageError) -> Self { QueryError::Storage(e) } }
+impl From<canopydb::Error> for QueryError { fn from(e: canopydb::Error) -> Self { QueryError::Storage(StorageError(e)) } }
+impl From<ReindexError> for QueryError { fn from(e: ReindexError) -> Self { QueryError::Search(e) } }
 
 fn build_counters(schema: &Schema, rx: &Transaction) -> Vec<Arc<AtomicU64>> {
   let mut counters = Vec::with_capacity(schema.models.len());

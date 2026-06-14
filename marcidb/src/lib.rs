@@ -10,6 +10,7 @@ mod delete_op;
 mod utils;
 mod json_parsers;
 mod index_utils;
+mod index_provider;
 mod url_parser;
 mod update_op;
 mod num_utils;
@@ -19,11 +20,12 @@ mod num_utils;
 // engine root (below) so downstream crates can still say `marcidb::Schema`, `marcidb::parse_schema`, etc.
 pub(crate) use marcidb_schema as schema;
 
-pub use marcidb_schema::{parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType,FieldExistsCondition,EnumInfo,RefInfo,RefBinding,Attribute,DeleteConstraint,FieldCustomFormat,FieldDefault};
+pub use marcidb_schema::{parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType,FieldExistsCondition,EnumInfo,RefInfo,RefBinding,Attribute,DeleteConstraint,FieldCustomFormat,FieldDefault,FieldIndex,FieldIndexNum};
 pub use crate::json_parsers::{parse_insert,parse_update,parse_query,parse_aggregate,aggregate_to_json,decode_document,decode_id,array_to_json,parse_id,EncodeError};
 pub use crate::aggregate_op::{AggregateOp,AggregateResult,SumValue};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
-pub use crate::marci_db::MarciDB;
+pub use crate::marci_db::{MarciDB, ReindexError, QueryError};
+pub use crate::index_provider::{IndexProvider, IndexTree, IndexIter, RowScan, RowRef, SearchHit, ProviderError, ProviderRegistry};
 pub use crate::transaction::MarciTransaction;
 pub use crate::error::StorageError;
 pub use crate::batch::{execute_batch, BatchError, BatchErrorKind};

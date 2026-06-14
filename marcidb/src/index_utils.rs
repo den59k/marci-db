@@ -303,9 +303,9 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
               }
             },
             FieldIndex::Custom { .. } => {
-              // FieldIndex::Custom — reserved for vector indexes; resolve_indexes doesn't create them yet,
-              // so we never reach here (the @vectorindex attribute isn't materialized into an index)
-              unreachable!("custom/vector indexes are not constructed yet")
+              // Module (`@custom`) indexes don't provide a value-prefix access path. The dedicated search
+              // operator (`$near`/`$match`) dispatches to the provider separately; here we just skip them.
+              continue;
             },
         }
       }

@@ -162,6 +162,9 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
         let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
         Ok(FieldCompare::StringIncludes(value.as_bytes().to_vec()))
       },
+      // Module-index search: hand the raw payload to the provider (resolved during query execution).
+      // The field must carry a `@custom` index; that (and payload validity) is checked at execution.
+      "$near" | "$search" => Ok(FieldCompare::Search(value.clone())),
       _ => return Err(EncodeError::UnsupportedOperation(key.clone())),
     }
   } else {
