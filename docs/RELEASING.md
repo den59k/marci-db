@@ -57,3 +57,25 @@ release's notes at any time:
 ```bash
 ./scripts/gen-changelog.sh
 ```
+
+### Keeping noise out
+
+Two ways to keep a commit out of the changelog:
+
+- **Hidden categories.** Internal / tooling types are dropped by default —
+  `chore`, `style`, `ci`, `build` (this also hides the auto `chore: release`
+  commits). Override per-run with `CHANGELOG_HIDE`:
+
+  ```bash
+  CHANGELOG_HIDE="chore style"   ./scripts/gen-changelog.sh   # hide fewer
+  CHANGELOG_HIDE=""              ./scripts/gen-changelog.sh   # show everything
+  ```
+
+- **Sign a single commit to skip it**, regardless of type — put `[skip changelog]`
+  anywhere in the commit message, or add a trailer:
+
+  ```
+  fix: tidy up an internal helper
+
+  Changelog: skip
+  ```

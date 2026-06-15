@@ -142,6 +142,10 @@ jobs:
           echo "Tags: $list"
       - name: Build & push
         uses: docker/build-push-action@v6
+        env:
+          # Don't upload the ".dockerbuild" build-record artifact — it's unused and
+          # downloading it later made the release job flaky.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           push: true
@@ -159,6 +163,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          # Only the binaries and release notes — never the docker build records.
+          pattern: "{binary-*,release-notes}"
           path: artifacts
       - name: Publish release
         uses: softprops/action-gh-release@v2

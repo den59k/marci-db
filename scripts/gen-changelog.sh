@@ -11,6 +11,18 @@
 # Output goes to stdout. Commits are grouped by their conventional-commit type
 # (feat:, fix:, refactor:, ...); anything that doesn't match falls under
 # "Other Changes". Merge commits are skipped.
+#
+# Two ways to keep noise out of the changelog:
+#
+#   1. Hidden types — whole categories that never appear. Defaults to internal /
+#      tooling commits (chore, style, ci, build, and the auto "chore: release"
+#      commits). Override with CHANGELOG_HIDE, e.g.
+#        CHANGELOG_HIDE="chore style"        scripts/gen-changelog.sh
+#        CHANGELOG_HIDE=""                    scripts/gen-changelog.sh   # show all
+#
+#   2. Per-commit opt-out — "sign" a single commit to skip it regardless of type
+#      by putting "[skip changelog]" anywhere in the message, or adding a trailer:
+#        Changelog: skip
 set -euo pipefail
 
 range="${1:-}"
@@ -19,14 +31,29 @@ if [ -z "$range" ]; then
   if [ -n "$last_tag" ]; then range="${last_tag}..HEAD"; else range="HEAD"; fi
 fi
 
+# Categories to omit entirely. Space-separated conventional-commit types.
+HIDDEN_TYPES="${CHANGELOG_HIDE-chore style ci build}"
+is_hidden() {
+  case " $HIDDEN_TYPES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
 # All known conventional-commit types, used to detect the "Other Changes" bucket.
 known_re='^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\(.+\))?!?:'
 
+# git log over the range, with merge commits and "signed-to-skip" commits dropped.
+# --invert-grep --grep=... excludes any commit whose message carries a skip marker.
+gitlog() {
+  git log "$range" --no-merges -i -E --invert-grep \
+    --grep='\[skip[ -]changelog\]' \
+    --grep='^Changelog:[[:space:]]*skip' \
+    "$@"
+}
+
 emit_section() {
   local type="$1" title="$2"
+  is_hidden "$type" && return 0
   local lines
-  lines="$(git log "$range" --no-merges --pretty=format:'%s|%h' \
-    | grep -E "^${type}(\(.+\))?!?:" || true)"
+  lines="$(gitlog --pretty=format:'%s|%h' | grep -E "^${type}(\(.+\))?!?:" || true)"
   [ -z "$lines" ] && return 0
   printf '### %s\n\n' "$title"
   while IFS='|' read -r subject hash; do
@@ -52,8 +79,7 @@ emit_section "style"    "Styles"
 emit_section "revert"   "Reverts"
 
 # Everything that isn't a recognised conventional commit.
-others="$(git log "$range" --no-merges --pretty=format:'%s|%h' \
-  | grep -Ev "$known_re" || true)"
+others="$(gitlog --pretty=format:'%s|%h' | grep -Ev "$known_re" || true)"
 if [ -n "$others" ]; then
   printf '### Other Changes\n\n'
   while IFS='|' read -r subject hash; do
