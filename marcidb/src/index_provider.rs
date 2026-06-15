@@ -37,7 +37,7 @@ impl std::fmt::Display for ProviderError {
 }
 impl std::error::Error for ProviderError {}
 
-impl From<canopydb::Error> for ProviderError { fn from(e: canopydb::Error) -> Self { ProviderError::Storage(StorageError(e)) } }
+impl From<canopydb::Error> for ProviderError { fn from(e: canopydb::Error) -> Self { ProviderError::Storage(StorageError::Backend(e)) } }
 impl From<StorageError> for ProviderError { fn from(e: StorageError) -> Self { ProviderError::Storage(e) } }
 
 /// The contract implemented by an index module. Registered into a [`ProviderRegistry`] under [`Self::name`].

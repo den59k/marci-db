@@ -1,10 +1,10 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, delete_op::process_delete, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
-  let mut tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
+  let mut tree = tx.require_tree(entity.name.as_bytes())?;
 
   let Some(data) = tree.get(id)? else {
     return Ok(false)
@@ -14,7 +14,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
     for field_index in field.indexes.iter() {
       // Module (`@custom`) indexes are not maintained on the write path in v1 (populated via `$reindex`).
       if matches!(field_index, FieldIndex::Custom { .. }) { continue; }
-      let mut tree = tx.get_tree(field_index.tree_name())?.unwrap();
+      let mut tree = tx.require_tree(field_index.tree_name())?;
 
       if let Some(old_value) = old_value {
         tree.delete(&encode_full_index(field, field_index, id, old_value))?;
@@ -56,7 +56,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           }
         },
         UpdateRelationOp::RemoveAll(delete_op) => {
-          let mut tree = tx.get_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?.unwrap();
+          let mut tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
           for item_id in get_ids_from_ref_info(tx, &tree, update_ref.ref_info, id)? {
             // println!("ready to delete {} {:#?}", update_ref.field.name, delete_op);
             process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
@@ -179,7 +179,7 @@ fn update_data(dst: &mut Vec<u8>, item_data: &[u8], entity: &Entity, offset_pos:
   }
 }
 
-fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &'a [u8], body: &'a [u8], schema: &Schema) -> Result<Option<Vec<u8>>, canopydb::Error> {
+fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &'a [u8], body: &'a [u8], schema: &Schema) -> Result<Option<Vec<u8>>, StorageError> {
   match &ref_info.binding {
     RefBinding::CurrentId => {
       Ok(Some(id.to_vec()))
@@ -189,7 +189,7 @@ fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, re
     },
     RefBinding::IndexTree(tree_name) => {
       let item_id_len = id.len();
-      let index_tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+      let index_tree = tx.require_tree(tree_name.as_bytes())?;
       match index_tree.prefix_keys(&id)?.next() {
         Some(e) => Ok(Some(e?[item_id_len..].to_vec())),
         None => Ok(None),
@@ -199,7 +199,7 @@ fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, re
 }
 
 /// Fetches the ids of related objects
-fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, ref_info: &RefInfo, id: &[u8]) -> Result<Vec<Vec<u8>>, canopydb::Error> {
+fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, ref_info: &RefInfo, id: &[u8]) -> Result<Vec<Vec<u8>>, StorageError> {
   match &ref_info.binding {
     RefBinding::CurrentId => {
       obj_tree.prefix_keys(&id)?.map(|key| Ok(key?.to_vec())).collect()
@@ -207,7 +207,7 @@ fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, ref_info: &RefInfo, 
     RefBinding::FieldValue => panic!("RefList cannot be in FieldValue"),
     RefBinding::IndexTree(tree_name) => {
       let item_id_len = id.len();
-      let index_tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+      let index_tree = tx.require_tree(tree_name.as_bytes())?;
       index_tree.prefix_keys(&id)?.map(|e| Ok(e?[item_id_len..].to_vec())).collect()
     },
   }

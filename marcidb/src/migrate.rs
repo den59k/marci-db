@@ -10,6 +10,7 @@ use crate::index_utils::{encode_full_index, encode_index};
 use crate::schema::{Entity, Field, FieldIndex, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
 use crate::utils::get_data;
 use crate::StorageError;
+use crate::error::RequireTree;
 
 // `MigrateOp` (the op set) and `MigrateError` (authoring-side diff errors) now live in the `marcidb-schema`
 // foundation crate — the engine only consumes them when applying.
@@ -45,7 +46,7 @@ impl std::fmt::Display for MigrateApplyError {
   }
 }
 
-impl From<canopydb::Error> for MigrateApplyError { fn from(e: canopydb::Error) -> Self { MigrateApplyError::Storage(StorageError(e)) } }
+impl From<canopydb::Error> for MigrateApplyError { fn from(e: canopydb::Error) -> Self { MigrateApplyError::Storage(StorageError::Backend(e)) } }
 impl From<StorageError> for MigrateApplyError { fn from(e: StorageError) -> Self { MigrateApplyError::Storage(e) } }
 impl From<SchemaError> for MigrateApplyError { fn from(e: SchemaError) -> Self { MigrateApplyError::Schema(e) } }
 impl From<MigrateError> for MigrateApplyError { fn from(e: MigrateError) -> Self { MigrateApplyError::Diff(e) } }
@@ -144,7 +145,7 @@ fn build_index(tx: &WriteTransaction, schema: &Schema, entity: &str, field_name:
     return Ok(());
   }
 
-  let model_tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
+  let model_tree = tx.require_tree(entity.name.as_bytes())?;
   for index in field.indexes.iter() {
     if matches!(index, FieldIndex::Custom { .. }) { continue; }
     let mut index_tree = tx.get_or_create_tree(index.tree_name())?;

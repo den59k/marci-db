@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, StorageError, error::RequireTree, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
@@ -18,7 +18,7 @@ pub enum InsertError {
 
 impl From<canopydb::Error> for InsertError {
   fn from(e: canopydb::Error) -> Self {
-    InsertError::Storage(StorageError(e))
+    InsertError::Storage(StorageError::Backend(e))
   }
 }
 
@@ -73,7 +73,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
   let data = temp_data.as_deref().unwrap_or(&insert.data);
 
   {
-    let mut tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
+    let mut tree = tx.require_tree(entity.name.as_bytes())?;
     if tree.get(&write_id)?.is_some() {
       return Err(InsertError::IdViolation(entity.name.clone(), write_id.clone()));
     }
@@ -83,7 +83,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
   for write_index in insert.write_indexes.iter() {
     match write_index {
       WriteIndex::Value(field, field_index, data) => {
-        let mut tree = tx.get_tree(field_index.tree_name())?.unwrap();
+        let mut tree = tx.require_tree(field_index.tree_name())?;
         if field_index.is_unique() {
           if let Some(exists) = tree.prefix_keys(&data.as_slice())?.next() {
             let exists_id = exists?[data.len()..].to_vec();
@@ -125,7 +125,7 @@ fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) -> Result<(), canopy
 
 pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
-    let mut tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+    let mut tree = tx.require_tree(tree_name.as_bytes())?;
     for item_id in ids {
       insert_index(&mut tree, id, item_id)?;
     }
@@ -149,7 +149,7 @@ pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Sch
 
 fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>, check_unique: bool) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
-    let mut tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+    let mut tree = tx.require_tree(tree_name.as_bytes())?;
     for item_id in ids {
       if check_unique {
         if let Some(exists) = tree.prefix_keys(&item_id)?.next() {
@@ -172,7 +172,13 @@ pub enum WriteIndexesError {
 
 impl From<canopydb::Error> for WriteIndexesError {
   fn from(e: canopydb::Error) -> Self {
-    WriteIndexesError::Storage(StorageError(e))
+    WriteIndexesError::Storage(StorageError::Backend(e))
+  }
+}
+
+impl From<StorageError> for WriteIndexesError {
+  fn from(e: StorageError) -> Self {
+    WriteIndexesError::Storage(e)
   }
 }
 

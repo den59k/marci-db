@@ -37,7 +37,7 @@ pub enum UpdateError {
 
 impl From<canopydb::Error> for UpdateError {
   fn from(e: canopydb::Error) -> Self {
-    UpdateError::Storage(StorageError(e))
+    UpdateError::Storage(StorageError::Backend(e))
   }
 }
 

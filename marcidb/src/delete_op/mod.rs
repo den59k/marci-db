@@ -66,7 +66,7 @@ pub enum DeleteError {
 
 impl From<canopydb::Error> for DeleteError {
   fn from(e: canopydb::Error) -> Self {
-    DeleteError::Storage(StorageError(e))
+    DeleteError::Storage(StorageError::Backend(e))
   }
 }
 

@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
+use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
 
 pub fn process_delete<'a>(
   tx: &'a WriteTransaction, 
@@ -16,7 +16,7 @@ pub fn process_delete<'a>(
     let tree: &mut Tree<'a> = match tree {
         Some(t) => t,
         None => {
-          owned = tx.get_tree(entity.name.as_bytes())?.unwrap();
+          owned = tx.require_tree(entity.name.as_bytes())?;
           &mut owned
         }
     };
@@ -36,21 +36,21 @@ pub fn process_delete<'a>(
   for delete_index in action.indexes_to_delete.iter() {
     match delete_index {
       DeleteIndex::Value { index, key } => {
-        let mut tree = tx.get_tree(index.tree_name())?.unwrap();
+        let mut tree = tx.require_tree(index.tree_name())?;
         tree.delete(key)?;
       },
       DeleteIndex::BodyValue { index, offset_pos, field } => {
         let Some(value) = get_body_data(field, body_value.as_ref().unwrap(), *offset_pos) else {
           continue;
         };
-        let mut tree = tx.get_tree(index.tree_name())?.unwrap();
+        let mut tree = tx.require_tree(index.tree_name())?;
         tree.delete(&encode_full_index(field, index, id, value))?;
       },
       DeleteIndex::KeyValue { index, field, .. } => {
         let Some(value) = get_data(entity, field, &id, &[], schema) else {
           continue;
         };
-        let mut tree = tx.get_tree(index.tree_name())?.unwrap();
+        let mut tree = tx.require_tree(index.tree_name())?;
         tree.delete(&encode_full_index(field, index, id, value))?;
       }
     }
@@ -67,7 +67,7 @@ pub fn process_delete<'a>(
         }
       },
       DependencyActionType::SetNull { offset_pos } => {
-        let mut tree = tx.get_tree(dep.rev_entity.name.as_bytes())?.unwrap();
+        let mut tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
         for item_id in item_ids.iter() {
           let mut body = tree.get(item_id)?.unwrap().to_vec();
           set_null(dep.rev_entity, dep.rev_field, &mut body, *offset_pos);
@@ -75,7 +75,7 @@ pub fn process_delete<'a>(
         }
       },
       DependencyActionType::RemoveIndex { tree_name } => {
-        let mut tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+        let mut tree = tx.require_tree(tree_name.as_bytes())?;
         for item_id in item_ids.iter() {
           tree.delete(&[ item_id, id ].concat())?;
         }
@@ -93,7 +93,7 @@ pub fn process_delete<'a>(
     // this prefix scan simply finds nothing.)
     if let RefToDelete::ChildEntity { entity: child, delete_op } = ref_to_delete && !delete_op.is_empty() {
       let child_ids: Vec<Vec<u8>> = {
-        let tree = tx.get_tree(child.name.as_bytes())?.unwrap();
+        let tree = tx.require_tree(child.name.as_bytes())?;
         tree.prefix_keys(&id)?.map(|e| Ok(e?.to_vec())).collect::<Result<Vec<_>, canopydb::Error>>()?
       };
       for child_id in child_ids.iter() {
@@ -110,11 +110,11 @@ pub fn process_delete<'a>(
 pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id: &[u8]) -> Result<(), DeleteError> {
   match ref_to_delete {
     RefToDelete::Index { tree_name } => {
-      let mut tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+      let mut tree = tx.require_tree(tree_name.as_bytes())?;
       delete_by_prefix(&mut tree, parent_id)?;
     }
     RefToDelete::ChildEntity { entity, delete_op: action } => {
-      let mut tree = tx.get_tree(entity.name.as_bytes())?.unwrap();
+      let mut tree = tx.require_tree(entity.name.as_bytes())?;
       if action.is_empty() {
         delete_by_prefix(&mut tree, parent_id)?;
       } else {
@@ -129,7 +129,7 @@ pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id:
 fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema: &Schema, id: &[u8], body: &Option<Vec<u8>>) -> Result<Vec<Vec<u8>>, DeleteError> {
   let item_ids = match dep.binding {
     Some((_, RefBinding::CurrentId)) => {
-      let tree = tx.get_tree(dep.rev_entity.name.as_bytes())?.unwrap();
+      let tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
       tree.prefix_keys(&id)?
         .map(|e| Ok(e?.to_vec()))
         .collect::<Result<Vec<_>, canopydb::Error>>()?
@@ -142,7 +142,7 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
     },
     Some((_, RefBinding::IndexTree(tree_name))) => {
       let item_id_len = id.len();
-      let index_tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+      let index_tree = tx.require_tree(tree_name.as_bytes())?;
       index_tree.prefix_keys(&id)?
         .map(|e| Ok(e?[item_id_len..].to_vec()))
         .collect::<Result<Vec<_>, canopydb::Error>>()?
@@ -153,7 +153,7 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
           return Err(DeleteError::Unsupported("delete dependency with CurrentId reverse-binding and no forward binding is not supported"));
         },
         RefBinding::FieldValue => {
-          let tree = tx.get_tree(dep.rev_entity.name.as_bytes())?.unwrap();
+          let tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
           let mut item_ids = vec![];
           for items in tree.iter()? {
             let (item_id, item_body) = items?;
@@ -169,7 +169,7 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
           // `parent_id ++ id`. Yields nothing for an index that was never maintained (no forward binding),
           // which is exactly the composite-key case where children are reached by key prefix instead.
           let id_len = id.len();
-          let index_tree = tx.get_tree(tree_name.as_bytes())?.unwrap();
+          let index_tree = tx.require_tree(tree_name.as_bytes())?;
           let mut item_ids = vec![];
           for entry in index_tree.iter()? {
             let (key, _) = entry?;

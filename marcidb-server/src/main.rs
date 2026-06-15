@@ -45,7 +45,10 @@ impl ServerContext {
         // canopydb requires an existing DB directory
         std::fs::create_dir_all(&path).map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        let db = Arc::new(RwLock::new(MarciDB::open(path.to_str().unwrap()).with_providers(self.providers.clone())));
+        let db = MarciDB::try_open(path.to_str().unwrap())
+            .map_err(|e| ApiError::Internal(format!("failed to open database '{}': {}", name, e)))?
+            .with_providers(self.providers.clone());
+        let db = Arc::new(RwLock::new(db));
         dbs.insert(name.to_string(), db.clone());
         Ok(db)
     }

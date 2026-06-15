@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use bitvec::vec::BitVec;
 use canopydb::{Bytes, Transaction, Tree};
 
-use crate::{Field, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, query_op::{IncludeQuery, PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
+use crate::{Field, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, error::RequireTree, query_op::{IncludeQuery, PrefixKey, QueryOp, QueryType, process_query_many, process_query_one::process_query_one, process_where::process_where}, schema::{Entity, Schema}, utils::get_data};
 
 pub type ParentData<'a> = (&'a Entity, &'a[u8], &'a[u8]);
 
@@ -180,7 +180,7 @@ impl<'a, U, F> TransationContext<'a, U, F> {
     if let Some(tree) = self.trees.get(key) {
       return Ok(tree.clone());
     }
-    let tree = Arc::new(self.rx.get_tree(key.as_bytes())?.unwrap());
+    let tree = Arc::new(self.rx.require_tree(key.as_bytes())?);
     self.trees.insert(key.to_string(), tree.clone());
     Ok(tree)
   }

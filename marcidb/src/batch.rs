@@ -54,7 +54,7 @@ impl std::error::Error for BatchError {}
 /// * `findMany` — array of objects
 /// * `aggregate` — aggregates object; `count` — number
 pub fn execute_batch(db: &MarciDB, ops: &[Value]) -> Result<Vec<Value>, BatchError> {
-  let tx = db.begin_write();
+  let tx = db.begin_write().map_err(|e| BatchError { index: 0, kind: BatchErrorKind::Storage(e) })?;
 
   let mut results: Vec<Value> = Vec::with_capacity(ops.len());
   for (index, op) in ops.iter().enumerate() {

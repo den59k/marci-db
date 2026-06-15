@@ -44,7 +44,7 @@ fn transaction_commit_test() {
   let user = db.get_model("User").unwrap();
   let post = db.get_model("Post").unwrap();
 
-  let tx = db.begin_write();
+  let tx = db.begin_write().unwrap();
   let alice = tx_insert(&tx, &db, "User", json!({ "name": "Alice" }));
   tx_insert(&tx, &db, "Post", json!({ "title": "First", "author": alice }));
   tx_insert(&tx, &db, "Post", json!({ "title": "Second", "author": alice }));
@@ -74,7 +74,7 @@ fn transaction_rollback_on_drop_test() {
   let user = db.get_model("User").unwrap();
 
   {
-    let tx = db.begin_write();
+    let tx = db.begin_write().unwrap();
     tx_insert(&tx, &db, "User", json!({ "name": "Ghost" }));
     assert_eq!(tx.count(user).unwrap(), 1);
     // tx goes out of scope without commit → rollback
@@ -88,7 +88,7 @@ fn transaction_explicit_rollback_test() {
   let (_dir, db) = make_db();
   let user = db.get_model("User").unwrap();
 
-  let tx = db.begin_write();
+  let tx = db.begin_write().unwrap();
   tx_insert(&tx, &db, "User", json!({ "name": "Alice" }));
   tx_insert(&tx, &db, "User", json!({ "name": "Bob" }));
   tx.rollback().unwrap();

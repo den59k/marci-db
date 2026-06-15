@@ -1,6 +1,6 @@
 use canopydb::WriteTransaction;
 
-use crate::{MarciDB, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
+use crate::{MarciDB, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, error::RequireTree, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
 
 /// An open API-level write transaction.
 ///
@@ -55,7 +55,7 @@ impl<'db> MarciTransaction<'db> {
   }
 
   pub fn count(&self, entity: &Entity) -> Result<u64, StorageError> {
-    let tree = self.tx.get_tree(entity.name.as_bytes())?.unwrap();
+    let tree = self.tx.require_tree(entity.name.as_bytes())?;
     return Ok(tree.len());
   }
 
