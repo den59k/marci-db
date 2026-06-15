@@ -115,8 +115,8 @@ Indexes a `Float[N]` field for approximate nearest-neighbour search.
 
 - Args: `euclidean` (default) or `cosine` (cosine L2-normalizes points at index and query time).
 - `$near` payload: `{ "vector": [..N floats..], "k": 10, "threshold": 0.0 }`.
-- Enable with `cargo run -p marcidb-server --features vector` (pulls in `marci_vector`, which needs the
-  nightly `portable_simd` feature).
+- Enable with `cargo +nightly run -p marcidb-server --features vector` (pulls in `marci_vector`, which uses
+  `portable_simd` — hence nightly). See [Building the server with the modules](#building-the-server-with-the-modules).
 
 ### Full-text — `marci_fulltext_index::FullTextProvider` (`name = "fulltext"`)
 
@@ -126,7 +126,7 @@ Indexes a `String` field for ranked text search (inverted index + tf·idf), with
   Cyrillic → Russian, otherwise English — so one field handles mixed Russian/English text.
 - `$search`/`$near` payload: a plain string `"quick brown fox"`, or `{ "query": "...", "limit": 50 }`.
 - OR semantics over query terms; results ranked best-first; the query's `$limit` further trims them.
-- Enable with `cargo run -p marcidb-server --features fulltext` (stable toolchain — no nightly).
+- Enable with `cargo run -p marcidb-server --features fulltext` (stable toolchain). See [Building the server with the modules](#building-the-server-with-the-modules).
 
 ```
 body String @fulltext            # auto RU+EN
@@ -135,6 +135,27 @@ note String @fulltext(russian)   # force Russian stemming
 
 It is also the worked example of a non-vector module: a `String` field, batch-reindexed, with the provider
 owning its own key layout (posting list + a doc-count stats key, multiplexed by a tag byte in one tree).
+
+## Building the server with the modules
+
+A plain `cargo build -p marcidb-server` includes no modules. Turn them on with cargo features. **Full-text
+builds on stable; the vector module needs nightly** (it uses `std::simd` / `portable_simd`), so any build
+that includes `vector` does too:
+
+```bash
+# both modules — vector pulls in portable_simd, so use the nightly toolchain
+cargo +nightly build --release -p marcidb-server --features "vector fulltext"
+
+# full-text only — stable is fine
+cargo build --release -p marcidb-server --features fulltext
+```
+
+The binary lands at `target/release/marcidb-server`. (`--features "vector fulltext"`, `--features vector,fulltext`,
+and `--features vector --features fulltext` are all equivalent. Use `rustup default nightly` instead of the
+`+nightly` prefix if you prefer.)
+
+The repository's [`Dockerfile`](../Dockerfile) already builds the server image with both modules (on a nightly
+base): `docker build -t marcidb-server .` from the workspace root.
 
 ## v1 limitations
 

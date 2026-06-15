@@ -53,6 +53,8 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:lates
 # or, from the repo: cargo run -p marcidb-server --release
 ```
 
+Vector and full-text search are optional modules, off by default. Build with their cargo features to include them — `cargo +nightly build --release -p marcidb-server --features "vector fulltext"` (vector needs nightly; full-text builds on stable). See [Custom indexes](docs/CUSTOM-INDEXES.md#building-the-server-with-the-modules).
+
 4. Push your schema to a database (created on first push):
 
 ```bash
