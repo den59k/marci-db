@@ -1,13 +1,14 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
+use crate::{Field, ProviderRegistry, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
 
 pub fn process_delete<'a>(
-  tx: &'a WriteTransaction, 
+  tx: &'a WriteTransaction,
   id: &[u8],
-  entity: &Entity, 
+  entity: &Entity,
   action: &DeleteOp,
   schema: &Schema,
+  providers: &ProviderRegistry,
   tree: Option<&mut Tree<'a>>
 ) -> Result<bool, DeleteError> {
   let mut body_value: Option<Vec<u8>> = None;
@@ -52,6 +53,11 @@ pub fn process_delete<'a>(
         };
         let mut tree = tx.require_tree(index.tree_name())?;
         tree.delete(&encode_full_index(field, index, id, value))?;
+      },
+      DeleteIndex::Custom { field } => {
+        // The old field value lives in the body; `is_body_need()` guaranteed it was read above.
+        let body = body_value.as_deref().expect("a Custom delete-index forces is_body_need");
+        on_field_delete(providers, tx, field, RowRef { id, body, entity, schema })?;
       }
     }
   }
@@ -63,7 +69,7 @@ pub fn process_delete<'a>(
     match &dep.action_type {
       DependencyActionType::Delete (action) => {
         for item_id in item_ids.iter() {
-          process_delete(tx, &item_id, dep.rev_entity, action, schema, None)?;
+          process_delete(tx, &item_id, dep.rev_entity, action, schema, providers, None)?;
         }
       },
       DependencyActionType::SetNull { offset_pos } => {
@@ -97,7 +103,7 @@ pub fn process_delete<'a>(
         tree.prefix_keys(&id)?.map(|e| Ok(e?.to_vec())).collect::<Result<Vec<_>, canopydb::Error>>()?
       };
       for child_id in child_ids.iter() {
-        process_delete(tx, child_id, child, delete_op, schema, None)?;
+        process_delete(tx, child_id, child, delete_op, schema, providers, None)?;
       }
       continue;
     }

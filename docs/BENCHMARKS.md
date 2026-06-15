@@ -46,8 +46,9 @@ corpora (fixed-seed LCG), 5 000 rows each.
 | `$search`, 1 term | ~0.56 ms / query |
 | `$search`, 3 terms | ~1.5 ms / query |
 
-> Both indexes are batch-built (`$reindex`); incremental maintenance is not wired yet, so these measure
-> the build-once / query-many shape.
+> These measure the batch `$reindex` build + query-many shape. Full-text is also maintained live on each
+> write (insert/update/delete), so in normal use `$reindex` is only needed to backfill pre-existing rows;
+> vector remains `$reindex`-only.
 
 ## Planned: comparison with other databases
 

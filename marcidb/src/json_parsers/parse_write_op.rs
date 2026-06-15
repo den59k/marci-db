@@ -211,8 +211,8 @@ fn parse_write_op<'a>(
         }
 
         for index in field.indexes.iter() {
-            // Module (`@custom`) indexes are not maintained on the write path in v1 (populated via
-            // `$reindex`); only value/number indexes get an inline write entry here.
+            // Module (`@custom`) indexes aren't inline value/number entries — they're maintained by the
+            // provider hooks (`on_insert`) dispatched in `process_write` after the row is written.
             if matches!(index, FieldIndex::Custom { .. }) { continue; }
             write_indexes.push(WriteIndex::Value(field, index, encode_index(field, index, value_data)));
         }

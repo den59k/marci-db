@@ -4,7 +4,7 @@ mod prepare_delete_op;
 pub use process_delete::{process_delete};
 pub use prepare_delete_op::prepare_delete;
 
-use crate::{Field, StorageError, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
+use crate::{Field, ProviderError, StorageError, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
 
 #[derive(Debug)]
 pub struct DeleteOp<'a> {
@@ -15,7 +15,8 @@ pub struct DeleteOp<'a> {
 
 impl DeleteOp<'_> {
   pub fn is_body_need(&self) -> bool {
-    return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. })) ||
+    // A `Custom` entry needs the old field value, which is read from the body — so force the body read too.
+    return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. } | DeleteIndex::Custom { .. })) ||
       self.dependencies.iter().any(|f| matches!(f.binding, Some((_, RefBinding::FieldValue))))
   }
   pub fn is_empty(&self) -> bool {
@@ -28,6 +29,9 @@ pub enum DeleteIndex<'a> {
   Value { index: &'a FieldIndex, key: Vec<u8> },
   BodyValue { index: &'a FieldIndex, field: &'a Field, offset_pos: usize },
   KeyValue { index: &'a FieldIndex, field: &'a Field },
+  /// A live `@custom` (module) index on `field`: its `on_delete` hook is dispatched with the old field value
+  /// read from the row body. One entry per indexed field; the provider iterates the field's custom indexes.
+  Custom { field: &'a Field },
 }
 
 #[derive(Debug)]
@@ -61,6 +65,8 @@ pub enum DeleteError {
   EncodeError(EncodeError),
   /// A cascade/dependency of this form is not implemented yet (nested owned collections, IndexTree-rev)
   Unsupported(&'static str),
+  /// A live `@custom` index hook (e.g. full-text `on_delete`) failed while maintaining the index.
+  IndexError(ProviderError),
   Storage(StorageError)
 }
 
@@ -73,5 +79,11 @@ impl From<canopydb::Error> for DeleteError {
 impl From<StorageError> for DeleteError {
   fn from(e: StorageError) -> Self {
     DeleteError::Storage(e)
+  }
+}
+
+impl From<ProviderError> for DeleteError {
+  fn from(e: ProviderError) -> Self {
+    DeleteError::IndexError(e)
   }
 }

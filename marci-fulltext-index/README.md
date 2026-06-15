@@ -53,8 +53,10 @@ curl -X POST http://localhost:3000/blog/Post/findMany \
 
 ## Building the index
 
-The index is populated in a batch from current data via the `$reindex` endpoint (not incrementally on each
-write — v1). Call it after a bulk import or whenever the field's data has changed:
+The index is **live**: an insert/update/delete maintains it in the same transaction as the row, so a
+`$search` reflects writes immediately — no `$reindex` after ordinary writes. You still call `$reindex` once to
+**backfill** rows that predate the index (adding `@fulltext` to a table creates the tree empty), and to
+rebuild after a bulk import bypassing the API or a language/args change:
 
 ```bash
 curl -X POST http://localhost:3000/blog/Post/$reindex     # one model
@@ -98,7 +100,8 @@ let db = MarciDB::open(path).with_providers(Arc::new(registry));
 ## Limitations (basic version)
 
 - No stop-word list — common words are down-weighted by idf rather than dropped.
-- Batch `$reindex` only; incremental maintenance on insert/update/delete is not wired yet.
+- Live on single-field writes; `$reindex` is still needed to backfill pre-existing rows when the index is
+  first added (or after a language/args change).
 - Indexes a single `String` field; a multi-field index (e.g. title + body as one document) is a future
   extension.
 

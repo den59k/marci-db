@@ -76,3 +76,22 @@ fn near_with_wrong_dimensions_is_rejected() {
     let result = db.find_many(&query, |ctx| decode_document(ctx).unwrap());
     assert!(result.is_err(), "mismatched query dimensions must error");
 }
+
+#[test]
+fn writes_do_not_maintain_index_until_reindex() {
+    // Vector keeps the default `maintains_incrementally() == false`: clustering can't be updated per-point
+    // cheaply, so inserts/updates/deletes do NOT touch the index on the write path. A `$near` therefore
+    // finds nothing until an explicit `$reindex` builds the clusters.
+    let dir = tempdir().unwrap();
+    let db = MarciDB::new(SCHEMA, dir.path().to_str().unwrap()).with_providers(registry());
+
+    insert(&db, "Place", json!({ "name": "A", "loc": [0.0, 0.0] }));
+    insert(&db, "Place", json!({ "name": "B", "loc": [1.0, 1.0] }));
+
+    assert!(near(&db, "Place", "loc", json!({ "vector": [0.0, 0.0], "k": 5 })).is_empty(),
+        "the vector index must stay empty until $reindex");
+
+    db.reindex_entity(db.get_model("Place").unwrap()).unwrap();
+    assert!(!near(&db, "Place", "loc", json!({ "vector": [0.0, 0.0], "k": 5 })).is_empty(),
+        "after $reindex the vector index is populated");
+}

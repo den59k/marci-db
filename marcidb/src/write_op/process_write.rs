@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, error::RequireTree, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
@@ -13,6 +13,8 @@ pub enum InsertError {
   DuplicateKey(Vec<u8>),
   CannotChangePrimaryKey(String),
   ParentIdRequired,
+  /// A live `@custom` index hook (e.g. full-text `on_insert`) failed while maintaining the index.
+  IndexError(ProviderError),
   Storage(StorageError)
 }
 
@@ -25,6 +27,12 @@ impl From<canopydb::Error> for InsertError {
 impl From<StorageError> for InsertError {
   fn from(e: StorageError) -> Self {
     InsertError::Storage(e)
+  }
+}
+
+impl From<ProviderError> for InsertError {
+  fn from(e: ProviderError) -> Self {
+    InsertError::IndexError(e)
   }
 }
 
@@ -95,7 +103,11 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
       }
     }
   }
-  
+
+  // Live `@custom` index maintenance: feed the new row to any provider that opts into incremental upkeep
+  // (e.g. full-text). Parsing skips these on the inline index pass, so they are driven entirely here.
+  on_row_insert(&db.providers, tx, RowRef { id: &write_id, body: data, entity, schema: &db.schema })?;
+
   for st in insert.refs.iter() {
     match st {
       WriteRelation::Create { op, st, .. } => {

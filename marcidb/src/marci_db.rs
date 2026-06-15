@@ -11,8 +11,9 @@ pub struct MarciDB {
   pub(crate) counters: Vec<Arc<AtomicU64>>,
   model_by_name: HashMap<String, usize>,
   /// Registered `@custom` index providers (vector, full-text, …). Empty by default; the host installs them
-  /// via [`MarciDB::with_providers`]. Shared across DBs that the same host opens.
-  providers: Arc<ProviderRegistry>,
+  /// via [`MarciDB::with_providers`]. Shared across DBs that the same host opens. `pub(crate)` so the write
+  /// paths can dispatch the live-maintenance hooks (`on_insert`/`on_update`/`on_delete`).
+  pub(crate) providers: Arc<ProviderRegistry>,
 }
 
 impl MarciDB {
@@ -181,6 +182,18 @@ impl MarciDB {
     let tree = rx.get_tree(tree_name.as_bytes()).expect("count_dev: get_tree failed")
       .unwrap_or_else(|| panic!("count_dev: tree '{}' not found", tree_name));
     tree.len()
+  }
+
+  /// Test/diagnostic helper: every `(key, value)` pair of a raw tree, in key order. Companion to
+  /// [`MarciDB::count_dev`], used to assert that live index maintenance matches a full `$reindex`
+  /// byte-for-byte. Like `count_dev`, it panics on error so a failing test surfaces loudly.
+  pub fn dump_dev(&self, tree_name: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let rx = self.db.begin_read().expect("dump_dev: begin_read failed");
+    let tree = rx.get_tree(tree_name.as_bytes()).expect("dump_dev: get_tree failed")
+      .unwrap_or_else(|| panic!("dump_dev: tree '{}' not found", tree_name));
+    tree.iter().expect("dump_dev: iter failed")
+      .map(|e| { let (k, v) = e.expect("dump_dev: entry read failed"); (k.to_vec(), v.to_vec()) })
+      .collect()
   }
 
   /// Opens an API-level write transaction. Several operations within it are applied

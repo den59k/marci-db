@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -12,7 +12,8 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
 
   let resp = update_fields(&update.update_fields, id, &data, entity, &db.schema, | field, old_value, new_value | {
     for field_index in field.indexes.iter() {
-      // Module (`@custom`) indexes are not maintained on the write path in v1 (populated via `$reindex`).
+      // Module (`@custom`) indexes are maintained below via the provider hooks, not by the inline
+      // value/number index path.
       if matches!(field_index, FieldIndex::Custom { .. }) { continue; }
       let mut tree = tx.require_tree(field_index.tree_name())?;
 
@@ -30,6 +31,11 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
         tree.insert(&[ index_data.as_slice(), &id ].concat(), &[])?;
       }
     }
+
+    // Live `@custom` index maintenance (full-text, …): re-index the changed value. The hook fires only for
+    // fields that actually changed; a null↔value transition arrives as old/new = None and is resolved by the
+    // provider. The pre-update body is passed for sibling-field access (unused by single-field providers).
+    on_field_update(&db.providers, tx, field, RowRef { id, body: &data, entity, schema: &db.schema }, old_value, new_value)?;
     Ok(())
   })?;
 
@@ -41,7 +47,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
     match &update_ref.op {
         UpdateRelationOp::Remove(delete_op) => {
           if let Some(item_id) = get_id_from_ref_info(tx, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema)? {
-            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, None).map_err(|e| UpdateError::DeleteError(e))?;
+            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, &db.providers, None).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::DisconnectAll => {
@@ -59,7 +65,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           let mut tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
           for item_id in get_ids_from_ref_info(tx, &tree, update_ref.ref_info, id)? {
             // println!("ready to delete {} {:#?}", update_ref.field.name, delete_op);
-            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
+            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, &db.providers, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::Push(write_ops) => {

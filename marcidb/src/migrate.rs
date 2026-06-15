@@ -138,8 +138,9 @@ fn build_index(tx: &WriteTransaction, schema: &Schema, entity: &str, field_name:
     return Err(MigrateApplyError::Unsupported("indexing a field of this type is not supported yet"));
   }
 
-  // Module (`@custom`) indexes: just create the (empty) tree — population is via `$reindex` (batch, v1),
-  // not inline backfill (a vector index needs global clustering). Value/number indexes are backfilled below.
+  // Module (`@custom`) indexes: just create the (empty) tree. Pre-existing rows are backfilled by `$reindex`
+  // (a vector index needs global clustering; full-text is then maintained live on subsequent writes), never
+  // by inline backfill here. Value/number indexes are backfilled below.
   let mut has_backfill = false;
   for index in field.indexes.iter() {
     if let FieldIndex::Custom { .. } = index {

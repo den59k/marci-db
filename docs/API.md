@@ -61,7 +61,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `@bind(Model.field)` — declares the reverse side of a relation
 - `@format(uuid | hex)` — JSON representation of byte fields
 - `@onDelete(...)` — delete constraint for relations (`Cascade`, `SetNull`, `Restrict`)
-- `@vector(cosine | euclidean)` / `@fulltext(multi | english | russian)` — module-provided indexes: nearest-neighbour on a `Float[N]` field, ranked text search on a `String` field. Any attribute that matches no built-in is parsed as a module index named after the keyword (`@<provider>(args)`); `@custom(<provider>, args)` is the explicit equivalent. Queried with `$near` / `$search`, populated by `reindex()` — see [Vector & full-text search](#vector--full-text-search)
+- `@vector(cosine | euclidean)` / `@fulltext(multi | english | russian)` — module-provided indexes: nearest-neighbour on a `Float[N]` field, ranked text search on a `String` field. Any attribute that matches no built-in is parsed as a module index named after the keyword (`@<provider>(args)`); `@custom(<provider>, args)` is the explicit equivalent. Queried with `$near` / `$search`; full-text is maintained live on writes, vector is built by `reindex()` (also used to backfill) — see [Vector & full-text search](#vector--full-text-search)
 
 ### Structs, relations, enums
 
@@ -113,7 +113,7 @@ All of the above also work inside nested selects: `posts: { title: true, $order:
 
 ### Vector & full-text search
 
-A field with a module index (`@vector` / `@fulltext`, or the generic `@custom`) is searched with `$near` (alias `$search`) inside `$where`. The index is **not** maintained on writes yet — (re)build it with `reindex()` after a bulk import or changes.
+A field with a module index (`@vector` / `@fulltext`, or the generic `@custom`) is searched with `$near` (alias `$search`) inside `$where`. **Full-text is maintained live** — inserts/updates/deletes keep it current, so a `$search` reflects writes immediately. **Vector is `reindex()`-only** (its clustering can't be updated per-point). Either way, call `reindex()` once to backfill rows that predate the index, after a bulk import that bypasses the API, or after a language/args change.
 
 **Vector** — `embedding Float[1536] @vector(cosine)` (or `euclidean`):
 

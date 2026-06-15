@@ -35,7 +35,7 @@ impl<'db> MarciTransaction<'db> {
 
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
     let action = prepare_delete(&self.db.schema, entity, Some(id), None);
-    process_delete(&self.tx, id, entity, &action, &self.db.schema, None)
+    process_delete(&self.tx, id, entity, &action, &self.db.schema, &self.db.providers, None)
   }
 
   pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {

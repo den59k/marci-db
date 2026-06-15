@@ -10,12 +10,14 @@
 //! `<term>` never contains `0x00` (UTF-8 alphanumerics only), so the separator delimits term from id and
 //! keeps a short term's prefix scan from matching a longer term.
 //!
-//! Ranking: OR over query terms, scored by `Σ tf · idf` (BM25 idf), best first. `$reindex` populates the
-//! index (batch — v1, like the vector module); incremental maintenance is a later enhancement.
+//! Ranking: OR over query terms, scored by `Σ tf · idf` (BM25 idf), best first. The index is maintained
+//! **live**: inserts/updates/deletes flow through the `on_*` hooks (see [`IndexProvider::maintains_incrementally`]),
+//! so a `$search` reflects writes immediately. `$reindex` is still used to backfill pre-existing rows when the
+//! index is first added (or after an analyzer/args change), and to rebuild from scratch.
 
 use std::collections::{HashMap, HashSet};
 
-use marcidb::{Field, FieldType, IndexProvider, IndexTree, PrimitiveFieldType, ProviderError, RowScan, SearchHit};
+use marcidb::{Field, FieldType, IndexProvider, IndexTree, PrimitiveFieldType, ProviderError, RowRef, RowScan, SearchHit};
 use rust_stemmers::{Algorithm, Stemmer};
 use serde_json::Value;
 
@@ -106,6 +108,56 @@ impl IndexProvider for FullTextProvider {
         hits.truncate(limit);
         Ok(hits)
     }
+
+    // ───────────────────────────── incremental maintenance ─────────────────────────────
+    // The hooks run inside the row's write transaction, so postings and the row commit/roll back together.
+    // The analyzer is deterministic and stable for the life of an index (an args change is a drop+add →
+    // `$reindex`), so a delete removes exactly the terms a prior insert added. `df` is derived at query time
+    // from the posting prefix, so only the postings and the document count `N` are maintained here.
+
+    fn maintains_incrementally(&self) -> bool { true }
+
+    fn on_insert(&self, _field: &Field, args: &str, row: RowRef<'_>, new: Option<&[u8]>, store: &mut IndexTree<'_>) -> Result<(), ProviderError> {
+        let analyzer = Analyzer::new(Lang::parse(args)?);
+        let counts = term_counts_opt(&analyzer, new)?;
+        for (term, tf) in &counts {
+            store.insert(&posting_key(term, row.id), &tf.to_be_bytes())?;
+        }
+        // A doc with no indexable terms (null/empty/punctuation-only text) doesn't count toward `N`.
+        adjust_doc_count(store, if counts.is_empty() { 0 } else { 1 })
+    }
+
+    fn on_delete(&self, _field: &Field, args: &str, row: RowRef<'_>, old: Option<&[u8]>, store: &mut IndexTree<'_>) -> Result<(), ProviderError> {
+        let analyzer = Analyzer::new(Lang::parse(args)?);
+        let counts = term_counts_opt(&analyzer, old)?;
+        for term in counts.keys() {
+            store.remove(&posting_key(term, row.id))?;
+        }
+        adjust_doc_count(store, if counts.is_empty() { 0 } else { -1 })
+    }
+
+    fn on_update(&self, _field: &Field, args: &str, row: RowRef<'_>, old: Option<&[u8]>, new: Option<&[u8]>, store: &mut IndexTree<'_>) -> Result<(), ProviderError> {
+        let analyzer = Analyzer::new(Lang::parse(args)?);
+        let old_counts = term_counts_opt(&analyzer, old)?;
+        let new_counts = term_counts_opt(&analyzer, new)?;
+
+        // Remove the old postings, then write the new ones. A term present in both is removed and re-inserted
+        // with its new tf; a term only in `old` is dropped; a term only in `new` is added.
+        for term in old_counts.keys() {
+            store.remove(&posting_key(term, row.id))?;
+        }
+        for (term, tf) in &new_counts {
+            store.insert(&posting_key(term, row.id), &tf.to_be_bytes())?;
+        }
+
+        // `N` tracks only the presence transition: a doc that gains its first term (+1) or loses its last (-1).
+        let delta = match (!old_counts.is_empty(), !new_counts.is_empty()) {
+            (false, true) => 1,
+            (true, false) => -1,
+            _ => 0,
+        };
+        adjust_doc_count(store, delta)
+    }
 }
 
 // ───────────────────────────────── analyzer ─────────────────────────────────
@@ -195,6 +247,26 @@ fn term_prefix(term: &str) -> Vec<u8> {
 
 fn stats_key() -> Vec<u8> {
     vec![TAG_STATS, b'N']
+}
+
+/// Tokenize + count an optional field value; null text yields an empty map. Errors on non-UTF-8 bytes.
+fn term_counts_opt(analyzer: &Analyzer, value: Option<&[u8]>) -> Result<HashMap<String, u32>, ProviderError> {
+    let Some(value) = value else { return Ok(HashMap::new()); };
+    let text = std::str::from_utf8(value)
+        .map_err(|_| ProviderError::Invalid("fulltext field is not valid UTF-8".into()))?;
+    Ok(analyzer.term_counts(text))
+}
+
+/// Read-modify-write the document count `N`. Always rewrites the stats key, so a freshly-created index gains
+/// an explicit `N` on its first live write — keeping incremental maintenance byte-identical to a `$reindex`.
+/// Writes are single-writer (exclusive write lock), so this needs no extra synchronization. `N` floors at 0.
+fn adjust_doc_count(store: &mut IndexTree<'_>, delta: i64) -> Result<(), ProviderError> {
+    let n = store.get(&stats_key())?
+        .map(|b| u64::from_be_bytes(b.try_into().unwrap_or([0; 8])))
+        .unwrap_or(0);
+    let n = if delta >= 0 { n + delta as u64 } else { n.saturating_sub((-delta) as u64) };
+    store.insert(&stats_key(), &n.to_be_bytes())?;
+    Ok(())
 }
 
 /// `$search` / `$near` payload: a bare query string, or `{ "query": "...", "limit": N }`.
