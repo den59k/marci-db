@@ -10,12 +10,12 @@ algorithm in [`marci-vector`](../marci-vector/README.md) (which has no MarciDB d
 ```
 model Place {
     name String
-    loc  Float[2]     @custom(vector, euclidean)
+    loc  Float[2]     @vector(euclidean)
 }
 
 model Doc {
     title     String
-    embedding Float[1536]  @custom(vector, cosine)
+    embedding Float[1536]  @vector(cosine)
 }
 ```
 
@@ -32,8 +32,8 @@ The argument selects the distance metric:
 
 | Declaration | Metric |
 |---|---|
-| `@custom(vector, euclidean)` (or `l2`, or no arg) | Euclidean distance. |
-| `@custom(vector, cosine)` | Cosine similarity — vectors are L2-normalized at index **and** query time. |
+| `@vector(euclidean)` (or `l2`, or no arg) | Euclidean distance. |
+| `@vector(cosine)` | Cosine similarity — vectors are L2-normalized at index **and** query time. |
 
 The field must be a fixed-size float list, `Float[N]`; `N` is the embedding dimension.
 

@@ -5,14 +5,22 @@
 use std::sync::Arc;
 
 use marcidb::{
-    Field, FieldType, IndexProvider, IndexTree, MarciDB, PrimitiveFieldType, ProviderError,
-    ProviderRegistry, ReindexError, RowScan, SearchHit,
+    Field, FieldType, IndexProvider, IndexTree, MarciDB, MigrateApplyError, PrimitiveFieldType, ProviderError,
+    ProviderRegistry, ReindexError, RowScan, SearchHit, try_parse_schema,
 };
 use serde_json::json;
 use std::collections::HashSet;
 use tempfile::tempdir;
 
 use crate::db::{get_data, insert_data};
+
+/// Declarative `$sync` against a live DB (parse → reconcile → diff → commit), as the server's `$sync` does.
+fn migrate_to(db: &mut MarciDB, schema_text: &str) -> Result<(), MigrateApplyError> {
+    let mut new_schema = try_parse_schema(schema_text).unwrap();
+    marcidb_schema::reconcile(&mut new_schema, &db.schema);
+    let ops = marcidb_schema::diff(&db.schema, &new_schema).unwrap();
+    db.commit_schema(new_schema, &ops)
+}
 
 /// Trivial provider: stores `id -> field bytes` and answers `{ "contains": <substr> }` by substring match,
 /// scored by match position. Enough to prove the build/search/persistence wiring end to end.
@@ -157,6 +165,30 @@ fn near_inside_not_is_rejected() {
         "$where": { "$not": { "tags": { "$near": { "contains": "x" } } } }
     }));
     assert!(parsed.is_err(), "$near inside $not must be rejected");
+}
+
+#[test]
+fn migration_validates_custom_index_provider() {
+    // @echo on a String field with the provider registered → migration succeeds.
+    let dir = tempdir().unwrap();
+    let mut db = MarciDB::open(dir.path().to_str().unwrap()).with_providers(registry());
+    assert!(migrate_to(&mut db, "model Doc {\n  title String\n  tags String @echo\n}").is_ok());
+
+    // Unregistered provider (a typo, or a module not compiled in) → fails at migration, not deferred to reindex.
+    let dir2 = tempdir().unwrap();
+    let mut db2 = MarciDB::open(dir2.path().to_str().unwrap()).with_providers(registry());
+    match migrate_to(&mut db2, "model Doc {\n  body String @nonexistent\n}") {
+        Err(MigrateApplyError::NoProvider { provider, .. }) => assert_eq!(provider, "nonexistent"),
+        other => panic!("expected NoProvider, got {:?}", other),
+    }
+
+    // Provider rejects the field type (echo requires String) → InvalidIndex at migration.
+    let dir3 = tempdir().unwrap();
+    let mut db3 = MarciDB::open(dir3.path().to_str().unwrap()).with_providers(registry());
+    assert!(matches!(
+        migrate_to(&mut db3, "model Doc {\n  n Int @echo\n}"),
+        Err(MigrateApplyError::InvalidIndex { .. })
+    ));
 }
 
 #[test]

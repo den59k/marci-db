@@ -61,6 +61,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `@bind(Model.field)` — declares the reverse side of a relation
 - `@format(uuid | hex)` — JSON representation of byte fields
 - `@onDelete(...)` — delete constraint for relations (`Cascade`, `SetNull`, `Restrict`)
+- `@vector(cosine | euclidean)` / `@fulltext(multi | english | russian)` — module-provided indexes: nearest-neighbour on a `Float[N]` field, ranked text search on a `String` field. Any attribute that matches no built-in is parsed as a module index named after the keyword (`@<provider>(args)`); `@custom(<provider>, args)` is the explicit equivalent. Queried with `$near` / `$search`, populated by `reindex()` — see [Vector & full-text search](#vector--full-text-search)
 
 ### Structs, relations, enums
 
@@ -109,6 +110,40 @@ The planner picks the most selective indexed condition (exact id → unique eq �
 - `$cursor: { id }` — **exclusive** keyset cursor: results strictly after the row with this id, in the current `$order`. Without `$order` the order is fixed to primary-key order. Take the id from the last row of the previous page. If the cursor row was deleted: id-ordered queries continue seamlessly; value-ordered queries return an empty page.
 
 All of the above also work inside nested selects: `posts: { title: true, $order: { id: "desc" }, $limit: 5 }`.
+
+### Vector & full-text search
+
+A field with a module index (`@vector` / `@fulltext`, or the generic `@custom`) is searched with `$near` (alias `$search`) inside `$where`. The index is **not** maintained on writes yet — (re)build it with `reindex()` after a bulk import or changes.
+
+**Vector** — `embedding Float[1536] @vector(cosine)` (or `euclidean`):
+
+```ts
+await db.doc.findMany({
+  title: true,
+  $where: { embedding: { $near: { vector: queryEmbedding, k: 10, threshold: 0 } } },
+})
+```
+
+`vector` (length = the field's `N`) is required; `k` (default 10) caps the neighbours; `threshold` (default 0, off) is a relative distance-gap cutoff. Cosine L2-normalizes vectors at index and query time.
+
+**Full-text** — `body String @fulltext`. The default `multi` analyzer stems each token by script (Cyrillic → Russian, otherwise English), so one field handles mixed text; force a single language with `@fulltext(english)` / `@fulltext(russian)`:
+
+```ts
+await db.doc.findMany({
+  title: true,
+  $where: { body: { $search: "быстрый поиск" } },        // or { query: "...", limit: 20 }
+})
+```
+
+`$search` takes a query string (or `{ query, limit }`). It's OR over terms, ranked by tf·idf.
+
+Results come back **ranked best-first**; any other `$where` conditions are applied as a post-filter over the candidate set. In v1 a `$near`/`$search` runs standalone — it can't be combined with `$order` (results stay in rank order), and it is rejected inside `$or` / `$not`.
+
+```ts
+await db.doc.reindex()   // rebuild this model's @custom indexes → { ok: true, indexed: <count> }
+```
+
+> The vector and full-text modules are compiled into the server behind cargo features (`--features vector`, `--features fulltext`); the vector module needs a nightly toolchain. A database with a module index still **opens** and serves normal CRUD even if the module isn't enabled — but **migrating** a schema that uses it (and `reindex()` / `$near`) requires the module, so a `$sync`/`$migrate` with an unregistered (or mistyped) `@<provider>` is rejected with a clear error.
 
 ## Mutations
 
@@ -209,6 +244,7 @@ db.<model>.update(id, data)       // Promise<void>
 db.<model>.delete(id)             // Promise<void>
 db.<model>.count(query?)          // Promise<number>
 db.<model>.aggregate(query)       // Promise<AggregateResult>
+db.<model>.reindex()              // Promise<{ ok, indexed }> — only on models with a @custom index
 
 db.$transaction([ ...ops ])       // Promise<[...results]> — atomic, see Transactions
 ```

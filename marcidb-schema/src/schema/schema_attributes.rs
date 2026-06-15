@@ -82,7 +82,18 @@ pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
         }));
     }
 
-    Err(SchemaError(format!("Unknown attribute: {}", s)))
+    // Catch-all: an attribute that matches no built-in is treated as a module-provided index, where the
+    // attribute keyword IS the provider name — `@vector(cosine)`, `@fulltext(english)`, `@<provider>(args)`.
+    // (Equivalent to the explicit `@custom(<provider>, args)` form.) The name must be a plain identifier, so
+    // structurally malformed attributes (`@default(abc`) still fail rather than becoming bogus indexes.
+    let (name, args) = match s.strip_suffix(')').and_then(|x| x.split_once('(')) {
+        Some((name, args)) => (name.trim(), args.trim()),
+        None => (s.trim(), ""),
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(SchemaError(format!("Unknown attribute: {}", s)));
+    }
+    Ok(Attribute::Custom { name: name.to_string(), args: args.to_string() })
 }
 
 /// Splits the inside of `@custom(...)` into `(name, args)`: the first comma-separated token is the

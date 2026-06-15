@@ -33,6 +33,11 @@ export function marcidb(url) {
     return request("POST", `${url}/${model}/aggregate`, query);
   }
 
+  // Rebuilds the model's @custom (vector / full-text) indexes from current data
+  const reindex = (model) => {
+    return request("POST", `${url}/${model}/$reindex`);
+  }
+
   // Lazily-executed operation: then() runs a single request,
   // while $transaction takes only the __op descriptor
   const op = (descriptor, run) => ({

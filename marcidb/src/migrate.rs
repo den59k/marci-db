@@ -27,6 +27,11 @@ pub enum MigrateApplyError {
   Unsupported(&'static str),
   /// `add unique` found duplicates in existing data
   UniqueViolation { field: String },
+  /// A `@custom` (module) index names a provider that isn't registered — module not compiled in, or a typo.
+  /// Caught at migration time so a broken schema fails fast rather than at the first reindex/query.
+  NoProvider { provider: String, field: String },
+  /// A provider rejected the indexed field/args at migration time (wrong field type, bad args).
+  InvalidIndex { field: String, detail: String },
   /// Error computing the diff (carried from the authoring layer)
   Diff(MigrateError),
   /// Invalid snapshot/schema
@@ -39,6 +44,8 @@ impl std::fmt::Display for MigrateApplyError {
     match self {
       MigrateApplyError::Unsupported(s) => write!(f, "{}", s),
       MigrateApplyError::UniqueViolation { field } => write!(f, "unique violation on {} in existing data", field),
+      MigrateApplyError::NoProvider { provider, field } => write!(f, "no index provider registered for '@{}' (on field '{}') — the module is not compiled in, or the attribute is a typo", provider, field),
+      MigrateApplyError::InvalidIndex { field, detail } => write!(f, "invalid index on '{}': {}", field, detail),
       MigrateApplyError::Diff(e) => write!(f, "{}", e),
       MigrateApplyError::Schema(e) => write!(f, "{}", e),
       MigrateApplyError::Storage(e) => write!(f, "{:?}", e),

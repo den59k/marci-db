@@ -266,8 +266,8 @@ fn migrate_imperative_persists_across_reopen() {
 fn migrate_to_rejects_invalid_schema() {
   let dir = tempdir().unwrap();
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
-  assert!(migrate_to(&mut db,"model A {\n  x Undefined\n}").is_err());      // unknown type
-  assert!(migrate_to(&mut db,"model A {\n  x String @bogus\n}").is_err());  // bad attribute
+  assert!(migrate_to(&mut db,"model A {\n  x Undefined\n}").is_err());        // unknown type
+  assert!(migrate_to(&mut db,"model A {\n  x String @bad-attr\n}").is_err()); // malformed attribute name
 }
 
 /// Invalid action via apply_migration ($migrate) — an error, not a panic

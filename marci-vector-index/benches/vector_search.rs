@@ -35,7 +35,7 @@ fn registry() -> Arc<ProviderRegistry> {
 }
 
 fn main() {
-    let schema = format!("model Item {{\n  name String\n  embedding Float[{}] @custom(vector, cosine)\n}}", DIM);
+    let schema = format!("model Item {{\n  name String\n  embedding Float[{}] @vector(cosine)\n}}", DIM);
 
     let dir = tempfile::tempdir().unwrap();
     let db = MarciDB::new(&schema, dir.path().to_str().unwrap()).with_providers(registry());

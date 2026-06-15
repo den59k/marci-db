@@ -7,8 +7,8 @@ field a ranked text index (Snowball stemming + an on-disk inverted index with tf
 ```
 model Post {
     title String
-    body  String  @custom(fulltext)            # auto: Russian + English
-    note  String  @custom(fulltext, russian)   # force Russian stemming
+    body  String  @fulltext            # auto: Russian + English
+    note  String  @fulltext(russian)   # force Russian stemming
 }
 ```
 
@@ -25,9 +25,9 @@ The argument selects the analyzer language:
 
 | Declaration | Behaviour |
 |---|---|
-| `@custom(fulltext)` / `@custom(fulltext, multi)` | **Default.** Each token is stemmed by script — Cyrillic → Russian, otherwise English. One field handles mixed Russian/English text. |
-| `@custom(fulltext, english)` | English stemmer only. |
-| `@custom(fulltext, russian)` | Russian stemmer only. |
+| `@fulltext` / `@fulltext(multi)` | **Default.** Each token is stemmed by script — Cyrillic → Russian, otherwise English. One field handles mixed Russian/English text. |
+| `@fulltext(english)` | English stemmer only. |
+| `@fulltext(russian)` | Russian stemmer only. |
 
 Stemming means queries match inflected forms: `running` ↔ `runs`, `кошку` ↔ `Кошки`, `машину` ↔ `машина`.
 

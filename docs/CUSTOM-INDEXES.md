@@ -1,18 +1,22 @@
-# Custom index modules (`@custom`)
+# Custom index modules
 
 MarciDB indexes are pluggable. Beyond the built-in value/number indexes (`@index`, `@unique`), a field can
-carry a **module index** declared with `@custom(<provider>, <args>)`. A module (a separate crate) implements
-the `IndexProvider` trait; the engine handles schema/migration/lifecycle and dispatches build and search to
-the provider. The bundled example is the vector index (`marci_vector_index`); full-text search would be added
-the same way, with no change to the engine or server cores.
+carry a **module index**: a module (a separate crate) implements the `IndexProvider` trait, and the engine
+handles schema/migration/lifecycle and dispatches build and search to it. The bundled modules are vector
+(`marci_vector_index`) and full-text (`marci_fulltext_index`).
 
 ```
-embedding Float[1536]  @custom(vector, cosine)
-body      String       @custom(fulltext, english)   # a future module
+embedding Float[1536]  @vector(cosine)
+body      String       @fulltext(english)
 ```
 
-`<provider>` selects the provider by name; `<args>` is the raw remainder, parsed by the provider itself —
-the schema layer stays provider-agnostic.
+A module index is declared with `@<provider>(<args>)`, named after the provider — **any attribute that
+matches no built-in is parsed as a module index** (so a new module just picks an attribute name; the schema
+layer stays provider-agnostic). `<args>` is the raw remainder, parsed by the provider itself. The explicit
+form `@custom(<provider>, <args>)` is equivalent — useful if a provider name would collide with a built-in
+attribute. (A typo like `@indx` is no longer a *parse* error, but it isn't silent either: `$sync` / `$migrate`
+validates every newly-added module index against the registered providers and rejects an unknown one — the
+provider must be compiled in to apply a schema that uses it.)
 
 ## How it fits together
 
@@ -28,8 +32,9 @@ findMany $near →  provider.search(payload, store) → ranked ids → rows fetc
 - v1 populates indexes via the explicit `$reindex` endpoint (a vector index needs global clustering, so
   batch rebuild is the right model). The `on_insert/on_update/on_delete` hooks are reserved for incremental
   maintenance (full-text's natural model) and default to no-op.
-- A DB with a `@custom` field opens and serves normal CRUD even if the module isn't compiled in — only
-  `$reindex` and `$near` require the provider to be registered.
+- A DB with a module index **opens** and serves normal CRUD even if the module isn't compiled in. Only
+  **changing** the schema (`$sync` / `$migrate`), `$reindex`, and `$near` require the provider — so a DB
+  built on one server runs on a leaner build, but you must recompile with the module before migrating it.
 
 ## Implementing a provider
 
@@ -41,7 +46,7 @@ use marcidb::{Field, IndexProvider, IndexTree, ProviderError, RowScan, SearchHit
 pub struct MyProvider;
 
 impl IndexProvider for MyProvider {
-    fn name(&self) -> &str { "myindex" }                 // matches @custom(myindex, …)
+    fn name(&self) -> &str { "myindex" }                 // matches @myindex(…) / @custom(myindex, …)
 
     fn validate(&self, field: &Field, args: &str) -> Result<(), ProviderError> {
         // Reject unsupported field types / bad args here (surfaced as HTTP 400).
@@ -124,8 +129,8 @@ Indexes a `String` field for ranked text search (inverted index + tf·idf), with
 - Enable with `cargo run -p marcidb-server --features fulltext` (stable toolchain — no nightly).
 
 ```
-body String @custom(fulltext)            # auto RU+EN
-note String @custom(fulltext, russian)   # force Russian stemming
+body String @fulltext            # auto RU+EN
+note String @fulltext(russian)   # force Russian stemming
 ```
 
 It is also the worked example of a non-vector module: a `String` field, batch-reindexed, with the provider

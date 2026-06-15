@@ -228,6 +228,8 @@ impl MarciDB {
   /// `marcidb-schema` authoring layer) computes `(new_schema, ops)` — by diffing a `.marci` schema, or by
   /// `evolve`-ing a `.march` action file — and hands the result here to apply + persist.
   pub fn commit_schema(&mut self, new_schema: Schema, ops: &[crate::schema::MigrateOp]) -> Result<(), MigrateApplyError> {
+    self.validate_added_indexes(&new_schema, ops)?;
+
     let tx = self.db.begin_write()?;
     apply(&tx, &self.schema, &new_schema, ops)?;
 
@@ -242,6 +244,28 @@ impl MarciDB {
     tx.commit()?;
 
     self.swap_schema(new_schema)?;
+    Ok(())
+  }
+
+  /// At migration time, validate every newly-added `@custom` (module) index: its provider must be
+  /// registered, and must accept the field/args. This makes a typo (`@vektor`) or a missing module fail
+  /// fast at `$sync`/`$migrate` (a clear 4xx) rather than silently creating a tree that only errors at the
+  /// first reindex/query. Existing/unchanged indexes were validated when they were added, and a DB still
+  /// *opens* without the provider — only changing the schema requires it.
+  fn validate_added_indexes(&self, new_schema: &Schema, ops: &[crate::schema::MigrateOp]) -> Result<(), MigrateApplyError> {
+    for op in ops {
+      let crate::schema::MigrateOp::AddIndex { entity: entity_name, field: field_name, .. } = op else { continue };
+      let Some(entity) = new_schema.models.iter().find(|m| &m.name == entity_name) else { continue };
+      let Some(field) = entity.fields.iter().find(|f| &f.name == field_name) else { continue };
+
+      for index in field.indexes.iter() {
+        let FieldIndex::Custom { name, args, .. } = index else { continue };
+        let provider = self.providers.get(name)
+          .ok_or_else(|| MigrateApplyError::NoProvider { provider: name.clone(), field: field.full_name.clone() })?;
+        provider.validate(field, args)
+          .map_err(|e| MigrateApplyError::InvalidIndex { field: field.full_name.clone(), detail: e.to_string() })?;
+      }
+    }
     Ok(())
   }
 

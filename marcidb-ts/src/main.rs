@@ -295,6 +295,11 @@ fn get_field_select_str(field: &Field, schema: &Schema) -> String {
   }
 }
 
+/// Whether any field of the model carries a `@custom` (module) index — i.e. the model has a `reindex()`.
+fn model_has_custom_index(model: &Entity) -> bool {
+  model.fields.iter().any(|f| f.indexes.iter().any(|i| matches!(i, FieldIndex::Custom { .. })))
+}
+
 /// A `@custom`-indexed field also accepts `$near`/`$search` in `$Where`. The payload type is the provider's:
 /// vectors get a typed `VectorSearch`, other providers a generic `CustomSearch` (extend this match per module).
 fn get_custom_search_str(field: &Field) -> Option<String> {
@@ -556,6 +561,10 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("    delete(id: {}): Op<void>", get_model_id_name(model)));
     lines.push(format!("    count(query?: {{ $where?: {} }}): Op<number>", get_model_where_name(model)));
     lines.push(format!("    aggregate<T extends {}>(query: T): Op<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
+    // Models with a `@custom` (vector / full-text) index can rebuild it from current data.
+    if model_has_custom_index(model) {
+      lines.push("    reindex(): Op<{ ok: boolean, indexed: number }>".to_string());
+    }
     lines.push("  }".to_string());
   }
   // Atomic batch transaction: operations are applied all or none; the results are
@@ -578,7 +587,11 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("  update: (id, data) => op({{ model: \"{0}\", action: \"update\", id, data }}, () => update(\"{0}\", id, data)),", model.name));
     lines.push(format!("  delete: (id) => op({{ model: \"{0}\", action: \"delete\", id }}, () => runDelete(\"{0}\", id)),", model.name));
     lines.push(format!("  count: (query) => op({{ model: \"{0}\", action: \"count\", query: query ?? {{}} }}, () => count(\"{0}\", query)),", model.name));
-    lines.push(format!("  aggregate: (query) => op({{ model: \"{0}\", action: \"aggregate\", query }}, () => aggregate(\"{0}\", query))", model.name));
+    let has_custom = model_has_custom_index(model);
+    lines.push(format!("  aggregate: (query) => op({{ model: \"{0}\", action: \"aggregate\", query }}, () => aggregate(\"{0}\", query)){1}", model.name, if has_custom { "," } else { "" }));
+    if has_custom {
+      lines.push(format!("  reindex: () => op({{ model: \"{0}\", action: \"$reindex\" }}, () => reindex(\"{0}\"))", model.name));
+    }
     lines.push("},".to_string());
   }
 

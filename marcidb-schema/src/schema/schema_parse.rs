@@ -465,7 +465,7 @@ mod tests {
 
         let bad = [
             "model A {\n  x B\n}",                                   // unknown type
-            "model A {\n  x String @bogus\n}",                      // unknown attribute
+            "model A {\n  x String @bad-attr\n}",                   // malformed attribute name (not a valid identifier)
             "model A {\n  x\n}",                                    // no field type
             "model A {\n  x UInt @default(abc)\n}",                 // bad default
             "model A {\n  x Int @index @default(zzz)\n}",           // bad default on an indexed field
@@ -497,6 +497,29 @@ mod tests {
 
         // @custom() with no provider name is rejected
         assert!(try_parse_schema("model Doc {\n  x String @custom()\n}").is_err());
+    }
+
+    #[test]
+    fn parse_materializes_named_custom_index() {
+        use crate::schema::FieldIndex;
+
+        // `@vector(cosine)` / `@fulltext` are the per-provider sugar for `@custom(<provider>, args)`:
+        // any attribute that matches no built-in is parsed as a module index named after the keyword.
+        let schema = try_parse_schema("model Doc {\n  embedding Float[8] @vector(cosine)\n  body String @fulltext\n}").unwrap();
+
+        let emb = schema.models[0].fields.iter().find(|f| f.name == "embedding").unwrap();
+        assert!(emb.indexes.iter().any(|i| matches!(i, FieldIndex::Custom { name, args, .. } if name == "vector" && args == "cosine")));
+
+        let body = schema.models[0].fields.iter().find(|f| f.name == "body").unwrap();
+        assert!(body.indexes.iter().any(|i| matches!(i, FieldIndex::Custom { name, args, .. } if name == "fulltext" && args.is_empty())));
+
+        // The explicit `@custom(...)` form still works and is equivalent.
+        let alt = try_parse_schema("model Doc {\n  v Float[8] @custom(vector, cosine)\n}").unwrap();
+        assert!(alt.models[0].fields[1].indexes.iter().any(|i| matches!(i, FieldIndex::Custom { name, .. } if name == "vector")));
+
+        // Structurally malformed attributes are still parse errors (not silent custom indexes).
+        assert!(try_parse_schema("model Doc {\n  x String @default(abc\n}").is_err());
+        assert!(try_parse_schema("model Doc {\n  x String @weird-name\n}").is_err());
     }
 
     #[test]

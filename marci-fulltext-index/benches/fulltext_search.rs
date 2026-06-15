@@ -58,7 +58,7 @@ fn bench_query(db: &MarciDB, label: &str, query: &str, iters: u32) {
 }
 
 fn main() {
-    const SCHEMA: &str = "model Doc {\n  title String\n  body String @custom(fulltext)\n}";
+    const SCHEMA: &str = "model Doc {\n  title String\n  body String @fulltext\n}";
 
     let dir = tempfile::tempdir().unwrap();
     let db = MarciDB::new(SCHEMA, dir.path().to_str().unwrap()).with_providers(registry());
