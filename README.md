@@ -78,6 +78,11 @@ The server is published as [`den59k/marcidb-server`](https://hub.docker.com/r/de
 docker run -d --name marcidb -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
 ```
 
+Two image flavours are published: `:latest` / `:full` include the vector and
+full-text modules, while `:core` is the core engine only (smaller, no
+optional modules). Version-pinned tags follow the same pattern — `:X.Y.Z-full`,
+`:X.Y.Z-core`.
+
 - listens on `0.0.0.0:$PORT` (default `3000`)
 - stores databases under `/app/data` — mount a volume to persist them across container recreation
 - schema-agnostic and multi-database; a database is created on its first migration push:
@@ -98,6 +103,7 @@ curl -X POST http://localhost:3000/myapp/\$sync --data-binary @schema.marci
 - [HTTP API](docs/HTTP-API.md) — the raw server protocol
 - [Internals](docs/INTERNALS.md) — storage format, query pipeline, optimizations
 - [Benchmarks](docs/BENCHMARKS.md)
+- [Releasing](docs/RELEASING.md) — how releases, binaries and Docker images are built
 
 ## Status
 

@@ -1,0 +1,170 @@
+name: Release
+
+# Fires when a vX.Y.Z tag is pushed (scripts/release.sh does that for you).
+# Builds the Windows .exe and Linux binaries in two flavours — full (vector +
+# full-text) and core — builds & pushes the Docker images to GHCR, and
+# publishes a GitHub Release with an auto-generated changelog.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.2.3). Must already exist."
+        required: true
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write # push images to GHCR
+
+env:
+  # Resolve the tag from either trigger.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # -------- changelog notes for the release body --------
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history + tags to diff against the previous tag
+      - name: Generate release notes
+        shell: bash
+        run: |
+          prev_tag="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          if [ -n "$prev_tag" ]; then range="${prev_tag}..${TAG}"; else range="${TAG}"; fi
+          echo "Changelog range: $range"
+          bash scripts/gen-changelog.sh "$range" > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+
+  # -------- native binaries: {windows, linux} x {full, core} --------
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            variant: full
+            features: "vector fulltext"
+            toolchain: nightly
+            ext: ".exe"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            variant: core
+            features: ""
+            toolchain: stable
+            ext: ".exe"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            variant: full
+            features: "vector fulltext"
+            toolchain: nightly
+            ext: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            variant: core
+            features: ""
+            toolchain: stable
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (${{ matrix.toolchain }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.variant }}
+      - name: Build marcidb-server (${{ matrix.variant }})
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo build --release -p marcidb-server --target ${{ matrix.target }} --features "${{ matrix.features }}"
+          else
+            cargo build --release -p marcidb-server --target ${{ matrix.target }}
+          fi
+      - name: Package binary
+        shell: bash
+        run: |
+          os="${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }}"
+          out="marcidb-server-${TAG}-x86_64-${os}-${{ matrix.variant }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/marcidb-server${{ matrix.ext }}" "$out"
+          echo "ASSET=$out" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}-${{ matrix.variant }}
+          path: ${{ env.ASSET }}
+
+  # -------- Docker images: {full, core} -> GHCR --------
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: full
+            features: "vector fulltext"
+            rust_image: "rustlang/rust:nightly-bookworm"
+            tags: "full,latest"
+          - variant: core
+            features: ""
+            rust_image: "rust:bookworm"
+            tags: "core"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        run: |
+          # lowercase the owner — GHCR repositories must be lowercase
+          repo="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/marcidb-server"
+          version="${TAG#v}"
+          list="${repo}:${version}-${{ matrix.variant }}"
+          IFS=',' read -ra extra <<< "${{ matrix.tags }}"
+          for t in "${extra[@]}"; do list="${list},${repo}:${t}"; done
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "Tags: $list"
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            FEATURES=${{ matrix.features }}
+            RUST_IMAGE=${{ matrix.rust_image }}
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+  # -------- publish the GitHub Release with notes + binaries --------
+  release:
+    needs: [changelog, binaries, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          body_path: artifacts/release-notes/RELEASE_NOTES.md
+          files: artifacts/binary-*/*
+          fail_on_unmatched_files: true
