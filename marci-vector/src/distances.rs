@@ -32,7 +32,9 @@ where
                 acc + sp * cp
             });
 
-          T::one() - acc.reduce_sum()
+          // Clamp to ≥ 0: for unit vectors the dot product can drift just past 1.0 in float, which would make
+          // the distance a tiny negative — invalid as a k-means++ weight (panics in the kmeans crate).
+          (T::one() - acc.reduce_sum()).max(T::zero())
         },
         CustomDistance::Euclidean => {
           let acc = a.chunks_exact(LANES)

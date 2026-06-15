@@ -1,9 +1,12 @@
 # Benchmarks
 
-All benchmarks live in [`marcidb/benches/`](../marcidb/benches/) and run with:
+Core-engine benchmarks live in [`marcidb/benches/`](../marcidb/benches/); the `@custom` index modules each
+carry their own:
 
 ```bash
-cargo bench -p marcidb
+cargo bench -p marcidb                 # engine
+cargo bench -p marci_vector_index      # vector search (needs nightly — portable_simd)
+cargo bench -p marci_fulltext_index    # full-text search
 ```
 
 Numbers below were measured on a development machine (Windows 11, release build) and are meant for **tracking relative changes between MarciDB versions**, not as absolute claims. Re-run locally before drawing conclusions.
@@ -18,6 +21,33 @@ The include cache stores decoded related records per query execution, so a `User
 |---|---|---|---|
 | 100 authors shared by 10k posts | 4.90 ms | **2.95 ms** | −40% |
 | 10k unique authors (worst case) | 5.56 ms | 5.68 ms | +2% (noise) |
+
+## Index modules (`@custom`)
+
+Both build the index in a single `$reindex` and then time a search operator. Deterministic synthetic
+corpora (fixed-seed LCG), 5 000 rows each.
+
+### Vector search (`marci-vector-index/benches/vector_search.rs`)
+
+5 000 random embeddings, dim 128, `@custom(vector, cosine)`.
+
+| Operation | Time |
+|---|---|
+| `$reindex` (build cluster tree) | ~56 ms |
+| `$near` search, k=10 | ~0.94 ms / query |
+
+### Full-text search (`marci-fulltext-index/benches/fulltext_search.rs`)
+
+5 000 documents, ~24 words each, mixed English/Russian vocabulary, `@custom(fulltext)`.
+
+| Operation | Time |
+|---|---|
+| `$reindex` (build inverted index) | ~65 ms |
+| `$search`, 1 term | ~0.56 ms / query |
+| `$search`, 3 terms | ~1.5 ms / query |
+
+> Both indexes are batch-built (`$reindex`); incremental maintenance is not wired yet, so these measure
+> the build-once / query-many shape.
 
 ## Planned: comparison with other databases
 

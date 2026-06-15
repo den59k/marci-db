@@ -16,7 +16,9 @@ struct HeapElem {
 // Мы хотим max-heap, т.е. большее расстояние = больший приоритет
 impl Ord for HeapElem {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist2.partial_cmp(&other.dist2).unwrap()
+        // total_cmp is a *total* order even for NaN/inf distances. `partial_cmp(...).unwrap()` would panic
+        // if a distance were ever NaN (e.g. a zero-norm vector under some metric).
+        self.dist2.total_cmp(&other.dist2)
     }
 }
 
@@ -28,7 +30,8 @@ impl PartialOrd for HeapElem {
 
 impl PartialEq for HeapElem {
     fn eq(&self, other: &Self) -> bool {
-        self.dist2 == other.dist2
+        // Consistent with `Ord` (keeps `Eq` reflexive for NaN).
+        self.dist2.total_cmp(&other.dist2) == Ordering::Equal
     }
 }
 
@@ -72,17 +75,18 @@ pub trait ReadCluster<'a> {
 
 pub fn filter_by_threshold(data: &mut Vec<(Vec<u8>, f32)>, threshold: f32) {
     let mut truncate = None;
-    
-    for i in 0..data.len()-1 {
+
+    // saturating_sub avoids the `0usize - 1` underflow when `data` is empty (a search that matched nothing).
+    for i in 0..data.len().saturating_sub(1) {
         let prev_value = data[i].1;
         let current_value = data[i+1].1;
-        
+
         if current_value > prev_value + threshold {
             truncate = Some(i+1);
             break
         }
     }
-    
+
     if let Some(truncate) = truncate {
         data.truncate(truncate);
     }
@@ -172,4 +176,45 @@ fn build_prefix(path: &[u16]) -> Vec<u8> {
         out.extend_from_slice(&p.to_be_bytes());
     }
     return out;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HeapElem, filter_by_threshold};
+    use std::collections::BinaryHeap;
+
+    #[test]
+    fn heap_does_not_panic_on_nan_distance() {
+        // Regression: `Ord` used `partial_cmp(...).unwrap()`, which panics when a distance is NaN.
+        let mut heap = BinaryHeap::new();
+        heap.push(HeapElem { dist2: 1.0, id: vec![1] });
+        heap.push(HeapElem { dist2: f32::NAN, id: vec![2] });
+        heap.push(HeapElem { dist2: 0.5, id: vec![3] });
+        let mut popped = 0;
+        while heap.pop().is_some() { popped += 1; }
+        assert_eq!(popped, 3);
+    }
+
+    #[test]
+    fn empty_result_does_not_underflow() {
+        // Regression: `0..data.len()-1` used to panic on an empty result with threshold > 0.
+        let mut data: Vec<(Vec<u8>, f32)> = vec![];
+        filter_by_threshold(&mut data, 0.5);
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn single_element_is_kept() {
+        let mut data = vec![(vec![1], 0.1)];
+        filter_by_threshold(&mut data, 0.5);
+        assert_eq!(data.len(), 1);
+    }
+
+    #[test]
+    fn truncates_at_the_first_gap_over_threshold() {
+        // distances 0.1, 0.2, 1.0 — the 0.2→1.0 jump (0.8) exceeds the 0.5 threshold.
+        let mut data = vec![(vec![1], 0.1), (vec![2], 0.2), (vec![3], 1.0)];
+        filter_by_threshold(&mut data, 0.5);
+        assert_eq!(data.iter().map(|(_, d)| *d).collect::<Vec<_>>(), vec![0.1, 0.2]);
+    }
 }

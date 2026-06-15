@@ -67,8 +67,6 @@ pub trait WriteCluster<'a, const DEFAULT_K: usize> {
             return clusters_count;
         }
         
-        println!("Layer: {}. Write {} clusters ({} points)", path.len(), clusters_count, n);
-
         // // 1) Записываем центры кластеров
         for (cluster_id, point_ids) in points_map {
 
@@ -102,8 +100,11 @@ pub trait WriteCluster<'a, const DEFAULT_K: usize> {
     }
 
     fn create_cluster(&self, ctx: &mut Self::WriteContext, coordinates: &[(Vec<u8>, Vec<f32>)], distance: CustomDistance<f32>) {
-        
+
         let n = coordinates.len();
+        if n == 0 {
+            return; // nothing to index — guard against `coordinates[0]` on an empty set
+        }
 
         let dim = coordinates[0].1.len();
 
@@ -222,4 +223,12 @@ mod tests {
         assert!(has_leaf, "no leaf keys were written");
     }
 
+    #[test]
+    fn empty_coordinates_do_not_panic() {
+        // Regression: `create_cluster` read `coordinates[0]` before checking for an empty set.
+        let storage = MockStorage {};
+        let mut written: MockData = vec![];
+        storage.create_cluster(&mut written, &[], CustomDistance::Euclidean);
+        assert!(written.is_empty());
+    }
 }
