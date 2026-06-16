@@ -34,6 +34,7 @@ const posts = await db.post.findMany({
 - **Atomic batch transactions**: `db.$transaction([...])` applies several operations as all-or-nothing, with `ref("0.id")` to feed a generated id into later operations
 - **Migrations as files**: `marcidb generate` diffs the schema into a `.march` file (a reviewable action list + a snapshot of the resulting schema); `marcidb migrate push` ships your migrations and the server applies the new ones, tracking an applied ledger — adding fields and indexes without rewriting existing rows
 - **Compact binary row format** with zero-copy field access — filters and aggregates read only the bytes they need
+- **Binary read transport**: `findMany`/`findFirst` results come back as a compact binary buffer instead of JSON — automatic in the embedded client, opt-in over HTTP (JSON stays the default for curl). It removes the serialize/parse tax on row-heavy reads: **~5–6× faster** large/nested reads embedded, **~1.4–1.6×** over HTTP (with a smaller payload). See [Benchmarks](docs/BENCHMARKS.md)
 
 ## Quick start
 
