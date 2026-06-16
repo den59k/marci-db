@@ -1,12 +1,16 @@
-import { request, encodeId } from 'marcidb-client/runtime'
+import { request, encodeId, createDecoderRegistry } from 'marcidb-client/runtime'
 
 // Reference to the result of a previous operation inside $transaction
 export const ref = (path) => ({ $ref: path })
 
+// Per-model field descriptors (slot order, type codes, relation targets) the binary decoder-compiler reads.
+// Generated from the schema; static. See marcidb-client/runtime `createDecoderRegistry`.
+const MODELS = /* generated_models */
+
 // HTTP transport: maps a transport-neutral op descriptor `{ model, action, query/data/id }` onto the
 // server's REST routes. This is the default when `marcidb()` is given a URL string. Behavior is identical
 // to the original per-action helpers — the embedded transport (marcidb-embedded) implements the same
-// `{ exec, batch }` interface against the native FFI instead.
+// `{ exec, batch }` interface against the native FFI instead, plus an optional `queryBinary` fast path.
 function httpTransport(url) {
   return {
     exec(op) {
@@ -33,13 +37,32 @@ export function marcidb(transport) {
   // implement { exec(op), batch(ops) } — this is how marcidb-embedded plugs in the in-process FFI.
   if (typeof transport === "string") transport = httpTransport(transport);
 
+  // Binary read fast path: a transport that exposes `queryBinary` (the embedded FFI) returns query results
+  // as a compact binary buffer, decoded here by a shape-specialized, cached decoder — no JSON tax. The
+  // decoder-compiler also gates: shapes it can't decode (and `null` from the engine for shapes it doesn't
+  // encode yet) transparently fall back to `transport.exec` (JSON).
+  const registry = createDecoderRegistry(MODELS);
+
+  function run(descriptor) {
+    if (transport.queryBinary && (descriptor.action === "findMany" || descriptor.action === "findFirst")) {
+      const decode = registry.getDecoder(descriptor.model, descriptor.query);
+      if (decode) {
+        const many = descriptor.action === "findMany";
+        return Promise.resolve(transport.queryBinary(descriptor)).then((payload) =>
+          payload == null ? transport.exec(descriptor) : registry.decodeBuffer(decode, payload, many),
+        );
+      }
+    }
+    return transport.exec(descriptor);
+  }
+
   // Lazily-executed operation: `await` runs it through the transport as a single op,
   // while `$transaction` takes only the `__op` descriptor and sends them as one batch.
   const op = (descriptor) => ({
     __op: descriptor,
-    then: (onFulfilled, onRejected) => transport.exec(descriptor).then(onFulfilled, onRejected),
-    catch: (onRejected) => transport.exec(descriptor).catch(onRejected),
-    finally: (onFinally) => transport.exec(descriptor).finally(onFinally),
+    then: (onFulfilled, onRejected) => run(descriptor).then(onFulfilled, onRejected),
+    catch: (onRejected) => run(descriptor).catch(onRejected),
+    finally: (onFinally) => run(descriptor).finally(onFinally),
   });
 
   // Atomic batch transaction: array of operation descriptors → one batch call to the transport

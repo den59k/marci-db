@@ -1,0 +1,27 @@
+model User {
+  name    String
+  age     Int
+  rating  Float?
+  score   Double
+  active  Bool
+  seen    DateTime?
+  posts   Post[]   @bind(Post.author)
+}
+
+model Post {
+  title   String
+  views   UInt
+  author  User?
+}
+
+model Account {
+  label   String
+  kind    Kind
+}
+
+enum Kind {
+  basic
+  pro {
+    seats Int
+  }
+}

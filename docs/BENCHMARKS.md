@@ -76,8 +76,9 @@ In-process (FFI) MarciDB vs SQLite, on Bun and Node. The harness lives in
 > slower on single-row point reads, and **~5–8× slower on large result sets** (`select all`). On
 > **relational reads** it returns the whole object graph in one query — **faster than the N+1 pattern** a
 > naive ORM falls into, though a hand-written JOIN is faster; **index-backed filters use the `@index`** (no
-> scan). The read gaps are all the same thing: results are serialized to JSON across the FFI boundary.
-> That's the motivation for the upcoming binary transport.
+> scan). The SQLite tables below use the JSON transport. The read gaps are all the same thing: results were
+> serialized to JSON across the FFI boundary — now addressed by the **binary transport** (Part 1, implemented),
+> which makes the row-heavy reads **~5–6× faster** (see [Binary transport](#binary-transport--implemented-part-1-measured)).
 
 ### Setup
 
@@ -172,10 +173,40 @@ Every operation currently crosses the FFI boundary as **JSON**, and a query resu
 re-serialized into the result envelope). For small payloads this is dwarfed by fixed costs and marcidb's
 batching wins. For large result sets it dominates.
 
-A binary/columnar transport (the next task) targets exactly the read paths — `select all`, point reads,
-nested select, and index filters: returning rows in a typed binary layout (or zero-copy buffers) removes the
-double JSON pass and most of the per-row overhead, which should close most of the read gap while keeping the
-batched-write advantage.
+A binary transport targets exactly the read paths — `select all`, point reads, nested select, and index
+filters: returning rows in a typed binary layout removes the double JSON pass and most of the per-row
+overhead, which closes most of the read gap while keeping the batched-write advantage.
+
+### Binary transport — implemented (Part 1), measured
+
+The read path now has a binary fast path: `findMany`/`findFirst` results cross the FFI boundary as a compact
+binary buffer (no JSON), decoded by a shape-specialized, cached decoder on the JS side. It's on automatically
+for `marcidb(db)` over the embedded transport; shapes it doesn't cover yet (formats, enums, lists, composite
+keys) fall back to JSON transparently, and the HTTP transport stays JSON. A JSON-vs-binary parity test
+([`packages/marcidb-embedded/test/binary-parity.mjs`](../packages/marcidb-embedded/test/binary-parity.mjs))
+gates correctness.
+
+Measured on the **same DB**, the same query through binary vs forced-JSON (so this isolates the transport,
+not the engine). Harness: [`packages/marcidb-embedded/test/binary-bench.mjs`](../packages/marcidb-embedded/test/binary-bench.mjs),
+20,000 users / 10,000 posts / 100 shared authors.
+
+| Read | Node — JSON → binary | Bun — JSON → binary |
+| --- | ---: | ---: |
+| **Select all** (20k rows ×50) | 28 → 156 reads/s — **5.6×** | 30 → 160 — **5.3×** |
+| **Nested select** (10k posts + author ×20) | 38 → 227 reads/s — **5.9×** | 42 → 219 — **5.3×** |
+| **Index filter** WHERE age=? (×5000) | 3.9k → 7.1k ops/s — **1.8×** | 4.2k → 7.1k — **1.7×** |
+| **Point query by id** (×20k) | 242k → 206k ops/s — 0.85× | 255k → 262k — 1.03× |
+
+The row-heavy reads — exactly the JSON-tax cases that were 5–8× behind SQLite — gain **~5–6×**, which lands
+them close to SQLite. The index filter gains ~1.8×. The single-row point read is a wash: the result is tiny,
+so framing/decoder overhead roughly cancels the saved `JSON.parse` (it even dips ~15% under Node's koffi,
+where reading the buffer costs an extra decode; under Bun's zero-copy `toArrayBuffer` it's neutral).
+
+**Part 2 (relation-dictionary dedup) — deferred.** The nested-select case repeats each shared author inline
+(no dedup) yet still reaches ~5.3–5.9×, even with 100 authors shared across 10,000 posts (heavy duplication
+— Part 2's best case). Since Part 1 already closes the gap there, the extra wire/object dedup isn't worth its
+complexity yet; revisit only if a real workload shows a relation-heavy result still bottlenecked on payload
+size or JS allocation.
 
 ### Caveats
 

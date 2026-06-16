@@ -21,8 +21,8 @@
   "scripts": {
     "build:lib": "bash build-lib.sh win",
     "gen": "node test/gen.mjs",
-    "test": "node test/gen.mjs && node test/smoke.mjs && node test/full-client.mjs && node test/migrate.mjs",
-    "test:bun": "node test/gen.mjs && bun test/smoke.mjs && bun test/full-client.mjs && bun test/migrate.mjs"
+    "test": "node test/gen.mjs && node test/smoke.mjs && node test/full-client.mjs && node test/migrate.mjs && node test/decoder-unit.mjs && node test/binary-parity.mjs",
+    "test:bun": "node test/gen.mjs && bun test/smoke.mjs && bun test/full-client.mjs && bun test/migrate.mjs && bun test/decoder-unit.mjs && bun test/binary-parity.mjs"
   },
   "files": [
     "src/",

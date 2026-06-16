@@ -5,6 +5,7 @@ mod migrate;
 mod error;
 mod write_op;
 mod query_op;
+mod binary_encode;
 mod aggregate_op;
 mod delete_op;
 mod utils;
@@ -29,6 +30,7 @@ pub use crate::index_provider::{IndexProvider, IndexTree, IndexIter, RowScan, Ro
 pub use crate::transaction::MarciTransaction;
 pub use crate::error::StorageError;
 pub use crate::batch::{execute_batch, execute_op, BatchError, BatchErrorKind, OpError};
+pub use crate::binary_encode::{execute_query_binary, QueryBinaryOutcome, BINARY_VERSION};
 pub use crate::migrate::{apply, MigrateApplyError};
 pub use marcidb_schema::{MigrateOp, MigrateError, serialize_snapshot, parse_snapshot, serialize_type, serialize_field};
 

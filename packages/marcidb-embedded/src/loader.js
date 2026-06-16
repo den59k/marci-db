@@ -45,7 +45,7 @@ export async function loadFfi() {
 // ───────────────────────────────── Bun (bun:ffi) ─────────────────────────────────
 
 async function bunBackend(libPath) {
-  const { dlopen, FFIType, CString } = await import("bun:ffi");
+  const { dlopen, FFIType, CString, toArrayBuffer } = await import("bun:ffi");
 
   // String args are passed as pointers to NUL-terminated buffers; results are pointers we read + free.
   const P = FFIType.ptr;
@@ -55,6 +55,8 @@ async function bunBackend(libPath) {
     marci_last_error: { args: [], returns: P },
     marci_free_string: { args: [P], returns: FFIType.void },
     marci_exec: { args: [P, P], returns: P },
+    marci_query_binary: { args: [P, P], returns: P },
+    marci_free_buffer: { args: [P, FFIType.u64], returns: FFIType.void },
     marci_sync: { args: [P, P], returns: P },
     marci_migrate: { args: [P, P], returns: P },
     marci_migrate_apply: { args: [P, P], returns: P },
@@ -72,6 +74,18 @@ async function bunBackend(libPath) {
     return out;
   };
 
+  // Reads a `[u32 n][n bytes]`-framed buffer (see marci_query_binary), copies the `n` body bytes out of
+  // native memory, frees it, and returns the body (`[u8 status][payload]`) — or null on a NULL pointer.
+  const readFreeBuffer = (p) => {
+    if (!p) return null;
+    const header = new Uint8Array(toArrayBuffer(p, 0, 4));
+    const n = header[0] | (header[1] << 8) | (header[2] << 16) | header[3] * 0x1000000;
+    const total = 4 + n;
+    const body = new Uint8Array(toArrayBuffer(p, 4, n)).slice(); // copy before freeing
+    s.marci_free_buffer(p, total);
+    return body;
+  };
+
   return {
     open: (p, opts) => s.marci_open(cstr(p), opts == null ? null : cstr(opts)) || null,
     lastError: () => {
@@ -80,6 +94,7 @@ async function bunBackend(libPath) {
     },
     close: (h) => s.marci_close(h),
     exec: (h, op) => readFree(s.marci_exec(h, cstr(op))),
+    queryBinary: (h, op) => readFreeBuffer(s.marci_query_binary(h, cstr(op))),
     sync: (h, t) => readFree(s.marci_sync(h, cstr(t))),
     migrate: (h, t) => readFree(s.marci_migrate(h, cstr(t))),
     migrateApply: (h, json) => readFree(s.marci_migrate_apply(h, cstr(json))),
@@ -101,6 +116,8 @@ async function nodeBackend(libPath) {
   const lastError = lib.func("void* marci_last_error()");
   const freeString = lib.func("void marci_free_string(void*)");
   const exec = lib.func("void* marci_exec(void*, str)");
+  const queryBinary = lib.func("void* marci_query_binary(void*, str)");
+  const freeBuffer = lib.func("void marci_free_buffer(void*, size_t)");
   const sync = lib.func("void* marci_sync(void*, str)");
   const migrate = lib.func("void* marci_migrate(void*, str)");
   const migrateApply = lib.func("void* marci_migrate_apply(void*, str)");
@@ -115,11 +132,23 @@ async function nodeBackend(libPath) {
     return out;
   };
 
+  // Reads a `[u32 n][n bytes]`-framed buffer, copies the `n` body bytes out, frees it, returns the body.
+  const readFreeBuffer = (p) => {
+    if (!p) return null;
+    const header = koffi.decode(p, "uint8_t", 4); // [u32 n] little-endian
+    const n = header[0] | (header[1] << 8) | (header[2] << 16) | header[3] * 0x1000000;
+    const total = 4 + n;
+    const all = koffi.decode(p, "uint8_t", total);
+    freeBuffer(p, total);
+    return Uint8Array.from(all.slice(4)); // the n body bytes ([u8 status][payload])
+  };
+
   return {
     open: (p, opts) => open(p, opts ?? null) || null,
     lastError: () => readString(lastError()),
     close: (h) => close(h),
     exec: (h, op) => readFree(exec(h, op)),
+    queryBinary: (h, op) => readFreeBuffer(queryBinary(h, op)),
     sync: (h, t) => readFree(sync(h, t)),
     migrate: (h, t) => readFree(migrate(h, t)),
     migrateApply: (h, json) => readFree(migrateApply(h, json)),

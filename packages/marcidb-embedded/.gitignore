@@ -3,8 +3,10 @@
 # Prebuilt native libraries are produced by build-lib.sh / CI and bundled at publish time.
 /native
 
-# Generated test client fixture
+# Generated test client fixtures (gen.mjs, binary-parity.mjs, binary-bench.mjs)
 /test/.gen
+/test/.gen-parity
+/test/.gen-bench
 
 # Packed tarballs from `npm pack`
 *.tgz

@@ -394,6 +394,71 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
   }
 }
 
+/// Binary-transport type code for a primitive, or `None` for types the binary decoder doesn't cover yet
+/// (kept on the JSON path). `Float` is decoded as f64 (the engine widens it on the wire for exact parity)
+/// and `DateTime` as i64 (an epoch number, matching the JSON path).
+fn binary_type_code(ty: &PrimitiveFieldType) -> &'static str {
+  match ty {
+    PrimitiveFieldType::String => "str",
+    PrimitiveFieldType::Int64 => "i64",
+    PrimitiveFieldType::UInt64 => "u64",
+    PrimitiveFieldType::Float => "f64",
+    PrimitiveFieldType::Double => "f64",
+    PrimitiveFieldType::Bool => "bool",
+    PrimitiveFieldType::Byte => "u8",
+    PrimitiveFieldType::DateTime => "i64",
+  }
+}
+
+/// One field descriptor for the binary decoder-compiler: `{ n: name, k: kind, t: typecode, m: relModel }`.
+/// `k` is `key` | `body` | `one` | `many`; `t` is the scalar type code (or `null` for a scalar the binary
+/// path can't decode yet → selecting it makes the whole query fall back to JSON); `m` is the target model
+/// for relations. The order mirrors `entity.fields`, which is the slot order the engine encodes in.
+fn binary_field_descriptor(field: &Field, schema: &Schema) -> Option<String> {
+  // `@`-prefixed internal fields are never selectable, so they never reach the wire — omit them (the
+  // relative order of the remaining, selectable fields is preserved, which is all the decoder needs).
+  if field.name.starts_with('@') {
+    return None;
+  }
+
+  let descriptor = match &field.ty {
+    FieldType::Ref(ref_info) => {
+      format!("{{ n: \"{}\", k: \"one\", m: \"{}\" }}", field.name, schema.models[ref_info.model_index].name)
+    }
+    FieldType::RefList(ref_info) => {
+      format!("{{ n: \"{}\", k: \"many\", m: \"{}\" }}", field.name, schema.models[ref_info.model_index].name)
+    }
+    _ => {
+      let kind = if matches!(field.location, FieldLocation::Key { .. }) { "key" } else { "body" };
+      // A scalar is binary-decodable only if it is an unformatted primitive on the matching enum value
+      // (no @format, no enum-variant condition). Everything else is `t: null` → JSON fallback.
+      let code = match &field.ty {
+        FieldType::Primitive(ty)
+          if field.format.is_none() && matches!(field.condition, FieldExistsCondition::None) =>
+        {
+          format!("\"{}\"", binary_type_code(ty))
+        }
+        _ => "null".to_string(),
+      };
+      format!("{{ n: \"{}\", k: \"{}\", t: {} }}", field.name, kind, code)
+    }
+  };
+  Some(descriptor)
+}
+
+/// The `MODELS` metadata object literal the decoder-compiler consumes: every model (including struct models,
+/// which relations target) → its ordered field descriptors. Emitted once, statically, into the client.
+fn get_models_metadata(schema: &Schema) -> String {
+  let mut entries = vec![];
+  for model in schema.models.iter() {
+    let fields: Vec<String> = model.fields.iter()
+      .filter_map(|field| binary_field_descriptor(field, schema))
+      .collect();
+    entries.push(format!("  \"{}\": [ {} ]", model.name, fields.join(", ")));
+  }
+  format!("{{\n{}\n}}", entries.join(",\n"))
+}
+
 fn main() {
   let args: Vec<String> = env::args().collect();
   match args.get(1).map(String::as_str) {
@@ -595,7 +660,9 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push("},".to_string());
   }
 
-  let index_out = include_str!("prefix.js").replace("/* generated_data */", &lines.join("\n    "));
+  let index_out = include_str!("prefix.js")
+    .replace("/* generated_models */", &get_models_metadata(&schema))
+    .replace("/* generated_data */", &lines.join("\n    "));
 
   let out_path = Path::new(output_dir);
   fs::create_dir_all(out_path).unwrap();
@@ -613,4 +680,94 @@ fn generate_types(input: &str, output_dir: &str) {
     .unwrap_or_else(|| out_path.to_path_buf());
   let dir = shown.display().to_string().replace('\\', "/");
   println!("Generated client \u{2192} {}/ (index.js, index.d.ts)", dir);
+}
+
+#[cfg(test)]
+mod binary_descriptor_tests {
+  use super::*;
+
+  /// Per-field descriptors the binary decoder-compiler consumes — one assertion per field *kind*, since the
+  /// `k`/`t`/`m` split is what the TS gate keys off of. The order within a model must mirror `entity.fields`
+  /// (the slot order the engine encodes), so we also assert the relative order of a couple of fields.
+  #[test]
+  fn descriptors_cover_every_field_kind() {
+    // Block keywords must be column-0 (the parser doesn't dedent), so keep this literal flush-left. The
+    // relation is exercised both ways: User.posts (to-many) and Post.author (to-one).
+    let schema = parse_schema(
+"model User {
+  name   String
+  age    Int
+  rating Float?
+  when   DateTime?
+  ok     Bool
+  uid    Byte[16]  @format(uuid)
+  tags   String[]
+  role   Role
+  posts  Post[]    @bind(Post.author)
+}
+model Post {
+  title  String
+  author User?
+}
+enum Role {
+  basic
+  pro { seats Int }
+}
+",
+    );
+
+    let meta = get_models_metadata(&schema);
+
+    // Auto `id` (UInt64) is the key field, emitted first, with no presence tag on the wire.
+    assert!(meta.contains(r#"{ n: "id", k: "key", t: "u64" }"#), "id key descriptor\n{meta}");
+
+    // Plain primitives → their type code. Float decodes as f64, DateTime as i64 (epoch number).
+    assert!(meta.contains(r#"{ n: "name", k: "body", t: "str" }"#), "{meta}");
+    assert!(meta.contains(r#"{ n: "age", k: "body", t: "i64" }"#), "{meta}");
+    assert!(meta.contains(r#"{ n: "rating", k: "body", t: "f64" }"#), "{meta}");
+    assert!(meta.contains(r#"{ n: "when", k: "body", t: "i64" }"#), "{meta}");
+    assert!(meta.contains(r#"{ n: "ok", k: "body", t: "bool" }"#), "{meta}");
+
+    // Types the binary path doesn't cover yet → `t: null` (selecting them falls back to JSON).
+    assert!(meta.contains(r#"{ n: "uid", k: "body", t: null }"#), "formatted → null\n{meta}");
+    assert!(meta.contains(r#"{ n: "tags", k: "body", t: null }"#), "list → null\n{meta}");
+    assert!(meta.contains(r#"{ n: "role", k: "body", t: null }"#), "enum → null\n{meta}");
+    // The enum field is `t: null`, so any shape selecting it falls back to JSON. Injected variant fields
+    // (`seats`) aren't materialized as separate fields at codegen time, only in the post-sync runtime schema
+    // — that's fine: if one is ever selected, the engine's `shape_supported` sees the condition and reports
+    // "unsupported" (status 2) → JSON fallback. The two sides don't need identical field sets, only an
+    // agreeing answer on what's binary-decodable.
+    assert!(!meta.contains(r#""seats""#), "variant field not materialized at codegen time\n{meta}");
+
+    // Relations carry the target model, no type code — to-many (User.posts) and to-one (Post.author).
+    assert!(meta.contains(r#"{ n: "posts", k: "many", m: "Post" }"#), "to-many\n{meta}");
+    assert!(meta.contains(r#"{ n: "author", k: "one", m: "User" }"#), "to-one\n{meta}");
+
+    // Models that relations point at must also be present in the table, in slot order.
+    assert!(meta.contains(r#""Post": [ { n: "id", k: "key", t: "u64" }, { n: "title", k: "body", t: "str" }"#), "Post model emitted\n{meta}");
+
+    // Field order within a model mirrors entity.fields: name precedes age precedes rating.
+    let user = meta.find(r#""User""#).unwrap();
+    let pos = |needle: &str| meta[user..].find(needle).unwrap();
+    assert!(pos("\"name\"") < pos("\"age\"") && pos("\"age\"") < pos("\"rating\""), "slot order preserved\n{meta}");
+  }
+
+  /// Internal (`@`-prefixed) fields are never selectable, so they must not appear in the descriptor list —
+  /// the decoder only needs the relative order of the *selectable* fields preserved.
+  #[test]
+  fn descriptors_skip_internal_fields() {
+    // A reverse-relation `@bind` does not create an `@`-field here, but variant/enum bookkeeping can; assert
+    // no descriptor name starts with '@' for a schema that exercises enums + relations.
+    let schema = parse_schema(
+"enum Kind { x  y { n Int } }
+model B { label String }
+model A {
+  kind Kind
+  b    B?
+}
+",
+    );
+    let meta = get_models_metadata(&schema);
+    assert!(!meta.contains(r#"n: "@"#), "no @-prefixed field descriptors\n{meta}");
+  }
 }

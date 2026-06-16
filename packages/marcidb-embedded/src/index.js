@@ -61,12 +61,25 @@ export function openDatabase(dir, options = {}) {
     ensureOpen();
     return unwrap(ffi.exec(handle, JSON.stringify(ops)));
   }
+  // Binary read fast path consumed by `marcidb(db)` (marcidb-client): returns the raw result payload bytes
+  // for a `findMany`/`findFirst` op, or `null` when the engine can't binary-encode this shape (→ the client
+  // falls back to `exec`/JSON). Throws `MarciEmbeddedError` on a real fault.
+  async function queryBinary(op) {
+    ensureOpen();
+    const body = ffi.queryBinary(handle, JSON.stringify(op));
+    if (!body) return null; // NULL pointer (OOM) → fall back to JSON
+    const status = body[0];
+    if (status === 2) return null; // unsupported shape → fall back to JSON
+    if (status === 1) throw new MarciEmbeddedError(new TextDecoder().decode(body.subarray(1)), "bad_request");
+    return body.subarray(1); // status 0 → the binary result buffer
+  }
 
   return {
     exec,
     batch,
+    queryBinary,
     /** Back-compat alias — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
-    transport: { exec, batch },
+    transport: { exec, batch, queryBinary },
     /** Declarative schema sync from `.marci` text. */
     async $sync(schemaText) {
       ensureOpen();

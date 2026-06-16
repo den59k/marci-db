@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use marcidb::{
     BatchErrorKind, MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
-    ReindexError, execute_batch, execute_op, parse_snapshot, serialize_snapshot, try_parse_schema,
+    QueryBinaryOutcome, ReindexError, execute_batch, execute_op, execute_query_binary, parse_snapshot,
+    serialize_snapshot, try_parse_schema,
 };
 use serde_json::{Value, json};
 
@@ -224,6 +225,63 @@ fn exec_value(db: &MarciDB, value: Value) -> Result<Value, Fault> {
         obj @ Value::Object(_) => execute_op(db, &obj).map_err(op_fault),
         _ => Err(Fault::bad_request("operation must be a JSON object or an array of operations")),
     }
+}
+
+// ───────────────────────────────── binary read path ─────────────────────────────────
+
+/// Executes a single read op (`findMany`/`findFirst`) and returns the result set as a **binary** buffer,
+/// bypassing the JSON envelope (and the Rust-side double-serialize) for the hot read path. The op JSON is
+/// the same `{ model, action, query }` shape `marci_exec` takes.
+///
+/// Returns a heap buffer the caller must release with [`marci_free_buffer`], framed as:
+///
+/// ```text
+/// [u32 n_le][n bytes]      where the n bytes are: [u8 status][payload]
+///   status 0 = ok          payload = binary result buffer ([u8 version][u32 row_count][rows…])
+///   status 1 = err         payload = UTF-8 error message
+///   status 2 = unsupported  payload = empty  → caller should fall back to the JSON path (marci_exec)
+/// ```
+///
+/// A NULL return means allocation/`CString`-style failure could not even build a buffer (out of memory);
+/// callers treat NULL as "fall back to JSON".
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_query_binary(handle: *mut DbHandle, op_json: *const c_char) -> *mut u8 {
+    match catch_unwind(AssertUnwindSafe(|| query_binary_inner(handle, op_json))) {
+        Ok(Ok(QueryBinaryOutcome::Supported(bytes))) => into_framed_buffer(0, &bytes),
+        Ok(Ok(QueryBinaryOutcome::Unsupported)) => into_framed_buffer(2, &[]),
+        Ok(Err(fault)) => into_framed_buffer(1, fault.message.as_bytes()),
+        Err(panic) => into_framed_buffer(1, panic_message(panic).as_bytes()),
+    }
+}
+
+fn query_binary_inner(handle: *mut DbHandle, op_json: *const c_char) -> Result<QueryBinaryOutcome, Fault> {
+    let h = unsafe { handle_mut(handle) }?;
+    let input = unsafe { req_str(op_json, "op_json") }?;
+    let value: Value =
+        serde_json::from_str(input).map_err(|e| Fault::bad_request(format!("invalid op JSON: {}", e)))?;
+    execute_query_binary(&h.db, &value).map_err(op_fault)
+}
+
+/// Frames `(status, payload)` into a length-prefixed heap buffer owned by the caller (see
+/// [`marci_query_binary`]). The buffer is a boxed slice with capacity == length, so [`marci_free_buffer`]
+/// can reclaim it from `(ptr, len)` alone.
+fn into_framed_buffer(status: u8, payload: &[u8]) -> *mut u8 {
+    let n = 1 + payload.len();
+    let mut buf = Vec::with_capacity(4 + n);
+    buf.extend_from_slice(&(n as u32).to_le_bytes());
+    buf.push(status);
+    buf.extend_from_slice(payload);
+    Box::into_raw(buf.into_boxed_slice()) as *mut u8
+}
+
+/// Frees a buffer returned by [`marci_query_binary`]. `len` is the buffer's total length (`4 + n`, which the
+/// caller computes from the `u32` frame header). NULL is a no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_free_buffer(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { drop(Box::from_raw(ptr::slice_from_raw_parts_mut(ptr, len))) };
 }
 
 fn op_fault(e: OpError) -> Fault {
