@@ -4,6 +4,12 @@ All notable changes to MarciDB are documented here. New entries below this line
 are generated from commit history by [`scripts/gen-changelog.sh`](scripts/gen-changelog.sh)
 when cutting a release.
 
+## v0.4.0 - 2026-06-16
+
+### Features
+
+- add marcidb-ffi package (6e39939)
+
 ## v0.3.0 - 2026-06-15
 
 ### Features
