@@ -6,8 +6,8 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use marcidb_ffi::{
-    DbHandle, marci_close, marci_exec, marci_free_string, marci_last_error, marci_open, marci_snapshot,
-    marci_sync,
+    DbHandle, marci_close, marci_exec, marci_free_string, marci_last_error, marci_migrate_apply, marci_open,
+    marci_snapshot, marci_sync,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -171,6 +171,79 @@ fn open_failure_reports_last_error() {
     assert!(!err.is_null(), "last_error should be set after a failed open");
     let msg = unsafe { CStr::from_ptr(err) }.to_str().unwrap();
     assert!(!msg.is_empty());
+}
+
+/// Applies a `.march` migration history via the idempotent migrator; returns the parsed envelope.
+fn migrate(handle: *mut DbHandle, migrations: &[&str]) -> Value {
+    let json = serde_json::to_string(migrations).unwrap();
+    let c = CString::new(json).unwrap();
+    take(marci_migrate_apply(handle, c.as_ptr()))
+}
+
+const M0: &str = "create entity User\nadd field User.id UInt @id @default(autoincrement())\nadd field User.name String @slot(4)\nadd field User.age Int @slot(8)";
+const M1: &str = "add field User.email String @nullable @slot(12)";
+
+#[test]
+fn migrate_apply_idempotent_and_incremental() {
+    let dir = tempdir().unwrap();
+    let path_c = CString::new(dir.path().to_str().unwrap()).unwrap();
+    let handle = marci_open(path_c.as_ptr(), ptr::null());
+    assert!(!handle.is_null());
+
+    // Fresh DB → applies the whole history.
+    let d = data(migrate(handle, &[M0, M1]));
+    assert_eq!(d["applied"], json!(2));
+    assert_eq!(d["total"], json!(2));
+
+    // The email column from M1 is usable.
+    data(exec(handle, &json!({
+        "model": "User", "action": "insert", "data": { "name": "A", "email": "a@x", "age": 1 }
+    })));
+
+    // Re-running with the same history is a no-op (idempotent).
+    assert_eq!(data(migrate(handle, &[M0, M1]))["applied"], json!(0));
+
+    // Re-running with a *truncated* history (DB is ahead of it) is drift, not a silent no-op.
+    let env = migrate(handle, &[M0]);
+    assert_eq!(env["ok"], json!(false));
+    assert_eq!(env["kind"], json!("bad_request"));
+
+    marci_close(handle);
+}
+
+#[test]
+fn migrate_apply_incremental_after_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_str().unwrap();
+
+    // First run with only M0.
+    let h1 = marci_open(CString::new(path).unwrap().as_ptr(), ptr::null());
+    assert_eq!(data(migrate(h1, &[M0]))["applied"], json!(1));
+    marci_close(h1);
+
+    // Reopen, now the history has grown by M1 → exactly one new migration applies.
+    let h2 = marci_open(CString::new(path).unwrap().as_ptr(), ptr::null());
+    let d = data(migrate(h2, &[M0, M1]));
+    assert_eq!(d["applied"], json!(1));
+    assert_eq!(d["total"], json!(2));
+    marci_close(h2);
+}
+
+#[test]
+fn migrate_apply_detects_drift() {
+    let dir = tempdir().unwrap();
+    let handle = marci_open(CString::new(dir.path().to_str().unwrap()).unwrap().as_ptr(), ptr::null());
+
+    // Bring the DB to the User schema.
+    data(migrate(handle, &[M0]));
+
+    // A different history (creates Post, not User) matches no point in the DB's state → drift error.
+    let other = "create entity Post\nadd field Post.id UInt @id @default(autoincrement())\nadd field Post.title String @slot(4)";
+    let env = migrate(handle, &[other]);
+    assert_eq!(env["ok"], json!(false));
+    assert_eq!(env["kind"], json!("bad_request"));
+
+    marci_close(handle);
 }
 
 #[cfg(feature = "fulltext")]

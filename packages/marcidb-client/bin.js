@@ -83,10 +83,11 @@ function cmdGenerate(args) {
   if (fs.existsSync(output)) {
     fs.rmSync(output, { recursive: true, force: true });
   }
-  console.log(`Generating types from ${schema} into ${output}...`);
+  console.log(`Generating client from ${schema}...`);
   execFileSync(binPath("marci-generate"), ["types", schema, output], { stdio: "inherit" });
   fs.writeFileSync(path.join(output, "package.json"), `{
   "name": "marci-client",
+  "type": "module",
   "main": "index.js",
   "types": "index.d.ts"
 }`);

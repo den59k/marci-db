@@ -255,19 +255,96 @@ pub extern "C" fn marci_sync(handle: *mut DbHandle, schema_text: *const c_char) 
 }
 
 /// Imperative migration (`$migrate`): `migration_text` is `.march` action source; laid onto the current
-/// snapshot and applied. Mirrors the server's `$migrate`.
+/// snapshot and applied. Mirrors the server's `$migrate`. Not idempotent on its own — see
+/// [`marci_migrate_apply`] for the safe-on-startup variant.
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_migrate(handle: *mut DbHandle, migration_text: *const c_char) -> *mut c_char {
     run(|| {
         let h = unsafe { handle_mut(handle) }?;
         let migration_text = unsafe { req_str(migration_text, "migration_text") }?;
-
-        let cur = serialize_snapshot(&h.db.schema);
-        let new_text = marcidb_schema::evolve(&cur, migration_text).map_err(|e| Fault::bad_request(e.to_string()))?;
-        let new_schema = parse_snapshot(&new_text).map_err(|e| Fault::bad_request(e.to_string()))?;
-        let ops = marcidb_schema::migration_ops(migration_text).map_err(|e| Fault::bad_request(e.to_string()))?;
-        h.db.commit_schema(new_schema, &ops).map_err(migrate_fault)?;
+        apply_migration_text(&mut h.db, migration_text)?;
         Ok(Value::Null)
+    })
+}
+
+/// Applies one migration's `.march` actions to the DB: evolve the current snapshot, derive the physical
+/// ops, and commit. Shared by [`marci_migrate`] and [`marci_migrate_apply`].
+fn apply_migration_text(db: &mut MarciDB, migration_text: &str) -> Result<(), Fault> {
+    let cur = serialize_snapshot(&db.schema);
+    let new_text = marcidb_schema::evolve(&cur, migration_text).map_err(|e| Fault::bad_request(e.to_string()))?;
+    let new_schema = parse_snapshot(&new_text).map_err(|e| Fault::bad_request(e.to_string()))?;
+    let ops = marcidb_schema::migration_ops(migration_text).map_err(|e| Fault::bad_request(e.to_string()))?;
+    db.commit_schema(new_schema, &ops).map_err(migrate_fault)
+}
+
+/// Normalizes snapshot text to its canonical form (parse → re-serialize), so two snapshots of the same
+/// schema compare equal regardless of incidental formatting. Empty/blank text → empty string.
+fn canon_snapshot(text: &str) -> Result<String, Fault> {
+    if text.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let schema = parse_snapshot(text).map_err(|e| Fault::internal(format!("corrupt snapshot: {}", e)))?;
+    Ok(serialize_snapshot(&schema))
+}
+
+/// Idempotent, drift-aware migrator (the embedded equivalent of `marci-migrate plan` + apply over HTTP).
+/// `migrations_json` is a JSON array of `.march` file contents **in order**. Finds where the DB's current
+/// schema sits in the history (by canonical-snapshot match), then applies only the migrations after that
+/// point in a single commit. Returns `{ "applied": <n>, "total": <n> }`.
+///
+/// * A fresh DB applies the whole history; an up-to-date DB applies nothing; a newly-added migration
+///   applies incrementally — so it is safe to call on every startup.
+/// * If the DB's schema matches no point in the history, it errors (`bad_request`, "drift") rather than
+///   guessing — the DB was changed outside these migrations.
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_migrate_apply(handle: *mut DbHandle, migrations_json: *const c_char) -> *mut c_char {
+    run(|| {
+        let h = unsafe { handle_mut(handle) }?;
+        let input = unsafe { req_str(migrations_json, "migrations_json") }?;
+        let migrations: Vec<String> = serde_json::from_str(input)
+            .map_err(|e| Fault::bad_request(format!("migrations must be a JSON array of strings: {}", e)))?;
+
+        // A fresh DB (no models yet) is the empty baseline — matches `marci-migrate`'s replay-from-empty.
+        let current = if h.db.schema.models.is_empty() {
+            String::new()
+        } else {
+            canon_snapshot(&serialize_snapshot(&h.db.schema))?
+        };
+
+        // Index of the first un-applied migration: replay the history until its cumulative snapshot
+        // matches the DB's current snapshot (empty DB → start at 0, apply everything).
+        let start = if current.is_empty() {
+            0
+        } else {
+            let mut cumulative = String::new();
+            let mut found = None;
+            for (i, text) in migrations.iter().enumerate() {
+                cumulative = marcidb_schema::evolve(&cumulative, text)
+                    .map_err(|e| Fault::bad_request(format!("corrupt migration at index {}: {}", i, e)))?;
+                if canon_snapshot(&cumulative)? == current {
+                    found = Some(i + 1);
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                Fault::bad_request(
+                    "the database schema matches no point in the migration history (drift) — \
+                     it was changed outside these migrations"
+                        .to_string(),
+                )
+            })?
+        };
+
+        // Apply the unapplied tail one migration at a time — matching the stepwise replay above, so the
+        // resulting snapshot lands exactly on a history point (a single concatenated commit can canonicalize
+        // differently and would then read as drift on the next run).
+        for text in &migrations[start..] {
+            let text = text.trim();
+            if !text.is_empty() {
+                apply_migration_text(&mut h.db, text)?;
+            }
+        }
+        Ok(json!({ "applied": migrations.len() - start, "total": migrations.len() }))
     })
 }
 

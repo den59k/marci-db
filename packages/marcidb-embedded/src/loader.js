@@ -57,6 +57,7 @@ async function bunBackend(libPath) {
     marci_exec: { args: [P, P], returns: P },
     marci_sync: { args: [P, P], returns: P },
     marci_migrate: { args: [P, P], returns: P },
+    marci_migrate_apply: { args: [P, P], returns: P },
     marci_snapshot: { args: [P], returns: P },
     marci_reindex_all: { args: [P], returns: P },
   });
@@ -81,6 +82,7 @@ async function bunBackend(libPath) {
     exec: (h, op) => readFree(s.marci_exec(h, cstr(op))),
     sync: (h, t) => readFree(s.marci_sync(h, cstr(t))),
     migrate: (h, t) => readFree(s.marci_migrate(h, cstr(t))),
+    migrateApply: (h, json) => readFree(s.marci_migrate_apply(h, cstr(json))),
     snapshot: (h) => readFree(s.marci_snapshot(h)),
     reindexAll: (h) => readFree(s.marci_reindex_all(h)),
   };
@@ -101,6 +103,7 @@ async function nodeBackend(libPath) {
   const exec = lib.func("void* marci_exec(void*, str)");
   const sync = lib.func("void* marci_sync(void*, str)");
   const migrate = lib.func("void* marci_migrate(void*, str)");
+  const migrateApply = lib.func("void* marci_migrate_apply(void*, str)");
   const snapshot = lib.func("void* marci_snapshot(void*)");
   const reindexAll = lib.func("void* marci_reindex_all(void*)");
 
@@ -119,6 +122,7 @@ async function nodeBackend(libPath) {
     exec: (h, op) => readFree(exec(h, op)),
     sync: (h, t) => readFree(sync(h, t)),
     migrate: (h, t) => readFree(migrate(h, t)),
+    migrateApply: (h, json) => readFree(migrateApply(h, json)),
     snapshot: (h) => readFree(snapshot(h)),
     reindexAll: (h) => readFree(reindexAll(h)),
   };

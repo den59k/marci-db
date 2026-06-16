@@ -6,5 +6,10 @@
 
 .env
 
+# Generated TS client output (codegen emits index.js / index.d.ts)
 index.js
 index.d.ts
+
+# …but the marcidb-embedded package source is hand-written, not generated — keep it tracked.
+!packages/marcidb-embedded/src/index.js
+!packages/marcidb-embedded/src/index.d.ts

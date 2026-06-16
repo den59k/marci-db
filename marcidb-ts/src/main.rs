@@ -602,9 +602,15 @@ fn generate_types(input: &str, output_dir: &str) {
 
   let dts_path = out_path.join("index.d.ts");
   fs::write(&dts_path, types_out).unwrap();
-  println!("File {} created", dts_path.display());
 
   let js_path = out_path.join("index.js");
   fs::write(&js_path, index_out).unwrap();
-  println!("File {} created", js_path.display());
+
+  // One concise line: show the dir relative to the cwd when possible (the default output lives deep in
+  // node_modules), and normalize separators so the path reads the same on every OS.
+  let shown = std::env::current_dir().ok()
+    .and_then(|cwd| out_path.strip_prefix(&cwd).ok().map(Path::to_path_buf))
+    .unwrap_or_else(|| out_path.to_path_buf());
+  let dir = shown.display().to_string().replace('\\', "/");
+  println!("Generated client \u{2192} {}/ (index.js, index.d.ts)", dir);
 }

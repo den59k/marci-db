@@ -6,6 +6,11 @@ use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, Sche
 /// offsets, indexes, etc. Used by both `parse_schema` and the migration engine (the diff
 /// prefers raw models: the type is still `RefUnresolved(name)`, without synthetic struct models)
 pub fn collect_blocks(input: &str) -> Result<(Vec<Entity>, HashMap<String, Entity>, HashMap<String, EnumDef>), SchemaError> {
+    // Strip a leading UTF-8 BOM (U+FEFF) — many Windows editors add one, and `str::trim()` does NOT
+    // remove it, so without this the first `model` line wouldn't be recognized (silently → empty schema).
+    // Stripping here covers every consumer: parse_schema, try_parse_schema, and the migration diff.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+
     let mut models = Vec::new();
     let mut structs: HashMap<String, Entity> = HashMap::new();
     let mut enums: HashMap<String,EnumDef> = HashMap::new();
@@ -457,6 +462,14 @@ fn resolve_indexes(model: &mut Entity) -> Result<(), SchemaError> {
 #[cfg(test)]
 mod tests {
     use crate::schema::{FieldLocation, FieldType, RefBinding, parse_schema, try_parse_schema};
+
+    /// A leading UTF-8 BOM (common from Windows editors) must not hide the first model.
+    #[test]
+    fn parses_schema_with_leading_bom() {
+        let schema = parse_schema("\u{feff}model User {\n  name String\n}");
+        assert_eq!(schema.models.len(), 1, "BOM-prefixed schema must still parse its model");
+        assert_eq!(schema.models[0].name, "User");
+    }
 
     /// Invalid schema → SchemaError (not a panic). One case per resolver
     #[test]

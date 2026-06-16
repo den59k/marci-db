@@ -21,6 +21,6 @@ execFileSync("cargo", ["run", "-q", "-p", "marcidb-ts", "--", schema, genDir], {
 
 // The generated client imports `marcidb-client/runtime`; point it at the local runtime for the fixture.
 const idx = path.join(genDir, "index.js");
-const runtime = path.relative(genDir, path.join(REPO, "packages", "npm", "runtime", "index.js")).replace(/\\/g, "/");
+const runtime = path.relative(genDir, path.join(REPO, "packages", "marcidb-client", "runtime", "index.js")).replace(/\\/g, "/");
 fs.writeFileSync(idx, fs.readFileSync(idx, "utf8").replace("marcidb-client/runtime", runtime));
 console.log(`[gen] patched runtime import -> ${runtime}`);
