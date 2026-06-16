@@ -90,9 +90,9 @@ jobs:
         shell: bash
         run: |
           if [ -n "${{ matrix.features }}" ]; then
-            cargo build --release -p marcidb-server --target ${{ matrix.target }} --features "${{ matrix.features }}"
+            cargo build --release --locked -p marcidb-server --target ${{ matrix.target }} --features "${{ matrix.features }}"
           else
-            cargo build --release -p marcidb-server --target ${{ matrix.target }}
+            cargo build --release --locked -p marcidb-server --target ${{ matrix.target }}
           fi
       - name: Package binary
         shell: bash
@@ -141,7 +141,7 @@ jobs:
       - name: Build marcidb-ffi (full)
         shell: bash
         # Default features are vector + fulltext, so no --features flag is needed.
-        run: cargo build --release -p marcidb-ffi --target ${{ matrix.target }}
+        run: cargo build --release --locked -p marcidb-ffi --target ${{ matrix.target }}
       - name: Package library
         shell: bash
         run: |
@@ -188,7 +188,7 @@ jobs:
         shell: bash
         # marci-generate is the marcidb-ts binary; marci-migrate is the marcidb-migrate binary (renamed in
         # its Cargo.toml). Same mapping as packages/marcidb-client/build-binary.sh.
-        run: cargo build --release -p marcidb-ts -p marcidb-migrate --target ${{ matrix.target }}
+        run: cargo build --release --locked -p marcidb-ts -p marcidb-migrate --target ${{ matrix.target }}
       - name: Package binaries
         shell: bash
         run: |

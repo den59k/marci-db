@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
 
     "outDir": "dist",
     "rootDir": "src",
@@ -13,7 +13,11 @@
 
     "strict": true,
     "skipLibCheck": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+
+    // Enforce explicit types on exported declarations — bunup's .d.ts emit requires this, so catch a missing
+    // return type here (local `tsc`) instead of as a failed npm publish in CI.
+    "isolatedDeclarations": true
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

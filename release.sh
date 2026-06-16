@@ -50,13 +50,19 @@ node -e '
   }
 ' "$VERSION"
 
+# Sync Cargo.lock: the version bump rewrites every workspace crate's entry. `--workspace` re-locks only the
+# workspace packages and leaves external dependencies exactly as pinned ("Locking 0 packages"), so the lock
+# stays consistent with the manifests in the tagged commit (and `--locked` CI builds stay green).
+echo "▶ Syncing Cargo.lock"
+cargo update --workspace
+
 if [ "$VERIFY" = 1 ]; then
   echo "▶ Pre-flight: cargo check --workspace"
   cargo check --workspace
 fi
 
 echo "▶ Committing + tagging v$VERSION"
-git add Cargo.toml packages/marcidb-client/package.json packages/marcidb-embedded/package.json
+git add Cargo.toml Cargo.lock packages/marcidb-client/package.json packages/marcidb-embedded/package.json
 git commit -m "release: v$VERSION"
 git tag "v$VERSION"
 

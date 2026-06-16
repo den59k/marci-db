@@ -15,6 +15,10 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
 
+    // Catch a missing return type on an exported declaration here (local `tsc`) rather than as a failed
+    // bunup .d.ts emit during the CI npm publish.
+    "isolatedDeclarations": true,
+
     "types": ["node"]
   },
   "include": ["src"],
