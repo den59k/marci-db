@@ -37,11 +37,11 @@ esac
 echo "Building for $PLATFORM ($TARGET)..."
 cargo build -p marcidb-ts -p marcidb-migrate --release --target "$TARGET"
 
-mkdir -p packages/npm/bin
+mkdir -p packages/marcidb-client/bin
 
 copy_bin() {
   local src="target/$TARGET/release/$1$EXT"
-  local dst="packages/npm/bin/$2-$SUFFIX$EXT"
+  local dst="packages/marcidb-client/bin/$2-$SUFFIX$EXT"
   echo "Copying $src -> $dst..."
   cp "$src" "$dst"
 }
@@ -49,4 +49,4 @@ copy_bin() {
 copy_bin "marcidb-ts" "marci-generate"
 copy_bin "marci-migrate" "marci-migrate"
 
-echo "Done: packages/npm/bin/marci-generate-$SUFFIX$EXT, packages/npm/bin/marci-migrate-$SUFFIX$EXT"
+echo "Done: packages/marcidb-client/bin/marci-generate-$SUFFIX$EXT, packages/marcidb-client/bin/marci-migrate-$SUFFIX$EXT"
