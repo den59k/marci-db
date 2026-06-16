@@ -1,4 +1,4 @@
-export async function request(method: string, url: string, body?: any) {
+export async function request(method: string, url: string, body?: any): Promise<any> {
   const res = await fetch(url, {
     method,
     headers: { "Content-Type": "application/json" },
@@ -81,7 +81,12 @@ type Decoder = (r: BinReader) => any;
  * field descriptors (emitted by codegen). Returns `getDecoder` (shape → cached decoder, or `null` when the
  * shape isn't binary-decodable → caller falls back to JSON) and `decodeBuffer` (run a decoder over a buffer).
  */
-export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>) {
+export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>): {
+  // The decoder is opaque to callers — `(reader: any) => any` keeps the internal BinReader class out of the
+  // public types so isolated-declaration `.d.ts` emit (bunup) succeeds without leaking private names.
+  getDecoder(model: string, select: Record<string, any> | undefined): ((reader: any) => any) | null;
+  decodeBuffer(decoder: (reader: any) => any, bytes: Uint8Array, many: boolean): any;
+} {
   const cache = new Map<string, Decoder | null>();
 
   const isSel = (v: any) => v !== undefined && v !== false;
@@ -204,12 +209,12 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>) {
   return { getDecoder, decodeBuffer };
 }
 
-export function encodeId(id: any) {
+export function encodeId(id: any): string {
   if (typeof id === "object" && id !== null) {
     // Composite key: nested objects (a relation in @id) are expanded into a dot-path,
     // as the server expects — `chat.id=1&id=1`, not `chat=[object Object]&id=1`
     const parts: string[] = [];
-    const walk = (obj: Record<string, any>, prefix: string) => {
+    const walk = (obj: Record<string, any>, prefix: string): void => {
       for (const [k, v] of Object.entries(obj)) {
         const key = prefix ? `${prefix}.${k}` : k;
         if (typeof v === "object" && v !== null) {
