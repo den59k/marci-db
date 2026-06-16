@@ -41,6 +41,25 @@ pub fn serialize_snapshot(schema: &Schema) -> String {
   out
 }
 
+/// A stable fingerprint of a materialized schema — the hash of its canonical snapshot text. Used to gate
+/// the binary HTTP read path: client and server each hash *their* schema and binary engages only when the
+/// hashes match (the HTTP analogue of the FFI `marci_abi_version` handshake). Because the snapshot pins
+/// physical layout (slot order, field order, types), an equal hash guarantees the wire format is compatible;
+/// any divergence falls back to JSON, never wrong bytes.
+///
+/// FNV-1a (64-bit), hex-encoded — deterministic across builds and platforms (unlike `DefaultHasher`, whose
+/// algorithm isn't guaranteed stable), so a client compiled by one toolchain agrees with a server built by
+/// another. Not cryptographic; collision risk is negligible for the small space of a project's schemas.
+pub fn schema_fingerprint(schema: &Schema) -> String {
+  let snapshot = serialize_snapshot(schema);
+  let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+  for byte in snapshot.as_bytes() {
+    hash ^= *byte as u64;
+    hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+  }
+  format!("{:016x}", hash)
+}
+
 pub fn serialize_field(schema: &Schema, entity: &crate::schema::Entity, field: &crate::schema::Field) -> String {
   let mut tokens: Vec<String> = vec![field.name.clone(), serialize_type(schema, field)];
 
@@ -594,6 +613,30 @@ struct UserRole {
     assert!(emb.indexes.iter().any(|i|
       matches!(i, FieldIndex::Custom { name, args, .. } if name == "vector" && args == "cosine")),
       "custom index not rebuilt from snapshot: {:?}", emb.indexes);
+  }
+
+  /// The fingerprint is deterministic and tracks the snapshot text: a snapshot round-trip (the path the
+  /// server takes — load from stored snapshot) yields the *same* hash a freshly-parsed schema (the path
+  /// codegen takes) produces, so the binary HTTP handshake engages for a fresh, in-sync client/server.
+  #[test]
+  fn fingerprint_is_stable_across_round_trip() {
+    let schema = parse_schema(ROOT_SCHEMA);
+    let h1 = schema_fingerprint(&schema);
+
+    // Same schema, parsed again → identical hash (no hidden nondeterminism, e.g. HashMap iteration order).
+    assert_eq!(h1, schema_fingerprint(&parse_schema(ROOT_SCHEMA)), "fingerprint not deterministic");
+
+    // Snapshot → parse_snapshot → fingerprint: the server reconstructs its schema from the snapshot, so it
+    // must agree with the codegen-side fingerprint of the original parse.
+    let reparsed = parse_snapshot(&serialize_snapshot(&schema)).unwrap();
+    assert_eq!(h1, schema_fingerprint(&reparsed), "fingerprint diverged across snapshot round-trip");
+
+    // A real change (added field) must change the hash — otherwise the handshake can't detect skew.
+    let changed = parse_schema("model User {\n  name String\n  age Int\n}");
+    assert_ne!(h1, schema_fingerprint(&changed), "fingerprint blind to a schema change");
+
+    // 16 hex chars (u64).
+    assert_eq!(h1.len(), 16, "fingerprint should be 16 hex chars, got {:?}", h1);
   }
 
   /// Targeted check that parse_snapshot restored the resolved state (not just the text)

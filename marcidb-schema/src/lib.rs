@@ -16,7 +16,7 @@ pub use crate::schema::{
     FieldCustomFormat, FieldDefault, FieldIndex, FieldIndexNum, EntityDependency,
 };
 // Materialized-snapshot codec (the engine's schema persistence format)
-pub use crate::snapshot::{serialize_snapshot, parse_snapshot, serialize_type, serialize_field};
+pub use crate::snapshot::{serialize_snapshot, parse_snapshot, serialize_type, serialize_field, schema_fingerprint};
 // Migration operation set + authoring
 pub use crate::op::{MigrateOp, MigrateError};
 pub use crate::diff::{diff, reconcile};

@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, serialize_snapshot};
+use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported};
 use serde_json::Value;
 
-use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body}};
+use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body, read_response, BinaryNeg, ReadBody}};
 
 type HandlerResult = Result<Response<Full<Bytes>>, ApiError>;
 
@@ -139,34 +139,54 @@ pub async fn handle_insert(req: Request<hyper::body::Incoming>, ctx: Arc<ServerC
     Ok(ok_response(id))
 }
 
+/// Whether this binary-eligible request should actually get bytes: the client must accept binary, claim the
+/// *same* schema fingerprint the target DB currently has, and the query shape must be binary-encodable. Any
+/// miss → JSON (transparent, never wrong bytes). The fingerprint is computed only on the binary path (gated
+/// by `wants_binary` first), so the common JSON request pays nothing.
+fn binary_allowed(neg: &BinaryNeg, db: &MarciDB, query_op: &marcidb::QueryOp) -> bool {
+    neg.wants_binary
+        && shape_supported(query_op)
+        && neg.schema_hash.as_deref() == Some(schema_fingerprint(&db.schema).as_str())
+}
+
 pub async fn handle_find_many(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {
+    let neg = BinaryNeg::from_req(&req);
     let json_val = parse_json_body(req).await?;
 
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let query_op = parse_query(&db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+        if binary_allowed(&neg, db, &query_op) {
+            let bytes = query_binary_many(db, &query_op).map_err(query_error)?;
+            return Ok(ReadBody::Binary(bytes));
+        }
         let items = db.find_many(&query_op, |ctx| decode_document(ctx).unwrap())
             .map_err(query_error)?;
-        Ok(array_to_json(&items))
+        Ok(ReadBody::Json(array_to_json(&items)))
     })).await?;
 
-    Ok(ok_response(result))
+    Ok(read_response(result))
 }
 
 pub async fn handle_find_first(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {
+    let neg = BinaryNeg::from_req(&req);
     let json_val = parse_json_body(req).await?;
 
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let query_op = parse_query(&db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+        if binary_allowed(&neg, db, &query_op) {
+            let bytes = query_binary_one(db, &query_op).map_err(query_error)?;
+            return Ok(ReadBody::Binary(bytes));
+        }
         let item = db.find_first(&query_op, |ctx| decode_document(ctx).unwrap())
             .map_err(query_error)?;
-        Ok(item.unwrap_or_else(|| "null".to_string()))
+        Ok(ReadBody::Json(item.unwrap_or_else(|| "null".to_string())))
     })).await?;
 
-    Ok(ok_response(result))
+    Ok(read_response(result))
 }
 
 pub async fn handle_count(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {
