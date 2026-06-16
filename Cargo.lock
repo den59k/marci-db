@@ -643,6 +643,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "marcidb-ffi"
+version = "0.1.0"
+dependencies = [
+ "marci_fulltext_index",
+ "marci_vector_index",
+ "marcidb",
+ "marcidb-schema",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "marcidb-migrate"
 version = "0.1.0"
 dependencies = [

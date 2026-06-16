@@ -8,6 +8,7 @@ members = [
     "marci-fulltext-index",
     "marcidb-schema",
     "marcidb-server",
+    "marcidb-ffi",
     "marcidb-ts",
     "marcidb-migrate"
 ]

@@ -1,0 +1,41 @@
+{
+  "name": "marcidb-embedded",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Embedded (in-process) MarciDB for Bun and Node via FFI — for fast, ephemeral integration tests.",
+  "author": {
+    "name": "den59k"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/den59k/marci-db.git"
+  },
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build:lib": "bash build-lib.sh win",
+    "gen": "node test/gen.mjs",
+    "test": "node test/gen.mjs && node test/smoke.mjs && node test/full-client.mjs",
+    "test:bun": "node test/gen.mjs && bun test/smoke.mjs && bun test/full-client.mjs"
+  },
+  "files": [
+    "src/",
+    "native/"
+  ],
+  "dependencies": {
+    "koffi": "^2.12.0"
+  },
+  "peerDependencies": {
+    "marcidb-client": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "marcidb-client": {
+      "optional": true
+    }
+  }
+}

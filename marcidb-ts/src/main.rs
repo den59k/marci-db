@@ -581,16 +581,16 @@ fn generate_types(input: &str, output_dir: &str) {
   for model in schema.models.iter() { 
     if model.name.contains(".") { continue; };
     lines.push(format!("{}: {{", get_model_small_name(model)));
-    lines.push(format!("  findMany: (select) => op({{ model: \"{0}\", action: \"findMany\", query: select }}, () => findMany(\"{0}\", select)),", model.name));
-    lines.push(format!("  findFirst: (select) => op({{ model: \"{0}\", action: \"findFirst\", query: select }}, () => findFirst(\"{0}\", select)),", model.name));
-    lines.push(format!("  insert: (data) => op({{ model: \"{0}\", action: \"insert\", data }}, () => insert(\"{0}\", data)),", model.name));
-    lines.push(format!("  update: (id, data) => op({{ model: \"{0}\", action: \"update\", id, data }}, () => update(\"{0}\", id, data)),", model.name));
-    lines.push(format!("  delete: (id) => op({{ model: \"{0}\", action: \"delete\", id }}, () => runDelete(\"{0}\", id)),", model.name));
-    lines.push(format!("  count: (query) => op({{ model: \"{0}\", action: \"count\", query: query ?? {{}} }}, () => count(\"{0}\", query)),", model.name));
+    lines.push(format!("  findMany: (select) => op({{ model: \"{0}\", action: \"findMany\", query: select }}),", model.name));
+    lines.push(format!("  findFirst: (select) => op({{ model: \"{0}\", action: \"findFirst\", query: select }}),", model.name));
+    lines.push(format!("  insert: (data) => op({{ model: \"{0}\", action: \"insert\", data }}),", model.name));
+    lines.push(format!("  update: (id, data) => op({{ model: \"{0}\", action: \"update\", id, data }}),", model.name));
+    lines.push(format!("  delete: (id) => op({{ model: \"{0}\", action: \"delete\", id }}),", model.name));
+    lines.push(format!("  count: (query) => op({{ model: \"{0}\", action: \"count\", query: query ?? {{}} }}),", model.name));
     let has_custom = model_has_custom_index(model);
-    lines.push(format!("  aggregate: (query) => op({{ model: \"{0}\", action: \"aggregate\", query }}, () => aggregate(\"{0}\", query)){1}", model.name, if has_custom { "," } else { "" }));
+    lines.push(format!("  aggregate: (query) => op({{ model: \"{0}\", action: \"aggregate\", query }}){1}", model.name, if has_custom { "," } else { "" }));
     if has_custom {
-      lines.push(format!("  reindex: () => op({{ model: \"{0}\", action: \"$reindex\" }}, () => reindex(\"{0}\"))", model.name));
+      lines.push(format!("  reindex: () => op({{ model: \"{0}\", action: \"$reindex\" }})", model.name));
     }
     lines.push("},".to_string());
   }

@@ -1,0 +1,30 @@
+[package]
+name = "marcidb-ffi"
+version = "0.1.0"
+edition = "2024"
+
+# Embeddable C ABI over the MarciDB engine. Consumed in-process from Bun (`bun:ffi`) and Node (`koffi`)
+# via the `marcidb-embedded` npm package. Data crosses the boundary as JSON; see PLAN.md.
+[lib]
+# Produces `marcidb_ffi.dll` / `libmarcidb_ffi.{so,dylib}` (+ `.a` staticlib); packaging renames these to
+# `marcidb-<platform>.<ext>` for the npm package. `lib` (rlib) is also produced so the in-crate integration
+# tests can link the entry points. (The crate name isn't overridden to `marcidb` — that collides with the
+# engine dependency of the same name and makes the lib unimportable from tests.)
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+marcidb = { path = "../marcidb" }
+marcidb-schema = { path = "../marcidb-schema" }
+serde_json = "1.0.145"
+# `@custom` index modules — on by default (the shipped library is the "full" variant). The vector module
+# pulls in `marci_vector`, which needs nightly (portable_simd); build `--no-default-features` for a stable core.
+marci_vector_index = { path = "../marci-vector-index", optional = true }
+marci_fulltext_index = { path = "../marci-fulltext-index", optional = true }
+
+[features]
+default = ["vector", "fulltext"]
+vector = ["dep:marci_vector_index"]
+fulltext = ["dep:marci_fulltext_index"]
+
+[dev-dependencies]
+tempfile = "3"

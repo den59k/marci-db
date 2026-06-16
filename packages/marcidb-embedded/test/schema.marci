@@ -1,0 +1,9 @@
+model User {
+  name String
+  age  Int
+}
+
+model Doc {
+  title String
+  body  String @custom(fulltext)
+}

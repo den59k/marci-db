@@ -1,0 +1,7 @@
+/node_modules
+
+# Prebuilt native libraries are produced by build-lib.sh / CI and bundled at publish time.
+/native
+
+# Generated test client fixture
+/test/.gen

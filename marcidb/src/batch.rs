@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::{DeleteError, InsertError, MarciDB, MarciTransaction, StorageError, UpdateError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
+use crate::{DeleteError, InsertError, MarciDB, MarciTransaction, QueryError, ReindexError, StorageError, UpdateError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
 
 /// A batch transaction error with the index of the operation on which it occurred.
 /// `index == ops.len()` means an error at commit (after all operations)
@@ -120,6 +120,127 @@ fn apply_op(tx: &MarciTransaction, db: &MarciDB, op: &Value, prior: &[Value]) ->
 
 fn field<'a>(obj: &'a serde_json::Map<String, Value>, name: &'static str) -> Result<&'a Value, BatchErrorKind> {
   obj.get(name).ok_or(BatchErrorKind::MissingField(name))
+}
+
+/// Error from a single (non-transactional) operation dispatched by [`execute_op`].
+#[derive(Debug)]
+pub enum OpError {
+  /// The operation is not a JSON object
+  NotAnObject,
+  /// A required field is missing (`model` / `action` / `data` / `id` / `query`)
+  MissingField(&'static str),
+  UnknownModel(String),
+  UnknownAction(String),
+  /// Error parsing the input JSON (encode / parse)
+  Parse(String),
+  Insert(InsertError),
+  Update(UpdateError),
+  Delete(DeleteError),
+  Query(QueryError),
+  Reindex(ReindexError),
+  Storage(StorageError),
+}
+
+impl OpError {
+  /// Whether this is an internal storage fault (→ 5xx) as opposed to a client/payload error (→ 4xx).
+  /// Mirrors the server's `ApiError` mapping so the embedded transport reports the same error class.
+  pub fn is_storage(&self) -> bool {
+    match self {
+      OpError::Storage(_) => true,
+      OpError::Query(QueryError::Storage(_)) => true,
+      OpError::Query(QueryError::Search(e)) => matches!(e, ReindexError::Storage(_) | ReindexError::Provider(crate::ProviderError::Storage(_))),
+      OpError::Reindex(e) => matches!(e, ReindexError::Storage(_) | ReindexError::Provider(crate::ProviderError::Storage(_))),
+      _ => false,
+    }
+  }
+}
+
+impl fmt::Display for OpError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      OpError::NotAnObject => write!(f, "operation must be a JSON object"),
+      OpError::MissingField(name) => write!(f, "missing required field '{}'", name),
+      OpError::UnknownModel(m) => write!(f, "unknown model '{}'", m),
+      OpError::UnknownAction(a) => write!(f, "unknown action '{}'", a),
+      OpError::Parse(e) => write!(f, "{}", e),
+      OpError::Insert(e) => write!(f, "{:?}", e),
+      OpError::Update(e) => write!(f, "{:?}", e),
+      OpError::Delete(e) => write!(f, "{:?}", e),
+      OpError::Query(e) => write!(f, "{:?}", e),
+      OpError::Reindex(e) => write!(f, "{}", e),
+      OpError::Storage(e) => write!(f, "{:?}", e),
+    }
+  }
+}
+
+impl std::error::Error for OpError {}
+
+fn op_field<'a>(obj: &'a serde_json::Map<String, Value>, name: &'static str) -> Result<&'a Value, OpError> {
+  obj.get(name).ok_or(OpError::MissingField(name))
+}
+
+fn op_parse_err<E: fmt::Debug>(e: E) -> OpError {
+  OpError::Parse(format!("{:?}", e))
+}
+
+/// Executes a single `{ model, action, ... }` operation against the DB, returning its result as a JSON
+/// `Value`. Unlike [`execute_batch`], reads (`findMany`/`findFirst`) go through the search-capable
+/// [`MarciDB`] methods, so `$near`/`$search` (`@custom` index) queries work; writes each run in their own
+/// transaction (the engine's short-lived write methods). This is the embedding/FFI counterpart of the
+/// server's per-route handlers — same command shape as one element of an `execute_batch` array.
+///
+/// Result format by action matches [`execute_batch`], plus `$reindex` → `{ "ok": true, "indexed": <n> }`.
+pub fn execute_op(db: &MarciDB, op: &Value) -> Result<Value, OpError> {
+  let obj = op.as_object().ok_or(OpError::NotAnObject)?;
+  let model = obj.get("model").and_then(|m| m.as_str()).ok_or(OpError::MissingField("model"))?;
+  let action = obj.get("action").and_then(|a| a.as_str()).ok_or(OpError::MissingField("action"))?;
+
+  let entity = db.get_model(model).ok_or_else(|| OpError::UnknownModel(model.to_string()))?;
+
+  match action {
+    "insert" => {
+      let write_op = parse_insert(&db.schema, entity, op_field(obj, "data")?).map_err(op_parse_err)?;
+      let id = db.insert_item(entity, &write_op).map_err(OpError::Insert)?;
+      Ok(json_value(decode_id(&id, entity, &db.schema)))
+    },
+    "update" => {
+      let id = parse_id(&db.schema, entity, op_field(obj, "id")?).map_err(op_parse_err)?;
+      let update_op = parse_update(&db.schema, entity, op_field(obj, "data")?).map_err(op_parse_err)?;
+      db.update_item(entity, &id, &update_op).map_err(OpError::Update)?;
+      Ok(Value::Null)
+    },
+    "delete" => {
+      let id = parse_id(&db.schema, entity, op_field(obj, "id")?).map_err(op_parse_err)?;
+      let deleted = db.delete_item(entity, &id).map_err(OpError::Delete)?;
+      Ok(Value::Bool(deleted))
+    },
+    "findFirst" => {
+      let query = parse_query(&db.schema, entity, op_field(obj, "query")?).map_err(op_parse_err)?;
+      let item = db.find_first(&query, |ctx| decode_document(ctx).unwrap()).map_err(OpError::Query)?;
+      Ok(item.map(json_value).unwrap_or(Value::Null))
+    },
+    "findMany" => {
+      let query = parse_query(&db.schema, entity, op_field(obj, "query")?).map_err(op_parse_err)?;
+      let items = db.find_many(&query, |ctx| decode_document(ctx).unwrap()).map_err(OpError::Query)?;
+      Ok(json_value(array_to_json(&items)))
+    },
+    "count" => {
+      let mut agg = parse_aggregate(&db.schema, entity, op_field(obj, "query")?).map_err(op_parse_err)?;
+      agg.count = true;
+      let result = db.aggregate(&agg).map_err(OpError::Storage)?;
+      Ok(Value::from(result.count))
+    },
+    "aggregate" => {
+      let agg = parse_aggregate(&db.schema, entity, op_field(obj, "query")?).map_err(op_parse_err)?;
+      let result = db.aggregate(&agg).map_err(OpError::Storage)?;
+      Ok(json_value(aggregate_to_json(&agg, &result)))
+    },
+    "$reindex" => {
+      let indexed = db.reindex_entity(entity).map_err(OpError::Reindex)?;
+      Ok(serde_json::json!({ "ok": true, "indexed": indexed }))
+    },
+    other => Err(OpError::UnknownAction(other.to_string())),
+  }
 }
 
 fn parse_err<E: fmt::Debug>(e: E) -> BatchErrorKind {

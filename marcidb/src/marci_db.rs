@@ -5,6 +5,23 @@ use serde_json::Value;
 
 use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
+/// Storage-engine options threaded into `MarciDB::try_*_with_options`. Defaults match the durable
+/// `MarciDB::new`/`open` path; the embedding/test layer flips `disable_fsync` for fast, ephemeral DBs.
+#[derive(Debug, Clone, Default)]
+pub struct OpenOptions {
+  /// Disable every `fsync`. Much faster, but durability-unsafe — a crash can lose recent writes.
+  /// Intended for throwaway/integration-test databases (often paired with a temp dir / ramdisk).
+  pub disable_fsync: bool,
+}
+
+/// Opens the underlying CanopyDB database for `path` with the given options. Both create and open paths
+/// funnel through here so option handling lives in one spot.
+fn open_database(path: &str, options: &OpenOptions) -> Result<Database, StorageError> {
+  let mut env_opts = canopydb::EnvOptions::new(path);
+  env_opts.disable_fsync = options.disable_fsync;
+  Ok(Database::with_options(env_opts, canopydb::DbOptions::default())?)
+}
+
 pub struct MarciDB {
   pub schema: Schema,
   db: Database,
@@ -33,7 +50,12 @@ impl MarciDB {
 
   /// Fallible [`MarciDB::create`]: returns a [`StorageError`] instead of panicking on a storage fault.
   pub fn try_create(schema: Schema, path: &str) -> Result<MarciDB, StorageError> {
-    let db = canopydb::Database::new(path)?;
+    MarciDB::try_create_with_options(schema, path, &OpenOptions::default())
+  }
+
+  /// [`MarciDB::try_create`] with explicit storage options (e.g. `disable_fsync` for ephemeral DBs).
+  pub fn try_create_with_options(schema: Schema, path: &str, options: &OpenOptions) -> Result<MarciDB, StorageError> {
+    let db = open_database(path, options)?;
     let model_by_name = schema.build_model_name_map();
 
     let tx = db.begin_write()?;
@@ -73,7 +95,12 @@ impl MarciDB {
   /// Fallible [`MarciDB::open`]: returns a [`StorageError`] instead of panicking on a storage fault.
   /// (A structurally corrupt stored snapshot is still treated as a hard invariant and panics.)
   pub fn try_open(path: &str) -> Result<MarciDB, StorageError> {
-    let db = canopydb::Database::new(path)?;
+    MarciDB::try_open_with_options(path, &OpenOptions::default())
+  }
+
+  /// [`MarciDB::try_open`] with explicit storage options (e.g. `disable_fsync` for ephemeral DBs).
+  pub fn try_open_with_options(path: &str, options: &OpenOptions) -> Result<MarciDB, StorageError> {
+    let db = open_database(path, options)?;
 
     let snapshot_text = {
       let rx = db.begin_read()?;

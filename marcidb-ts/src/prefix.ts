@@ -72,4 +72,12 @@ export type Op<T> = PromiseLike<T> & { readonly [__op]: T }
 // "0.id" — the id field of operation #0's result; "1.author.id" — a nested path
 export declare function ref(path: string): any
 
-export declare function marcidb(url: string): MarciDB;
+// A transport-neutral operation descriptor and the pluggable transport that runs it. The HTTP transport
+// is selected by passing a URL string; marcidb-embedded provides an in-process FFI transport.
+export type MarciOp = { model: string, action: string, query?: any, data?: any, id?: any }
+export type MarciTransport = {
+  exec(op: MarciOp): Promise<any>
+  batch(ops: MarciOp[]): Promise<any[]>
+}
+
+export declare function marcidb(transport: string | MarciTransport): MarciDB;
