@@ -5,3 +5,6 @@
 
 # Generated test client fixture
 /test/.gen
+
+# Packed tarballs from `npm pack`
+*.tgz
