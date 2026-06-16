@@ -662,6 +662,7 @@ fn generate_types(input: &str, output_dir: &str) {
 
   let index_out = include_str!("prefix.js")
     .replace("/* generated_models */", &get_models_metadata(&schema))
+    .replace("/* generated_schema_hash */", &format!("\"{}\"", marcidb::schema_fingerprint(&schema)))
     .replace("/* generated_data */", &lines.join("\n    "));
 
   let out_path = Path::new(output_dir);

@@ -178,7 +178,7 @@ The embedded read path encodes `findMany`/`findFirst` results as a compact **bin
 decoded by a shape-specialized, cached decoder on the JS side — reusing the engine's slot-row encoding and
 dropping the old double-serialize (decode → JSON string → `Value` → envelope). It's on automatically for
 `marcidb(db)`; shapes it doesn't cover yet (formats, enums, lists, composite keys) fall back to JSON
-transparently, and the HTTP transport stays JSON. A JSON-vs-binary parity test
+transparently. The same encoder backs an opt-in **binary HTTP** mode (below). A JSON-vs-binary parity test
 ([`test/binary-parity.test.ts`](../packages/marcidb-embedded/test/binary-parity.test.ts)) gates correctness.
 
 Isolating the transport — the **same DB**, the same query through binary vs forced-JSON (harness:
@@ -201,6 +201,31 @@ reading the buffer costs an extra decode; under Bun's zero-copy `toArrayBuffer` 
 — Part 2's best case). Since Part 1 already closes the gap there, the extra wire/object dedup isn't worth its
 complexity yet; revisit only if a real workload shows a relation-heavy result still bottlenecked on payload
 size or JS allocation.
+
+### Binary over HTTP (`marcidb-server`)
+
+The same encoder is available over HTTP as an **opt-in** mode, in parallel with JSON. The client advertises
+`Accept: application/x-marcidb-rows` plus a schema fingerprint (`X-Marci-Schema`); the server replies binary
+only when the fingerprint matches the DB's current schema **and** the shape is supported, otherwise JSON — so
+curl and any non-negotiating client are unaffected. Reads only (`findMany`/`findFirst`).
+
+Here the network round-trip is in the mix, so the win is narrower than embedded and concentrated on **large
+reads**, where binary is both **smaller on the wire** and skips `JSON.parse`/double-serialize. Same running
+server, binary HTTP client vs forced-JSON (harness:
+[`test/http-bench.ts`](../packages/marcidb-embedded/test/http-bench.ts); 20k users, 10k posts / 100 authors):
+
+| Read | Node — JSON → binary | Bun — JSON → binary |
+| --- | ---: | ---: |
+| **Select all** (20k rows ×50) | 72 → 102 reads/s — **1.41×** | 80 → 128 — **1.60×** |
+| **Nested select** (10k posts + author ×50) | 124 → 172 reads/s — **1.38×** | 135 → 202 — **1.50×** |
+| **Index filter** WHERE age=? (×2000) | 2.0k → 2.5k ops/s — **1.24×** | 3.6k → 3.9k — **1.08×** |
+| **Point query by id** (×2000) | 3.7k → 4.2k ops/s — **1.14×** | 16.2k → 13.0k — 0.80× |
+
+The `select all` body is **1.27× smaller** on the wire (957 KB vs 1.22 MB) — repeated field names dropped,
+compact scalars. Large/nested reads gain ~1.4–1.6×; the point read is a wash or a slight loss (a tiny payload
+where binary framing doesn't pay, and on Bun the very fast `fetch`+`JSON.parse` already win). The HTTP
+handshake (`X-Marci-Schema`) keeps a stale client *correct* — a fingerprint mismatch transparently serves
+JSON, never wrong bytes — verified by [`test/http-binary.test.ts`](../packages/marcidb-embedded/test/http-binary.test.ts).
 
 ### Caveats
 

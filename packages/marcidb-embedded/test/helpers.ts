@@ -38,3 +38,17 @@ export function generateClient(schemaPath: string): Promise<any> {
 export function schemaPath(file: string): string {
   return path.join(HERE, file);
 }
+
+/** Directory the typed client for `schemaPath` is generated into (mirrors `generateClient`). */
+export function generatedDir(schemaPath: string): string {
+  const name = path.basename(schemaPath).replace(/\.[^.]+$/, "");
+  return path.join(HERE, ".gen", name);
+}
+
+/** The `SCHEMA_HASH` baked into the generated client (the fingerprint it sends on binary HTTP reads). */
+export function clientSchemaHash(schemaPath: string): string {
+  const src = fs.readFileSync(path.join(generatedDir(schemaPath), "index.js"), "utf8");
+  const m = src.match(/const SCHEMA_HASH = "([0-9a-f]+)"/);
+  if (!m) throw new Error(`SCHEMA_HASH not found in generated client for ${schemaPath}`);
+  return m[1]!;
+}

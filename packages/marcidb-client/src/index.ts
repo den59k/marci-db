@@ -19,6 +19,40 @@ export async function request(method: string, url: string, body?: any): Promise<
   return res.json();
 }
 
+/** Media type for a binary result buffer — must match the server's `BINARY_MEDIA_TYPE`. */
+const BINARY_MEDIA_TYPE = "application/x-marcidb-rows";
+
+/**
+ * A binary-eligible read over HTTP. Advertises `Accept: <binary>, json` plus the client's schema
+ * fingerprint (`X-Marci-Schema`) and inspects the *response* content-type:
+ *   - binary (`application/x-marcidb-rows`) → the raw result buffer as a `Uint8Array`
+ *   - anything else (JSON) → `{ json }` with the already-parsed result (the server declined binary —
+ *     schema/shape mismatch — so it sent the normal JSON body; no second round-trip needed).
+ * A single request handles both outcomes; `run()` in the generated client branches on the return shape.
+ */
+export async function requestBinary(url: string, body: any, schemaHash: string): Promise<Uint8Array | { json: any }> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: `${BINARY_MEDIA_TYPE}, application/json`,
+      "X-Marci-Schema": schemaHash,
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`MarciDB [${res.status}]: ${text}`);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes(BINARY_MEDIA_TYPE)) {
+    return new Uint8Array(await res.arrayBuffer());
+  }
+  return { json: await res.json() };
+}
+
 
 // ───────────────────────────────── binary result decoder ─────────────────────────────────
 //
