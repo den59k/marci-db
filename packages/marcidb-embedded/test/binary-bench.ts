@@ -1,21 +1,20 @@
 // Micro-benchmark isolating the binary read transport: the *same* embedded DB, read through the binary fast
 // path (`marcidb(db)`) vs forced JSON (a transport without `queryBinary`). Reports ops/s and the speedup, so
-// we can see how much of the read JSON tax the binary path removes (and whether Part 2 is worth pursuing).
-//
-// Run:  MARCIDB_LIB=… node test/binary-bench.mjs   |   bun test/binary-bench.mjs   (env: N=, READS=, POINTS=)
+// we can see how much of the read JSON tax the binary path removes. Not a unit test — run it directly:
+//   bun test/binary-bench.ts        (env: N=, READS=, POINTS=, REL_POSTS=, REL_AUTHORS=, REL_READS=, IDX_READS=)
+import "./setup.ts"; // builds the native lib (+ runtime + dist) and sets MARCIDB_LIB
 import path from "node:path";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
 
-import { openTestDatabase } from "../src/index.js";
+const { openTestDatabase } = await import("../dist/index.js");
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
+const HERE = import.meta.dir;
 const REPO = path.resolve(HERE, "..", "..", "..");
-const genDir = path.join(HERE, ".gen-bench");
-const isBun = typeof Bun !== "undefined";
-const RUNTIME = isBun ? `bun ${Bun.version}` : `node ${process.version}`;
+const genDir = path.join(HERE, ".gen", "bench");
+const isBun = typeof (globalThis as any).Bun !== "undefined";
+const RUNTIME = isBun ? `bun ${(globalThis as any).Bun.version}` : `node ${process.version}`;
 
 const N = Number(process.env.N ?? 20000);
 const READS = Number(process.env.READS ?? 50);
@@ -45,12 +44,12 @@ const runtimeRel = path.relative(genDir, path.join(REPO, "packages", "marcidb-cl
 fs.writeFileSync(idxPath, fs.readFileSync(idxPath, "utf8").replace("marcidb-client/runtime", runtimeRel));
 const { marcidb } = await import(`file://${idxPath.replace(/\\/g, "/")}`);
 
-async function timeOps(iters, op) {
+async function timeOps(iters: number, op: (i: number) => Promise<any>) {
   const t0 = performance.now();
   for (let i = 0; i < iters; i++) await op(i);
   return performance.now() - t0;
 }
-const fmt = (n) => Math.round(n).toLocaleString("en-US");
+const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
 const randId = () => 1 + Math.floor(Math.random() * N);
 const randAge = () => 18 + Math.floor(Math.random() * 60);
 
@@ -59,26 +58,23 @@ const binaryClient = marcidb(db);
 const jsonClient = marcidb({ exec: db.exec, batch: db.batch }); // no queryBinary → JSON path
 
 try {
-  // seed users
   const users = Array.from({ length: N }, (_, i) => ({ name: `user${i}`, age: 18 + (i % 60), email: `user${i}@example.com` }));
-  for (let i = 0; i < N; i += 1000) await jsonClient.$transaction(users.slice(i, i + 1000).map((u) => jsonClient.user.insert(u)));
-  // seed posts with shared authors (first REL_AUTHORS users)
+  for (let i = 0; i < N; i += 1000) await jsonClient.$transaction(users.slice(i, i + 1000).map((u: any) => jsonClient.user.insert(u)));
   const posts = Array.from({ length: REL_POSTS }, (_, i) => ({ title: `post${i}`, author: { id: 1 + (i % REL_AUTHORS) } }));
-  for (let i = 0; i < REL_POSTS; i += 1000) await jsonClient.$transaction(posts.slice(i, i + 1000).map((p) => jsonClient.post.insert(p)));
+  for (let i = 0; i < REL_POSTS; i += 1000) await jsonClient.$transaction(posts.slice(i, i + 1000).map((p: any) => jsonClient.post.insert(p)));
 
   const benches = [
-    { title: `Select all (${fmt(N)} rows × ${READS})`, iters: READS, op: (c) => c.user.findMany({ name: true, age: true, email: true }) },
-    { title: `Point query by id (${fmt(POINTS)})`, iters: POINTS, op: (c) => c.user.findFirst({ name: true, age: true, $where: { id: randId() } }) },
-    { title: `Index filter WHERE age=? (×${fmt(IDX_READS)})`, iters: IDX_READS, op: (c) => c.user.findMany({ name: true, $where: { age: randAge() } }) },
-    { title: `Nested select — ${fmt(REL_POSTS)} posts + author (×${REL_READS})`, iters: REL_READS, op: (c) => c.post.findMany({ title: true, author: { name: true, email: true } }) },
+    { title: `Select all (${fmt(N)} rows × ${READS})`, iters: READS, op: (c: any) => c.user.findMany({ name: true, age: true, email: true }) },
+    { title: `Point query by id (${fmt(POINTS)})`, iters: POINTS, op: (c: any) => c.user.findFirst({ name: true, age: true, $where: { id: randId() } }) },
+    { title: `Index filter WHERE age=? (×${fmt(IDX_READS)})`, iters: IDX_READS, op: (c: any) => c.user.findMany({ name: true, $where: { age: randAge() } }) },
+    { title: `Nested select — ${fmt(REL_POSTS)} posts + author (×${REL_READS})`, iters: REL_READS, op: (c: any) => c.post.findMany({ title: true, author: { name: true, email: true } }) },
   ];
 
   console.log(`MarciDB binary vs JSON transport — ${RUNTIME}`);
   console.log(`N=${fmt(N)} users, ${fmt(REL_POSTS)} posts / ${REL_AUTHORS} authors\n`);
 
   for (const b of benches) {
-    // warmup both paths (compile decoder / hot JIT), then measure
-    await b.op(binaryClient); await b.op(jsonClient);
+    await b.op(binaryClient); await b.op(jsonClient); // warmup
     const jsonMs = await timeOps(b.iters, () => b.op(jsonClient));
     const binMs = await timeOps(b.iters, () => b.op(binaryClient));
     const jsonOps = b.iters / (jsonMs / 1000);

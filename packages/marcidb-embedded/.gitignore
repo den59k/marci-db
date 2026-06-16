@@ -1,12 +1,13 @@
 /node_modules
 
+# Build output (bunup) — produced from src/*.ts by `bun run build` / prepublishOnly.
+/dist
+
 # Prebuilt native libraries are produced by build-lib.sh / CI and bundled at publish time.
 /native
 
-# Generated test client fixtures (gen.mjs, binary-parity.mjs, binary-bench.mjs)
+# Generated test client fixtures (codegen output from helpers.ts / binary-bench.ts)
 /test/.gen
-/test/.gen-parity
-/test/.gen-bench
 
 # Packed tarballs from `npm pack`
 *.tgz

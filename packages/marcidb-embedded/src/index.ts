@@ -11,19 +11,75 @@ import { loadFfi } from "./loader.js";
 // Resolved once at module load (top-level await): keeps `openDatabase` synchronous for callers.
 const ffi = await loadFfi();
 
+/** A transport-neutral operation descriptor (matches `MarciOp` from the generated client). */
+export type MarciOp = { model: string; action: string; query?: any; data?: any; id?: any };
+
+/** Error kinds mirror the server's HTTP error taxonomy. */
+export type MarciErrorKind = "bad_request" | "not_found" | "internal";
+
+/**
+ * The transport object consumed by `marcidb()` from `marcidb-client`. `queryBinary` is the optional binary
+ * read fast path the client uses when present (the HTTP transport omits it and stays JSON).
+ */
+export interface MarciTransport {
+  exec(op: MarciOp): Promise<any>;
+  batch(ops: MarciOp[]): Promise<any[]>;
+  /** Returns the raw binary result buffer for a read op, or `null` to signal "fall back to JSON". */
+  queryBinary?(op: MarciOp): Promise<Uint8Array | null>;
+}
+
+export interface EmbeddedOptions {
+  /** Disable fsync — faster, durability-unsafe. Intended for ephemeral/test databases. */
+  disableFsync?: boolean;
+}
+
+/**
+ * An open embedded database. It *is* a `MarciTransport` (has `exec`/`batch`/`queryBinary`), so pass it
+ * straight to `marcidb(db)` to get the typed client; it also carries the admin/lifecycle methods below.
+ */
+export interface EmbeddedDatabase extends MarciTransport {
+  exec(op: MarciOp): Promise<any>;
+  batch(ops: MarciOp[]): Promise<any[]>;
+  queryBinary(op: MarciOp): Promise<Uint8Array | null>;
+  /** Back-compat alias of the database itself — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
+  readonly transport: MarciTransport;
+  /** Declarative schema sync from `.marci` text. */
+  $sync(schemaText: string): Promise<null>;
+  /** Imperative migration from a single `.march` action text (not idempotent — prefer `migrate`). */
+  $migrate(migrationText: string): Promise<null>;
+  /**
+   * Idempotent, drift-aware migrator: applies the un-applied `.march` files from `migrationsDir` (sorted by
+   * name) in order. Safe to call on every startup. Throws on drift (DB matches no point in the history).
+   */
+  migrate(migrationsDir: string): Promise<{ applied: number; total: number }>;
+  /** Current materialized schema snapshot text. */
+  $snapshot(): Promise<string>;
+  /** Rebuild every model's `@custom` indexes. */
+  reindexAll(): Promise<{ ok: boolean; indexed: number }>;
+  /** Close and release the database. Idempotent. */
+  close(): void;
+  readonly closed: boolean;
+}
+
+export interface TestDatabase extends EmbeddedDatabase {
+  /** The temp directory backing this database (removed on `close()`). */
+  path: string;
+}
+
 /** Error thrown when a native operation returns an `ok:false` envelope. `kind` mirrors the server's. */
 export class MarciEmbeddedError extends Error {
-  constructor(message, kind) {
+  override name = "MarciEmbeddedError" as const;
+  kind: MarciErrorKind;
+  constructor(message: string, kind: MarciErrorKind) {
     super(message);
-    this.name = "MarciEmbeddedError";
     this.kind = kind;
   }
 }
 
 /** Parses a result envelope string, throwing on `ok:false`, returning `data` on success. */
-function unwrap(envelope) {
+function unwrap(envelope: string | null): any {
   if (envelope == null) throw new MarciEmbeddedError("native call returned no result", "internal");
-  let parsed;
+  let parsed: any;
   try {
     parsed = JSON.parse(envelope);
   } catch {
@@ -36,11 +92,8 @@ function unwrap(envelope) {
 /**
  * Opens (creating if needed) an embedded database at `dir`. The returned handle is a transport — pass it
  * straight to `marcidb(db)` — and also carries the admin/lifecycle methods.
- * @param {string} dir filesystem directory for the database
- * @param {{ disableFsync?: boolean }} [options]
- * @returns a handle with `exec`/`batch` (transport), `$sync`, `$migrate`, `migrate`, `$snapshot`, `reindexAll`, `close`.
  */
-export function openDatabase(dir, options = {}) {
+export function openDatabase(dir: string, options: EmbeddedOptions = {}): EmbeddedDatabase {
   const handle = ffi.open(dir, JSON.stringify({ disableFsync: !!options.disableFsync }));
   if (!handle) {
     throw new MarciEmbeddedError(ffi.lastError() ?? `failed to open database at '${dir}'`, "internal");
@@ -53,18 +106,18 @@ export function openDatabase(dir, options = {}) {
 
   // The db is itself the transport `marcidb()` expects: a single op object → marci_exec; an array → an
   // atomic transaction. So you can write `marcidb(db)` directly — no `.transport` step.
-  async function exec(op) {
+  async function exec(op: MarciOp): Promise<any> {
     ensureOpen();
     return unwrap(ffi.exec(handle, JSON.stringify(op)));
   }
-  async function batch(ops) {
+  async function batch(ops: MarciOp[]): Promise<any[]> {
     ensureOpen();
     return unwrap(ffi.exec(handle, JSON.stringify(ops)));
   }
   // Binary read fast path consumed by `marcidb(db)` (marcidb-client): returns the raw result payload bytes
   // for a `findMany`/`findFirst` op, or `null` when the engine can't binary-encode this shape (→ the client
   // falls back to `exec`/JSON). Throws `MarciEmbeddedError` on a real fault.
-  async function queryBinary(op) {
+  async function queryBinary(op: MarciOp): Promise<Uint8Array | null> {
     ensureOpen();
     const body = ffi.queryBinary(handle, JSON.stringify(op));
     if (!body) return null; // NULL pointer (OOM) → fall back to JSON
@@ -78,24 +131,16 @@ export function openDatabase(dir, options = {}) {
     exec,
     batch,
     queryBinary,
-    /** Back-compat alias — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
     transport: { exec, batch, queryBinary },
-    /** Declarative schema sync from `.marci` text. */
-    async $sync(schemaText) {
+    async $sync(schemaText: string) {
       ensureOpen();
       return unwrap(ffi.sync(handle, schemaText));
     },
-    /** Imperative migration from a single `.march` action text (not idempotent — prefer `migrate`). */
-    async $migrate(migrationText) {
+    async $migrate(migrationText: string) {
       ensureOpen();
       return unwrap(ffi.migrate(handle, migrationText));
     },
-    /**
-     * Idempotent, drift-aware migrator: applies the un-applied `.march` files from `migrationsDir` (sorted
-     * by name) in order, skipping ones already applied. Safe to call on every startup. Returns
-     * `{ applied, total }`. Throws (`kind: "bad_request"`) on drift — the DB matches no point in the history.
-     */
-    async migrate(migrationsDir) {
+    async migrate(migrationsDir: string) {
       ensureOpen();
       const texts = fs
         .readdirSync(migrationsDir)
@@ -104,17 +149,14 @@ export function openDatabase(dir, options = {}) {
         .map((f) => fs.readFileSync(path.join(migrationsDir, f), "utf8"));
       return unwrap(ffi.migrateApply(handle, JSON.stringify(texts)));
     },
-    /** Current materialized schema snapshot text. */
     async $snapshot() {
       ensureOpen();
       return unwrap(ffi.snapshot(handle));
     },
-    /** Rebuild every model's `@custom` indexes. */
     async reindexAll() {
       ensureOpen();
       return unwrap(ffi.reindexAll(handle));
     },
-    /** Close and release the database. Idempotent. */
     close() {
       if (closed) return;
       closed = true;
@@ -129,12 +171,10 @@ export function openDatabase(dir, options = {}) {
 /**
  * Opens an ephemeral database in a fresh temp directory with fsync disabled, applies `schema` (if given)
  * via `$sync`, and arranges for `close()` to also remove the temp directory. Ideal for integration tests.
- * @param {string} [schema] `.marci` schema text to sync on open
- * @param {{ disableFsync?: boolean }} [options]
  */
-export async function openTestDatabase(schema, options = {}) {
+export async function openTestDatabase(schema?: string, options: EmbeddedOptions = {}): Promise<TestDatabase> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "marcidb-"));
-  const db = openDatabase(dir, { disableFsync: true, ...options });
+  const db = openDatabase(dir, { disableFsync: true, ...options }) as TestDatabase;
 
   const close = db.close;
   db.close = () => {

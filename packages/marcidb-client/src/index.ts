@@ -101,6 +101,7 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>) {
   function projectionKey(model: string, select: Record<string, any>): string {
     const fields = MODELS[model];
     if (!fields) return "?";
+    const known = new Set(fields.map((f) => f.n));
     let key = model + "(";
     for (const f of fields) {
       const sel = select[f.n];
@@ -112,12 +113,27 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>) {
         key += f.n + ",";
       }
     }
+    // A selected field this client doesn't know about forces a distinct (null) decoder — see `build`. It
+    // must be in the key, else `{name}` and `{name, unknown}` would collide on the same cache entry.
+    const unknown = Object.keys(select).filter((k) => k[0] !== "$" && !known.has(k) && isSel(select[k])).sort();
+    if (unknown.length) key += "!" + unknown.join("!");
     return key + ")";
   }
 
   function build(model: string, select: Record<string, any>): Decoder | null {
     const fields = MODELS[model];
     if (!fields) return null;
+
+    // If the select references a field outside this client's schema (e.g. one added by a runtime migration
+    // after the client was generated), the binary layout can't be followed safely — the engine encodes that
+    // field but the decoder, driven by these descriptors, wouldn't read it, desyncing the cursor. Fall back
+    // to JSON, which is self-describing. (The fix in normal use is to regenerate the client after a schema
+    // change; this guard keeps a stale client *correct*, just not on the fast path.)
+    const known = new Set(fields.map((f) => f.n));
+    for (const k in select) {
+      if (k[0] === "$") continue;
+      if (!known.has(k) && isSel(select[k])) return null;
+    }
 
     const steps: { name: string; key: boolean; t: string }[] = [];
     const rels: { name: string; many: boolean; fn: Decoder }[] = [];

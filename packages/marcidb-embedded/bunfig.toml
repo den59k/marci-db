@@ -1,0 +1,5 @@
+# `bun test` preload: builds the native lib, the marcidb-client runtime, and this package's dist before any
+# test file loads, and points the loader at the freshly built library. So the whole suite is one command:
+#   bun test
+[test]
+preload = ["./test/setup.ts"]

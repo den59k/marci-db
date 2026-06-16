@@ -14,22 +14,27 @@
   },
   "exports": {
     ".": {
-      "import": "./src/index.js",
-      "types": "./src/index.d.ts"
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     }
   },
   "scripts": {
+    "build": "bunup src/index.ts --external koffi --external bun:ffi --out-dir dist",
     "build:lib": "bash build-lib.sh win",
-    "gen": "node test/gen.mjs",
-    "test": "node test/gen.mjs && node test/smoke.mjs && node test/full-client.mjs && node test/migrate.mjs && node test/decoder-unit.mjs && node test/binary-parity.mjs",
-    "test:bun": "node test/gen.mjs && bun test/smoke.mjs && bun test/full-client.mjs && bun test/migrate.mjs && bun test/decoder-unit.mjs && bun test/binary-parity.mjs"
+    "prepublishOnly": "bun run build",
+    "test": "bun test",
+    "bench": "bun test/binary-bench.ts"
   },
   "files": [
-    "src/",
+    "dist/",
     "native/"
   ],
   "dependencies": {
     "koffi": "^2.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "bunup": "^0.16.31"
   },
   "peerDependencies": {
     "marcidb-client": ">=0.2.0"
