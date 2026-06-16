@@ -4,8 +4,8 @@ Run [MarciDB](https://github.com/den59k/marci-db) **in-process** from Bun (prima
 (via FFI) — no server, no network. Ideal for fast, ephemeral integration tests, and usable for
 small single-process production apps.
 
-It pairs with the generated `marcidb-client`: open an embedded database, then hand its `transport`
-to the same `marcidb()` client you'd use over HTTP.
+It pairs with the generated `marcidb-client`: open an embedded database and hand it straight to the
+same `marcidb()` client you'd use over HTTP — `marcidb(db)`.
 
 ## Install
 
@@ -61,7 +61,7 @@ const schema = `
 `;
 
 const db = await openTestDatabase(schema); // temp dir + fsync off + $sync(schema)
-const client = marcidb(db.transport);
+const client = marcidb(db);
 
 await client.user.insert({ name: "Alice", email: "alice@example.com", age: 30 });
 const users = await client.user.findMany({ name: true, age: true });
@@ -78,7 +78,7 @@ import { beforeEach, afterEach } from "vitest"; // or your runner of choice
 let db, client;
 beforeEach(async () => {
   db = await openTestDatabase(schema);
-  client = marcidb(db.transport);
+  client = marcidb(db);
 });
 afterEach(() => db.close());
 ```
@@ -116,7 +116,7 @@ const db = openDatabase("./data");
 const { applied, total } = await db.migrate("./migrations");
 console.log(`migrations: ${applied} applied, ${total} total`);
 
-const client = marcidb(db.transport);
+const client = marcidb(db);
 await client.user.insert({ name: "Bob", email: "bob@example.com", age: 40 });
 
 db.close();
@@ -160,8 +160,8 @@ Node doesn't support text import attributes.
 - `options`: `{ disableFsync?: boolean }` — fsync off is faster but durability-unsafe; intended for
   tests (`openTestDatabase` sets it automatically).
 
-`EmbeddedDatabase`:
-- `transport` — `{ exec(op), batch(ops) }`, the object you pass to `marcidb(...)`.
+`EmbeddedDatabase` — *is* a transport (`exec`/`batch`), so pass it to `marcidb(db)`, plus:
+- `transport` — back-compat alias of `db` itself (`marcidb(db.transport)` still works).
 - `$sync(schemaText)` — declarative schema sync (`.marci` text). **await it.**
 - `migrate(migrationsDir)` — **idempotent, drift-aware** migrator: applies the unapplied `.march`
   files (sorted by name) in order; safe to call on every startup. Returns `{ applied, total }`,

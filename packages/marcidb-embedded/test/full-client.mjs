@@ -16,7 +16,7 @@ console.log(`[full-client] runtime: ${runtime}`);
 
 const db = await openTestDatabase(schema);
 try {
-  const client = marcidb(db.transport);
+  const client = marcidb(db); // db is itself the transport
 
   // Typed CRUD through the generated client
   const id = await client.user.insert({ name: "Alice", age: 30 });

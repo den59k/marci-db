@@ -1,6 +1,6 @@
-// Public API for embedded MarciDB. `openDatabase` opens an in-process DB and exposes a `transport` that
-// plugs into the generated `marcidb()` client (from `marcidb-client`); `openTestDatabase` adds an
-// ephemeral temp-dir DB with fsync disabled and automatic cleanup on `close()`.
+// Public API for embedded MarciDB. `openDatabase` opens an in-process DB; the returned handle is itself a
+// transport, so `marcidb(db)` (from `marcidb-client`) gives you the typed client. `openTestDatabase` adds
+// an ephemeral temp-dir DB with fsync disabled and automatic cleanup on `close()`.
 
 import os from "node:os";
 import path from "node:path";
@@ -34,10 +34,11 @@ function unwrap(envelope) {
 }
 
 /**
- * Opens (creating if needed) an embedded database at `dir`.
+ * Opens (creating if needed) an embedded database at `dir`. The returned handle is a transport — pass it
+ * straight to `marcidb(db)` — and also carries the admin/lifecycle methods.
  * @param {string} dir filesystem directory for the database
  * @param {{ disableFsync?: boolean }} [options]
- * @returns a handle with `transport`, `$sync`, `$migrate`, `$snapshot`, `reindexAll`, `close`.
+ * @returns a handle with `exec`/`batch` (transport), `$sync`, `$migrate`, `migrate`, `$snapshot`, `reindexAll`, `close`.
  */
 export function openDatabase(dir, options = {}) {
   const handle = ffi.open(dir, JSON.stringify({ disableFsync: !!options.disableFsync }));
@@ -50,20 +51,22 @@ export function openDatabase(dir, options = {}) {
     if (closed) throw new MarciEmbeddedError("database handle is closed", "bad_request");
   };
 
-  // The transport handed to marcidb(): a single op object → marci_exec; an array → atomic transaction.
-  const transport = {
-    async exec(op) {
-      ensureOpen();
-      return unwrap(ffi.exec(handle, JSON.stringify(op)));
-    },
-    async batch(ops) {
-      ensureOpen();
-      return unwrap(ffi.exec(handle, JSON.stringify(ops)));
-    },
-  };
+  // The db is itself the transport `marcidb()` expects: a single op object → marci_exec; an array → an
+  // atomic transaction. So you can write `marcidb(db)` directly — no `.transport` step.
+  async function exec(op) {
+    ensureOpen();
+    return unwrap(ffi.exec(handle, JSON.stringify(op)));
+  }
+  async function batch(ops) {
+    ensureOpen();
+    return unwrap(ffi.exec(handle, JSON.stringify(ops)));
+  }
 
   return {
-    transport,
+    exec,
+    batch,
+    /** Back-compat alias — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
+    transport: { exec, batch },
     /** Declarative schema sync from `.marci` text. */
     async $sync(schemaText) {
       ensureOpen();

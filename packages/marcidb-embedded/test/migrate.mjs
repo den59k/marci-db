@@ -35,7 +35,7 @@ r = await db.migrate(migrations);
 assert.deepEqual(r, { applied: 1, total: 2 }, `incremental: ${JSON.stringify(r)}`);
 
 // The new column is usable through the typed client.
-const client = marcidb(db.transport);
+const client = marcidb(db);
 await client.user.insert({ name: "Bob", email: "bob@x.io", age: 40 });
 const rows = await client.user.findMany({ name: true, email: true });
 assert.equal(rows[0].email, "bob@x.io");

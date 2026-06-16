@@ -21,8 +21,12 @@ export interface EmbeddedOptions {
   disableFsync?: boolean;
 }
 
-export interface EmbeddedDatabase {
-  /** Pass to `marcidb(db.transport)` to get the typed client. */
+/**
+ * An open embedded database. It *is* a `MarciTransport` (has `exec`/`batch`), so pass it straight to
+ * `marcidb(db)` to get the typed client; it also carries the admin/lifecycle methods below.
+ */
+export interface EmbeddedDatabase extends MarciTransport {
+  /** Back-compat alias of the database itself — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
   readonly transport: MarciTransport;
   /** Declarative schema sync from `.marci` text. */
   $sync(schemaText: string): Promise<null>;

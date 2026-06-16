@@ -19,39 +19,39 @@ console.log(`[smoke] opened ${db.path}`);
 
 try {
   // insert
-  const id = await db.transport.exec({ model: "User", action: "insert", data: { name: "Alice", age: 30 } });
+  const id = await db.exec({ model: "User", action: "insert", data: { name: "Alice", age: 30 } });
   assert.ok(id != null, "insert should return an id");
-  await db.transport.exec({ model: "User", action: "insert", data: { name: "Bob", age: 25 } });
+  await db.exec({ model: "User", action: "insert", data: { name: "Bob", age: 25 } });
 
   // findMany
-  const rows = await db.transport.exec({ model: "User", action: "findMany", query: { name: true, age: true } });
+  const rows = await db.exec({ model: "User", action: "findMany", query: { name: true, age: true } });
   assert.equal(rows.length, 2, "expected 2 rows");
 
   // count
-  const n = await db.transport.exec({ model: "User", action: "count", query: {} });
+  const n = await db.exec({ model: "User", action: "count", query: {} });
   assert.equal(n, 2, "count should be 2");
 
   // update + findFirst
-  await db.transport.exec({ model: "User", action: "update", id, data: { age: 31 } });
-  const alice = await db.transport.exec({
+  await db.exec({ model: "User", action: "update", id, data: { age: 31 } });
+  const alice = await db.exec({
     model: "User",
     action: "findFirst",
     query: { name: true, age: true, $where: { name: "Alice" } },
   });
   assert.equal(alice.age, 31, "update should persist");
 
-  // atomic transaction (array form)
+  // atomic transaction (array form) — via the back-compat `db.transport` alias
   const results = await db.transport.batch([
     { model: "User", action: "insert", data: { name: "C", age: 1 } },
     { model: "User", action: "insert", data: { name: "D", age: 2 } },
   ]);
   assert.equal(results.length, 2, "transaction returns one result per op");
-  assert.equal(await db.transport.exec({ model: "User", action: "count", query: {} }), 4);
+  assert.equal(await db.exec({ model: "User", action: "count", query: {} }), 4);
 
   // delete
-  const deleted = await db.transport.exec({ model: "User", action: "delete", id });
+  const deleted = await db.exec({ model: "User", action: "delete", id });
   assert.equal(deleted, true, "delete returns true");
-  assert.equal(await db.transport.exec({ model: "User", action: "count", query: {} }), 3);
+  assert.equal(await db.exec({ model: "User", action: "count", query: {} }), 3);
 
   // snapshot
   const snap = await db.$snapshot();
@@ -59,7 +59,7 @@ try {
 
   // error envelope → typed error
   await assert.rejects(
-    () => db.transport.exec({ model: "Ghost", action: "findMany", query: {} }),
+    () => db.exec({ model: "Ghost", action: "findMany", query: {} }),
     (err) => err instanceof MarciEmbeddedError && err.kind === "not_found",
     "unknown model should reject with not_found",
   );
