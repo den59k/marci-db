@@ -22,4 +22,4 @@ default-members = [
 # Each member sets `version.workspace = true`; `release.sh` bumps this one line. Keep it in lockstep with the
 # npm packages (marcidb-client, marcidb-embedded) so "same version == compatible" holds across the toolchain.
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
