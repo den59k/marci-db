@@ -1,0 +1,10 @@
+model User {
+  name  String
+  age   Int
+  email String
+}
+
+model Post {
+  title  String
+  author User?
+}

@@ -1,0 +1,16 @@
+{
+  "name": "marcidb-benchmarks",
+  "type": "module",
+  "private": true,
+  "description": "Benchmarks: marcidb-embedded vs SQLite (better-sqlite3, bun:sqlite, node:sqlite).",
+  "scripts": {
+    "gen": "marcidb generate schema.marci --no-migrations",
+    "bench": "node bench.mjs",
+    "bench:bun": "bun bench.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "marcidb-client": "^0.3.1",
+    "marcidb-embedded": "^0.2.1"
+  }
+}
