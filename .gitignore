@@ -9,3 +9,8 @@
 # Generated TS client output (codegen emits index.js / index.d.ts)
 index.js
 index.d.ts
+
+# …but marcidb-client's entry-point shim is hand-written and MUST ship in the npm package — keep it tracked.
+# (CI publishes from a clean checkout, so anything gitignored here is missing from the tarball.)
+!packages/marcidb-client/client/index.js
+!packages/marcidb-client/client/index.d.ts

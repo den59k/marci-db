@@ -72,26 +72,27 @@ corpora (fixed-seed LCG), 5 000 rows each.
 In-process (FFI) MarciDB vs SQLite, on Bun and Node. The harness lives in
 [`packages/benchmarks/`](../packages/benchmarks/); see [Reproducing](#reproducing) to run it yourself.
 
-> **TL;DR.** marcidb-embedded is competitive with SQLite and *faster* on batched writes and counts, ~2×
-> slower on single-row point reads, and **~5–8× slower on large result sets** (`select all`). On
-> **relational reads** it returns the whole object graph in one query — **faster than the N+1 pattern** a
-> naive ORM falls into, though a hand-written JOIN is faster; **index-backed filters use the `@index`** (no
-> scan). The SQLite tables below use the JSON transport. The read gaps are all the same thing: results were
-> serialized to JSON across the FFI boundary — now addressed by the **binary transport** (Part 1, implemented),
-> which makes the row-heavy reads **~5–6× faster** (see [Binary transport](#binary-transport--implemented-part-1-measured)).
+> **TL;DR.** As of **0.6** the embedded read path is **binary** (no JSON), and it changes the picture.
+> marcidb-embedded **wins batched writes (~2–2.5×) and counts**, and — the big shift — now **wins large
+> `select all` (~1.3× on Node) and nested select (beats a hand-written JOIN on Node)**, the cases that were
+> *5–8× behind* on the old JSON transport. It **ties** single-row updates. It still trails on **single-row
+> point reads** (~2.5× — a tiny result where binary framing doesn't pay off), and on Bun, whose
+> exceptionally fast `bun:sqlite` keeps the lead on `select all` and the index filter. Writes/inputs stay
+> JSON (tiny, already winning). See [Binary transport](#binary-transport-how-it-works) for the isolated
+> before/after.
 
 ### Setup
 
 - **Machine:** AMD Ryzen 9 9900X (12C/24T), 32 GB, Windows 11 (10.0.26200)
 - **Runtimes:** Node 24.15.0, Bun 1.3.14
-- **Versions:** marcidb-embedded 0.2.1 · marcidb-client 0.3.1 · better-sqlite3 11.10.0 · `node:sqlite` (Node 24 built-in) · `bun:sqlite` (Bun 1.3 built-in)
+- **Versions:** marcidb-embedded 0.6.1 · marcidb-client 0.6.1 · better-sqlite3 11.10.0 · `node:sqlite` (Node 24 built-in) · `bun:sqlite` (Bun 1.3 built-in) — embedded reads use the **binary transport** (default since 0.6)
 - **Dataset:** 20,000 rows, `User { name String, age Int, email String }` (+ autoincrement id). The relational section adds a `Post { title, author User? }` relation (10k posts, 100 shared authors); the index section uses an indexed `age` (`@index` / `CREATE INDEX`).
 
 #### Methodology / fairness
 
 - **Durability off for everyone** — marcidb `disableFsync`; SQLite `PRAGMA synchronous = OFF` + `journal_mode = WAL`. All engines are disk-backed (a temp dir), *not* `:memory:`. We're measuring engine + binding overhead, not fsync.
 - **SQLite uses prepared statements** (its idiomatic fast path) and runs **synchronously**.
-- **marcidb uses its real typed client** (`marcidb(db)`), which is **async** (a `Promise` per op) and **JSON-over-FFI** — exactly how an app uses it. The async + serialization cost is the thing being compared.
+- **marcidb uses its real typed client** (`marcidb(db)`): **async** (a `Promise` per op), with **read results over the binary transport** and writes/inputs over JSON — exactly how an app uses it. The async + per-op cost is the thing being compared.
 - One full suite is run as **warmup and discarded** before the measured run (hot JIT).
 - Numbers vary ~±10–15 % run-to-run; treat the **relative factors** as the signal, not the absolute ops/s.
 
@@ -102,12 +103,12 @@ count, and one **full 20k-row read** for `select all`.
 
 | Operation | marcidb-embedded | better-sqlite3 | node:sqlite | marcidb vs best SQLite |
 | --- | ---: | ---: | ---: | :--- |
-| **Bulk insert** (20k in 1 txn) | **292k ops/s** | 118k | 132k | **2.2× faster** ✅ |
-| **Count** (×500) | **399k ops/s** | 244k | 231k | **1.6× faster** ✅ |
-| **Update by id** (×20k) | 153k ops/s | 157k | 165k | 0.93× (≈tie) |
-| **Single insert** (×20k) | 110k ops/s | 123k | 132k | 0.84× |
-| **Point query by id** (×20k) | 238k ops/s | 451k | 449k | 0.53× (1.9× slower) |
-| **Select all** 20k rows (×50) | 28 reads/s (≈36 ms/read) | 90 | 134 (≈7.5 ms/read) | **0.21× (≈5× slower)** ⚠️ |
+| **Bulk insert** (20k in 1 txn) | **290k ops/s** | 127k | 136k | **2.1× faster** ✅ |
+| **Select all** 20k rows (×50) | **172 reads/s** (≈5.8 ms/read) | 88 | 131 | **1.3× faster** ✅ |
+| **Count** (×500) | **277k ops/s** | 224k | 232k | **1.2× faster** ✅ |
+| **Update by id** (×20k) | 161k ops/s | 161k | 167k | 0.96× (≈tie) |
+| **Single insert** (×20k) | 114k ops/s | 121k | 131k | 0.87× |
+| **Point query by id** (×20k) | 183k ops/s | 401k | 456k | 0.40× (≈2.5× slower) |
 
 ### Results — Bun 1.3 (marcidb vs bun:sqlite)
 
@@ -116,12 +117,16 @@ count, and one **full 20k-row read** for `select all`.
 
 | Operation | marcidb-embedded | bun:sqlite | marcidb vs bun:sqlite |
 | --- | ---: | ---: | :--- |
-| **Bulk insert** (20k in 1 txn) | **343k ops/s** | 124k | **2.8× faster** ✅ |
-| **Count** (×500) | **362k ops/s** | 253k | **1.4× faster** ✅ |
-| **Update by id** (×20k) | 146k ops/s | 143k | 1.0× (tie) |
-| **Single insert** (×20k) | 118k ops/s | 130k | 0.91× |
-| **Point query by id** (×20k) | 230k ops/s | 486k | 0.47× (2.1× slower) |
-| **Select all** 20k rows (×50) | 27 reads/s (≈37 ms/read) | 221 (≈4.5 ms/read) | **0.12× (≈8× slower)** ⚠️ |
+| **Bulk insert** (20k in 1 txn) | **337k ops/s** | 135k | **2.5× faster** ✅ |
+| **Count** (×500) | **433k ops/s** | 257k | **1.7× faster** ✅ |
+| **Update by id** (×20k) | **168k ops/s** | 163k | 1.03× (≈tie) |
+| **Single insert** (×20k) | 122k ops/s | 135k | 0.90× |
+| **Select all** 20k rows (×50) | 200 reads/s (≈5.0 ms/read) | 243 (≈4.1 ms/read) | 0.82× |
+| **Point query by id** (×20k) | 219k ops/s | 545k | 0.40× (≈2.5× slower) |
+
+On Bun the read gaps shrank too (`select all` was **0.12×** on JSON, now **0.82×**), but `bun:sqlite` is an
+unusually fast native binding, so it keeps a slim lead on `select all` and the index filter where Node's
+SQLite bindings don't.
 
 ### Relational & index-backed reads (marcidb's strengths)
 
@@ -132,63 +137,52 @@ naive-ORM path — issues one query per post (**N+1**). Each read = the full 10k
 
 | Node (×20) | reads/s | vs marcidb |
 | --- | ---: | :--- |
-| **marcidb-embedded** (1 query) | 53 | — |
-| node:sqlite (JOIN + reshape) | 217 | 4.1× faster |
-| better-sqlite3 (JOIN + reshape) | 186 | 3.5× faster |
-| better-sqlite3 (**N+1**) | 46 | **0.9× — marcidb wins** ✅ |
+| **marcidb-embedded** (1 query) | **232** | — |
+| node:sqlite (JOIN + reshape) | 212 | 0.91× — **marcidb wins** ✅ |
+| better-sqlite3 (JOIN + reshape) | 179 | 0.77× — **marcidb wins** ✅ |
+| better-sqlite3 (**N+1**) | 46 | 0.20× |
 
 | Bun (×20) | reads/s | vs marcidb |
 | --- | ---: | :--- |
-| **marcidb-embedded** (1 query) | 46 | — |
-| bun:sqlite (JOIN + reshape) | 371 | 8.1× faster |
-| bun:sqlite (**N+1**) | 56 | 1.2× (≈tie) |
+| **marcidb-embedded** (1 query) | 232 | — |
+| bun:sqlite (JOIN + reshape) | 327 | 1.4× faster |
+| bun:sqlite (**N+1**) | 56 | 0.24× |
 
-marcidb gives you the nested graph with **no JOINs to write and no N+1 risk** — it beats the N+1 pattern on
-Node and ties it on Bun (where `bun:sqlite`'s point reads are exceptionally fast). A hand-tuned JOIN is
-faster because marcidb serializes the nested result to JSON — the same read tax binary transport targets.
+This is the clearest binary-transport win: on JSON the nested read lost to a JOIN (and barely beat N+1); on
+binary it **beats a hand-written JOIN on Node** outright (232 vs 212/179) — one query, no JOINs to write, no
+N+1 risk. On Bun it trails `bun:sqlite`'s JOIN but still beats the N+1 pattern ~4×.
 
 **Index-backed filter** — `findMany({ $where: { age: ? } })` returning ~333 of 20,000 rows, the field
-indexed (`@index` vs `CREATE INDEX`). At ≈0.3 ms/query this confirms marcidb **uses the index** (a full scan
-would be ~100× slower); the remaining gap is decoding the ~333 result rows.
+indexed (`@index` vs `CREATE INDEX`). marcidb **uses the index** (a full scan would be ~100× slower); the
+remaining gap is materializing the ~333 result rows.
 
 | Index filter | marcidb | better-sqlite3 | node:sqlite | bun:sqlite |
 | --- | ---: | ---: | ---: | ---: |
-| **Node** (×5000) | 4.0k ops/s | 6.3k | 8.9k | — |
-| **Bun** (×5000) | 4.1k ops/s | — | — | 13.4k |
+| **Node** (×5000) | 7.0k ops/s | 6.3k | 8.7k | — |
+| **Bun** (×5000) | 7.1k ops/s | — | — | 13.1k |
 
-(≈2–3× slower — index lookup is comparable; the gap is again per-row result serialization.)
+(Binary lifted this from ~2–3× behind to **beating better-sqlite3** on Node and within ~0.8× of `node:sqlite`;
+`bun:sqlite` stays ahead.)
 
 ### Reading the results
 
-- **Batched writes win.** A `$transaction` of 20k inserts is **one** FFI call carrying one JSON array; SQLite pays a JS→native crossing per `stmt.run()`. marcidb amortizes the boundary and comes out 2–3× ahead.
-- **Count wins.** A single integer crosses the boundary — negligible serialization — and the engine counts a B-tree cheaply.
-- **Single-row writes tie.** One small op each way; the JSON for one row is tiny, so marcidb is within ~10–15 %.
-- **Point reads are ~2× slower.** Per call marcidb pays: build an op descriptor → `JSON.stringify` → FFI → Rust decodes the row to a JSON string → `JSON.parse` → unwrap the envelope, plus a `Promise`. SQLite returns a native object from a prepared statement synchronously.
-- **Large reads are the weak spot (~5–8×).** `select all` serializes 20,000 rows to JSON in Rust **and** parses them in JS, every pass. That's O(rows) work SQLite skips by handing back native values. On Bun the gap is widest because `bun:sqlite` is especially fast at materializing rows.
+- **Batched writes win.** A `$transaction` of 20k inserts is **one** FFI call carrying one JSON array; SQLite pays a JS→native crossing per `stmt.run()`. marcidb amortizes the boundary and comes out ~2–2.5× ahead.
+- **Count wins.** A single integer crosses the boundary, and the engine counts a B-tree cheaply.
+- **Large reads now win (Node) / are competitive (Bun).** `select all` and nested select used to serialize 20k rows to JSON in Rust *and* parse them in JS every pass — O(rows) the binary transport removes. With binary, `select all` leads on Node and nested select beats a hand-written JOIN; on Bun, `bun:sqlite`'s very fast row materialization keeps a slim lead.
+- **Single-row writes tie / trail slightly.** One small op each way; marcidb is within ~10–15 %.
+- **Point reads stay ~2.5× slower.** For a *single* tiny row, binary doesn't pay: the per-call cost is the `Promise` + FFI round-trip + framing a one-row buffer, which is on par with (Node) or slightly worse than the old `JSON.parse` of one small object. SQLite returns a native object from a prepared statement synchronously. This is the one read binary doesn't help.
 
-### Why — and what binary transport fixes
+### Binary transport (how it works)
 
-Every operation currently crosses the FFI boundary as **JSON**, and a query result is even serialized
-*twice* on the Rust side (the decode layer builds a JSON string, which is parsed into a `Value` and then
-re-serialized into the result envelope). For small payloads this is dwarfed by fixed costs and marcidb's
-batching wins. For large result sets it dominates.
+The embedded read path encodes `findMany`/`findFirst` results as a compact **binary** buffer (no JSON),
+decoded by a shape-specialized, cached decoder on the JS side — reusing the engine's slot-row encoding and
+dropping the old double-serialize (decode → JSON string → `Value` → envelope). It's on automatically for
+`marcidb(db)`; shapes it doesn't cover yet (formats, enums, lists, composite keys) fall back to JSON
+transparently, and the HTTP transport stays JSON. A JSON-vs-binary parity test
+([`test/binary-parity.test.ts`](../packages/marcidb-embedded/test/binary-parity.test.ts)) gates correctness.
 
-A binary transport targets exactly the read paths — `select all`, point reads, nested select, and index
-filters: returning rows in a typed binary layout removes the double JSON pass and most of the per-row
-overhead, which closes most of the read gap while keeping the batched-write advantage.
-
-### Binary transport — implemented (Part 1), measured
-
-The read path now has a binary fast path: `findMany`/`findFirst` results cross the FFI boundary as a compact
-binary buffer (no JSON), decoded by a shape-specialized, cached decoder on the JS side. It's on automatically
-for `marcidb(db)` over the embedded transport; shapes it doesn't cover yet (formats, enums, lists, composite
-keys) fall back to JSON transparently, and the HTTP transport stays JSON. A JSON-vs-binary parity test
-([`packages/marcidb-embedded/test/binary-parity.mjs`](../packages/marcidb-embedded/test/binary-parity.mjs))
-gates correctness.
-
-Measured on the **same DB**, the same query through binary vs forced-JSON (so this isolates the transport,
-not the engine). Harness: [`packages/marcidb-embedded/test/binary-bench.mjs`](../packages/marcidb-embedded/test/binary-bench.mjs),
-20,000 users / 10,000 posts / 100 shared authors.
+Isolating the transport — the **same DB**, the same query through binary vs forced-JSON (harness:
+[`test/binary-bench.ts`](../packages/marcidb-embedded/test/binary-bench.ts)):
 
 | Read | Node — JSON → binary | Bun — JSON → binary |
 | --- | ---: | ---: |
@@ -197,10 +191,10 @@ not the engine). Harness: [`packages/marcidb-embedded/test/binary-bench.mjs`](..
 | **Index filter** WHERE age=? (×5000) | 3.9k → 7.1k ops/s — **1.8×** | 4.2k → 7.1k — **1.7×** |
 | **Point query by id** (×20k) | 242k → 206k ops/s — 0.85× | 255k → 262k — 1.03× |
 
-The row-heavy reads — exactly the JSON-tax cases that were 5–8× behind SQLite — gain **~5–6×**, which lands
-them close to SQLite. The index filter gains ~1.8×. The single-row point read is a wash: the result is tiny,
-so framing/decoder overhead roughly cancels the saved `JSON.parse` (it even dips ~15% under Node's koffi,
-where reading the buffer costs an extra decode; under Bun's zero-copy `toArrayBuffer` it's neutral).
+The row-heavy reads — exactly the JSON-tax cases that were 5–8× behind SQLite — gain **~5–6×**, which is what
+flips them to wins/ties against SQLite above. The single-row point read is a wash: the result is tiny, so
+framing/decoder overhead roughly cancels the saved `JSON.parse` (it even dips ~15% under Node's koffi, where
+reading the buffer costs an extra decode; under Bun's zero-copy `toArrayBuffer` it's neutral).
 
 **Part 2 (relation-dictionary dedup) — deferred.** The nested-select case repeats each shared author inline
 (no dedup) yet still reaches ~5.3–5.9×, even with 100 authors shared across 10,000 posts (heavy duplication
