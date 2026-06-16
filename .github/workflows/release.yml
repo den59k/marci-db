@@ -2,7 +2,8 @@ name: Release
 
 # Fires when a vX.Y.Z tag is pushed (scripts/release.sh does that for you).
 # Builds the Windows .exe and Linux binaries in two flavours — full (vector +
-# full-text) and core — builds & pushes the Docker images to GHCR, and
+# full-text) and core — plus the embedded marcidb-ffi native libraries (full)
+# for Windows, Linux and macOS, builds & pushes the Docker images to GHCR, and
 # publishes a GitHub Release with an auto-generated changelog.
 on:
   push:
@@ -104,6 +105,52 @@ jobs:
           name: binary-${{ matrix.os }}-${{ matrix.variant }}
           path: ${{ env.ASSET }}
 
+  # -------- embedded native libs (marcidb-ffi, full) for marcidb-embedded: {windows, linux, mac} --------
+  # The full variant (vector + full-text) needs nightly. Each asset is named exactly as the loader
+  # (packages/marcidb-embedded/src/loader.js) expects, so it can be dropped into the package's native/
+  # directory or pointed at via the MARCIDB_LIB env var.
+  embedded:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            libfile: marcidb_ffi.dll
+            asset: marcidb-win32-x64.dll
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            libfile: libmarcidb_ffi.so
+            asset: marcidb-linux-x64.so
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            libfile: libmarcidb_ffi.dylib
+            asset: marcidb-darwin-arm64.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-embedded
+      - name: Build marcidb-ffi (full)
+        shell: bash
+        # Default features are vector + fulltext, so no --features flag is needed.
+        run: cargo build --release -p marcidb-ffi --target ${{ matrix.target }}
+      - name: Package library
+        shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/${{ matrix.libfile }}" "${{ matrix.asset }}"
+          echo "ASSET=${{ matrix.asset }}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embedded-${{ matrix.os }}
+          path: ${{ env.ASSET }}
+
   # -------- Docker images: {full, core} -> GHCR --------
   docker:
     runs-on: ubuntu-latest
@@ -158,13 +205,13 @@ jobs:
 
   # -------- publish the GitHub Release with notes + binaries --------
   release:
-    needs: [changelog, binaries, docker]
+    needs: [changelog, binaries, embedded, docker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          # Only the binaries and release notes — never the docker build records.
-          pattern: "{binary-*,release-notes}"
+          # Only the binaries, embedded libs and release notes — never the docker build records.
+          pattern: "{binary-*,embedded-*,release-notes}"
           path: artifacts
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -172,5 +219,7 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           body_path: artifacts/release-notes/RELEASE_NOTES.md
-          files: artifacts/binary-*/*
+          files: |
+            artifacts/binary-*/*
+            artifacts/embedded-*/*
           fail_on_unmatched_files: true
