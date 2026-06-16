@@ -1,7 +1,7 @@
 {
   "name": "marcidb-embedded",
   "type": "module",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "license": "MIT",
   "description": "Embedded (in-process) MarciDB for Bun and Node via FFI — for fast, ephemeral integration tests.",
   "author": {
@@ -37,7 +37,7 @@
     "bunup": "^0.16.31"
   },
   "peerDependencies": {
-    "marcidb-client": "^0.6.1"
+    "marcidb-client": "^0.6.2"
   },
   "peerDependenciesMeta": {
     "marcidb-client": {
