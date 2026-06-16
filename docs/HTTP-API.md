@@ -7,7 +7,7 @@ The raw protocol of `marcidb-server`. The [TypeScript client](API.md) is a thin 
 The server is schema-agnostic and hosts **multiple databases** under one data directory. A database is created on its first migration push — the schema is applied via migrations (see [Migrations](#migrations)), not read from a file.
 
 ```bash
-docker run -d -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
+docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-server:latest
 # or, from the repo: cargo run -p marcidb-server --release -- --port 3000
 ```
 

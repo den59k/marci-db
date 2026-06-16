@@ -49,7 +49,7 @@ npx marcidb generate
 3. Run the server. It is schema-agnostic and hosts multiple databases — the schema is applied via migrations, not read from a file:
 
 ```bash
-docker run -d -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
+docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-server:latest
 # or, from the repo: cargo run -p marcidb-server --release
 ```
 
@@ -72,10 +72,11 @@ const posts = await db.post.findMany({ title: true, author: { name: true } })
 
 ## Docker
 
-The server is published as [`den59k/marcidb-server`](https://hub.docker.com/r/den59k/marcidb-server):
+The server is published to the GitHub Container Registry as
+[`ghcr.io/den59k/marcidb-server`](https://github.com/den59k/marci-db/pkgs/container/marcidb-server):
 
 ```bash
-docker run -d --name marcidb -p 3000:3000 -v marcidb-data:/app/data den59k/marcidb-server:latest
+docker run -d --name marcidb -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-server:latest
 ```
 
 Two image flavours are published: `:latest` / `:full` include the vector and
