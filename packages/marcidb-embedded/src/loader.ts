@@ -54,6 +54,23 @@ export function resolveLibPath(): string {
 
 const isBun = typeof (globalThis as any).Bun !== "undefined";
 
+/** ABI contract this package speaks; must equal the native lib's `marci_abi_version()`. See marcidb-ffi. */
+const EXPECTED_ABI = 1;
+
+function abiMismatch(libPath: string, got: number): Error {
+  return new Error(
+    `marcidb-embedded: native library ABI ${got} ≠ expected ${EXPECTED_ABI} ('${libPath}'). ` +
+      `Upgrade the native lib or the package so their versions match.`,
+  );
+}
+
+function abiMissing(libPath: string): Error {
+  return new Error(
+    `marcidb-embedded: the native library at '${libPath}' is incompatible — it predates the ABI handshake ` +
+      `(no marci_abi_version symbol). Rebuild/upgrade it to match this package.`,
+  );
+}
+
 /** Loads and binds the native library, returning the uniform `Ffi` object. */
 export async function loadFfi(): Promise<Ffi> {
   const libPath = resolveLibPath();
@@ -64,6 +81,17 @@ export async function loadFfi(): Promise<Ffi> {
 
 async function bunBackend(libPath: string): Promise<Ffi> {
   const { dlopen, FFIType, CString, toArrayBuffer } = (await import("bun:ffi")) as any;
+
+  // ABI handshake first: probe marci_abi_version on its own so a too-old library (missing the symbol) fails
+  // with a clear message here, not a cryptic dlopen error when binding the full set below.
+  let abi: number;
+  try {
+    const probe = dlopen(libPath, { marci_abi_version: { args: [], returns: FFIType.u32 } });
+    abi = probe.symbols.marci_abi_version();
+  } catch {
+    throw abiMissing(libPath);
+  }
+  if (abi !== EXPECTED_ABI) throw abiMismatch(libPath, abi);
 
   // String args are passed as pointers to NUL-terminated buffers; results are pointers we read + free.
   const P = FFIType.ptr;
@@ -126,6 +154,16 @@ async function bunBackend(libPath: string): Promise<Ffi> {
 async function nodeBackend(libPath: string): Promise<Ffi> {
   const koffi = ((await import("koffi")) as any).default;
   const lib = koffi.load(libPath);
+
+  // ABI handshake first (see bunBackend): koffi binds lazily, so a too-old library only fails when its
+  // missing symbol is bound — bind+call marci_abi_version up front to surface a clear error.
+  let abi: number;
+  try {
+    abi = lib.func("uint32_t marci_abi_version()")();
+  } catch {
+    throw abiMissing(libPath);
+  }
+  if (abi !== EXPECTED_ABI) throw abiMismatch(libPath, abi);
 
   // `str` marshals JS string → `char*` for arguments. Results are returned as opaque `void*` so we can
   // read the string AND free the buffer (returning `str` directly would leak the Rust allocation).

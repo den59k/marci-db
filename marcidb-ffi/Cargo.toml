@@ -1,6 +1,6 @@
 [package]
 name = "marcidb-ffi"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 # Embeddable C ABI over the MarciDB engine. Consumed in-process from Bun (`bun:ffi`) and Node (`koffi`)

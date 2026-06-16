@@ -126,6 +126,21 @@ fn build_providers() -> Arc<ProviderRegistry> {
     Arc::new(reg)
 }
 
+// ───────────────────────────────── ABI handshake ─────────────────────────────────
+
+/// ABI contract version: the C symbol set + the binary wire format the loader depends on. **Independent of
+/// the product/package version** — bump it only when that contract changes incompatibly (a new/renamed
+/// symbol, or a [`BINARY_VERSION`](marcidb::BINARY_VERSION) bump). The loader reads this at open and refuses
+/// a mismatched native library with a clear message, instead of a cryptic missing-symbol `dlopen` failure.
+pub const MARCI_ABI_VERSION: u32 = 1;
+
+/// Returns [`MARCI_ABI_VERSION`]. The first symbol the loader binds — its absence marks a pre-handshake
+/// (too old) library.
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_abi_version() -> u32 {
+    MARCI_ABI_VERSION
+}
+
 // ───────────────────────────────── lifecycle ─────────────────────────────────
 
 /// Opens (creating the directory if needed) an embedded database at `path`. `options_json` may be NULL or

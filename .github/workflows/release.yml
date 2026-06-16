@@ -1,10 +1,11 @@
 name: Release
 
-# Fires when a vX.Y.Z tag is pushed (scripts/release.sh does that for you).
-# Builds the Windows .exe and Linux binaries in two flavours — full (vector +
-# full-text) and core — plus the embedded marcidb-ffi native libraries (full)
-# for Windows, Linux and macOS, builds & pushes the Docker images to GHCR, and
-# publishes a GitHub Release with an auto-generated changelog.
+# Fires when a vX.Y.Z tag is pushed (release.sh does that for you).
+# Builds the Windows .exe and Linux server binaries in two flavours — full (vector
+# + full-text) and core — plus the embedded marcidb-ffi native libraries (full) and
+# the marci-generate/marci-migrate codegen binaries for Windows, Linux and macOS,
+# builds & pushes the Docker images to GHCR, and publishes a GitHub Release with an
+# auto-generated changelog.
 on:
   push:
     tags:
@@ -107,7 +108,7 @@ jobs:
 
   # -------- embedded native libs (marcidb-ffi, full) for marcidb-embedded: {windows, linux, mac} --------
   # The full variant (vector + full-text) needs nightly. Each asset is named exactly as the loader
-  # (packages/marcidb-embedded/src/loader.js) expects, so it can be dropped into the package's native/
+  # (packages/marcidb-embedded/src/loader.ts) expects, so it can be dropped into the package's native/
   # directory or pointed at via the MARCIDB_LIB env var.
   embedded:
     strategy:
@@ -150,6 +151,104 @@ jobs:
         with:
           name: embedded-${{ matrix.os }}
           path: ${{ env.ASSET }}
+
+  # -------- codegen binaries (marci-generate + marci-migrate) for marcidb-client: {windows, linux, mac} --------
+  # These ship in the npm package's bin/ and are resolved per-platform by packages/marcidb-client/bin.js, so
+  # the asset names match exactly what it expects (`marci-generate-<suffix>`, `marci-migrate-<suffix>`). The
+  # codegen path doesn't pull the vector module, so a stable toolchain suffices (no nightly).
+  codegen:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: win32-x64
+            ext: ".exe"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x64
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: darwin-arm64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-codegen
+      - name: Build marci-generate + marci-migrate
+        shell: bash
+        # marci-generate is the marcidb-ts binary; marci-migrate is the marcidb-migrate binary (renamed in
+        # its Cargo.toml). Same mapping as packages/marcidb-client/build-binary.sh.
+        run: cargo build --release -p marcidb-ts -p marcidb-migrate --target ${{ matrix.target }}
+      - name: Package binaries
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/marcidb-ts${{ matrix.ext }}"    "out/marci-generate-${{ matrix.suffix }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/marci-migrate${{ matrix.ext }}" "out/marci-migrate-${{ matrix.suffix }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codegen-${{ matrix.os }}
+          path: out/*
+
+  # -------- publish the npm packages (marcidb-client, marcidb-embedded) --------
+  # Assembles EVERY platform's codegen binaries + native libs into the package dirs, builds the JS bundles,
+  # then publishes both with NPM_TOKEN — so one tag ships all platforms (mac included) without hand-committing
+  # binaries. Runs after the per-OS build jobs. `release.sh` stamps the version into the tagged commit, so the
+  # checked-out package.json already carries the right version.
+  publish-npm:
+    needs: [embedded, codegen]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }} # always the tagged commit (its package.json carries the stamped version)
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org" # writes the .npmrc that reads NODE_AUTH_TOKEN
+
+      # All platforms' artifacts → the package dirs. merge-multiple flattens the per-OS artifacts into one dir;
+      # the copy overwrites the committed win/linux binaries with fresh builds and adds mac.
+      - uses: actions/download-artifact@v4
+        with: { pattern: "codegen-*", path: dl-codegen, merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { pattern: "embedded-*", path: dl-embedded, merge-multiple: true }
+      - name: Stage artifacts into the packages
+        run: |
+          mkdir -p packages/marcidb-client/bin packages/marcidb-embedded/native
+          cp dl-codegen/*  packages/marcidb-client/bin/
+          cp dl-embedded/* packages/marcidb-embedded/native/
+          chmod +x packages/marcidb-client/bin/*   # restore the exec bit (artifact upload drops it)
+
+      # Build the JS bundles (dist + runtime). bunx fetches bunup; no install needed.
+      - name: Build JS bundles
+        run: |
+          ( cd packages/marcidb-client  && bunx bunup src/index.ts --external .marcidb/client --out-dir runtime )
+          ( cd packages/marcidb-embedded && bunx bunup src/index.ts --external koffi --external bun:ffi --out-dir dist )
+
+      # Publish client first (embedded peer-depends on it). --ignore-scripts because dist/runtime are already
+      # built here (prepublishOnly would re-run bunup, which isn't installed).
+      - name: Publish marcidb-client
+        working-directory: packages/marcidb-client
+        run: npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish marcidb-embedded
+        working-directory: packages/marcidb-embedded
+        run: npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # -------- Docker images: {full, core} -> GHCR --------
   docker:
@@ -205,13 +304,13 @@ jobs:
 
   # -------- publish the GitHub Release with notes + binaries --------
   release:
-    needs: [changelog, binaries, embedded, docker]
+    needs: [changelog, binaries, embedded, codegen, docker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          # Only the binaries, embedded libs and release notes — never the docker build records.
-          pattern: "{binary-*,embedded-*,release-notes}"
+          # Only the server binaries, embedded libs, codegen binaries and release notes — never docker records.
+          pattern: "{binary-*,embedded-*,codegen-*,release-notes}"
           path: artifacts
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -222,4 +321,5 @@ jobs:
           files: |
             artifacts/binary-*/*
             artifacts/embedded-*/*
+            artifacts/codegen-*/*
           fail_on_unmatched_files: true

@@ -17,3 +17,9 @@ default-members = [
     "marcidb",
     "marcidb-server"
 ]
+
+# Single source of truth for the version across every crate (engine, ffi, codegen, server, index modules).
+# Each member sets `version.workspace = true`; `release.sh` bumps this one line. Keep it in lockstep with the
+# npm packages (marcidb-client, marcidb-embedded) so "same version == compatible" holds across the toolchain.
+[workspace.package]
+version = "0.5.0"
