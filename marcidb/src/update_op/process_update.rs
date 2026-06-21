@@ -210,58 +210,63 @@ fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, ref_info: &RefInfo, 
 
 #[cfg(test)]
 mod tests {
-use serde_json::json;
-use crate::{parse_insert, parse_schema, parse_update, update_op::process_update::update_fields};
+  use serde_json::json;
+  use crate::{parse_insert, parse_schema, parse_update, update_op::process_update::update_fields, json_parsers::EncodeError};
 
-#[test]
-fn test_update_op() {
-  let schema = parse_schema("
-    model User {
-        name        String
-        age         Int
-        info        UserInfo?
-    }
-    struct UserInfo {
-        bio         String
-    }"
-  );
+  #[test]
+  fn test_update_op() {
+    let schema = parse_schema("
+            model User {
+                name        String
+                age         Int
+                info        UserInfo?
+            }
+            struct UserInfo {
+                bio         String
+            }"
+    );
 
-  let user_model = &schema.models[0];
+    let user_model = &schema.models[0];
 
-  let encoded = parse_insert(&schema, user_model, &json!({
-    "name": "Alice",
-    "age": 18
-  })).unwrap();
+    // Создаём пользователя с начальными данными (info заполнено)
+    let encoded = parse_insert(&schema, user_model, &json!({
+            "name": "Alice",
+            "age": 18,
+            "info": { "bio": "Hello" }
+        }))
+        .unwrap();
 
-  {
-    let update_op = parse_update(&schema, user_model, &json!({
-      "name": null
-    })).unwrap();
-  
-    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
-       
-    let encoded_resp = parse_insert(&schema, user_model, &json!({
-      "name": null,
-      "age": 18
-    })).unwrap();
+    // ── 1. null в not‑nullable поле (name) – ожидаем ошибку NullNotAllowed ──
+    let err = parse_update(&schema, user_model, &json!({ "name": null }));
+    assert!(
+      matches!(err, Err(EncodeError::NullNotAllowed(ref field)) if field == "User.name"),
+      "Ожидалась ошибка NullNotAllowed для поля name, получено: {:?}", err
+    );
 
-    assert_eq!(&updated.unwrap(), &encoded_resp.data);
+    // ── 2. Изменение not‑nullable поля на другое значение ──
+    let update_op = parse_update(&schema, user_model, &json!({ "name": "Alice New" })).unwrap();
+    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| Ok(()))
+        .unwrap();
+    assert!(updated.is_some(), "Изменение name должно привести к обновлению данных");
+    let expected = parse_insert(&schema, user_model, &json!({
+            "name": "Alice New",
+            "age": 18,
+            "info": { "bio": "Hello" }
+        }))
+        .unwrap();
+    assert_eq!(updated.unwrap(), expected.data);
+
+    // ── 3. Инкремент числа ──
+    let update_op = parse_update(&schema, user_model, &json!({ "age": { "$increment": 10 } })).unwrap();
+    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| Ok(()))
+        .unwrap();
+    assert!(updated.is_some(), "Инкремент age должен привести к обновлению данных");
+    let expected = parse_insert(&schema, user_model, &json!({
+            "name": "Alice",
+            "age": 28,
+            "info": { "bio": "Hello" }
+        }))
+        .unwrap();
+    assert_eq!(updated.unwrap(), expected.data);
   }
-
-  {
-    let update_op = parse_update(&schema, user_model, &json!({
-      "name": "Alice New",
-      "age": { "$increment": 10 }
-    })).unwrap();
-  
-    let updated = update_fields(&update_op.update_fields, &encoded.data, user_model, |_, _, _| { Ok(()) }).unwrap();
-       
-    let encoded_resp = parse_insert(&schema, user_model, &json!({
-      "name": "Alice New",
-      "age": 28
-    })).unwrap();
-
-    assert_eq!(&updated.unwrap(), &encoded_resp.data);
-  }
-}
 }

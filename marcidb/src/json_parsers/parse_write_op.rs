@@ -107,7 +107,9 @@ fn parse_write_op<'a>(
         // mask.set(field_index, true);
 
         if value.is_null() {
-            // TODO: add check not-null here
+            if !field.nullable {
+                return Err(EncodeError::NullNotAllowed(field.full_name.clone()));
+            }
             continue;
         }
 

@@ -10,7 +10,7 @@ pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value
 
   if let Some(or_condition) = where_obj.get("$or") {
     let or_condition = collect_where_conditions(schema, entity, or_condition, false)?;
-    if or_condition.iter().any(|f| !matches!(f, Where::True)) {
+    if or_condition.iter().any(|f| matches!(f, Where::True)) {
       return Ok(Where::True)
     }
     return match or_condition.len() {
@@ -333,6 +333,653 @@ mod tests {
   use serde_json::json;
   use std::assert_matches::assert_matches;
   use crate::{json_parsers::parse_where::parse_where, num_utils::NumberValue, parse_schema, query_op::{FieldCompare, Where}};
+
+  fn simple_user_schema() -> crate::schema::Schema {
+    parse_schema("
+        model User {
+            name  String
+            age   UInt?
+            score Int?
+        }
+    ")
+  }
+
+  fn ref_schema() -> crate::schema::Schema {
+    parse_schema("
+        model Post {
+            title  String
+            author User?
+        }
+        model User {
+            name  String
+            email String?
+        }
+    ")
+  }
+
+  fn ref_list_schema() -> crate::schema::Schema {
+    parse_schema("
+        model User {
+            name  String
+            posts Post[]
+        }
+        model Post {
+            title  String
+            author User?
+        }
+    ")
+  }
+
+  fn enum_list_schema() -> crate::schema::Schema {
+    parse_schema("
+        enum Role {
+            viewer
+            editor
+            owner
+        }
+        model Project {
+            name  String
+            roles Role[]
+        }
+    ")
+  }
+
+  fn enum_list_with_fields_schema() -> crate::schema::Schema {
+    parse_schema("
+        enum Event {
+            created {
+                at UInt
+            }
+            updated {
+                at   UInt
+                note String?
+            }
+        }
+        model Doc {
+            name   String
+            events Event[]
+        }
+    ")
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // $or
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn or_produces_or_variant_with_two_conditions() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({
+        "$or": [{ "name": "Alice" }, { "name": "Bob" }]
+    })).unwrap();
+    assert_matches!(w, Where::Or(_));
+    let Where::Or(items) = w else { unreachable!() };
+    assert_eq!(items.len(), 2);
+  }
+
+  #[test]
+  fn or_with_true_shortcircuits_to_true() {
+    // Если хотя бы одно условие — Where::True, весь $or → Where::True
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({
+        "$or": [{}, { "name": "Alice" }]
+    })).unwrap();
+    assert_matches!(w, Where::True);
+  }
+
+  #[test]
+  fn or_empty_array_returns_true() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "$or": [] })).unwrap();
+    assert_matches!(w, Where::True);
+  }
+
+  #[test]
+  fn or_single_condition_unwraps_to_that_condition() {
+    // $or с одним не-True элементом возвращает сам элемент (не Or)
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "$or": [{ "age": { "$gt": 18 } }] })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Gt(_)));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // $and
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn and_filters_out_true_conditions() {
+    // $and фильтрует Where::True условия; одно оставшееся разворачивается
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({
+        "$and": [{}, { "age": { "$gt": 5 } }]
+    })).unwrap();
+    // {} → Where::True → отфильтровано; осталось одно → разворачивается
+    assert_matches!(w, Where::Field(_, FieldCompare::Gt(_)));
+  }
+
+  #[test]
+  fn and_empty_after_filtering_returns_true() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "$and": [{}, {}] })).unwrap();
+    assert_matches!(w, Where::True);
+  }
+
+  #[test]
+  fn and_two_nontrue_conditions_produces_and() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({
+        "$and": [{ "age": { "$gt": 0 } }, { "age": { "$lt": 100 } }]
+    })).unwrap();
+    assert_matches!(w, Where::And(_));
+    let Where::And(items) = w else { unreachable!() };
+    assert_eq!(items.len(), 2);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // $not
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn not_wraps_inner_condition() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "$not": { "age": { "$gt": 5 } } })).unwrap();
+    assert_matches!(w, Where::Not(_));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Скалярные операторы
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn eq_explicit_with_nonnull_value() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$eq": "Alice" } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Eq(_)));
+  }
+
+  #[test]
+  fn eq_explicit_null_produces_eq_null() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "age": { "$eq": null } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EqNull));
+  }
+
+  #[test]
+  fn ne_with_nonnull_value_produces_ne() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$ne": "Bob" } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Ne(_)));
+  }
+
+  #[test]
+  fn not_operator_on_scalar_also_produces_ne() {
+    // $not и $ne эквивалентны для скалярных полей
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$not": "Bob" } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Ne(_)));
+  }
+
+  #[test]
+  fn lt_produces_lt() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "age": { "$lt": 30 } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Lt(NumberValue::UInt64(30))));
+  }
+
+  #[test]
+  fn lte_produces_lte() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "age": { "$lte": 30 } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Lte(NumberValue::UInt64(30))));
+  }
+
+  #[test]
+  fn gte_produces_gte() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "age": { "$gte": 18 } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::Gte(NumberValue::UInt64(18))));
+  }
+
+  #[test]
+  fn in_without_null_has_null_false() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$in": ["Alice", "Bob"] } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::In(_, false)));
+    let Where::Field(_, FieldCompare::In(items, _)) = w else { unreachable!() };
+    assert_eq!(items.len(), 2);
+  }
+
+  #[test]
+  fn in_with_null_sets_has_null_true() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "age": { "$in": [null, 20] } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::In(_, true)));
+    let Where::Field(_, FieldCompare::In(items, _)) = w else { unreachable!() };
+    assert_eq!(items.len(), 1); // null не попадает в буфер
+  }
+
+  #[test]
+  fn not_in_without_null() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$notIn": ["Alice"] } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::NotIn(_, false)));
+  }
+
+  #[test]
+  fn not_in_with_null_sets_has_null_true() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "age": { "$notIn": [null, 20] } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::NotIn(_, true)));
+  }
+
+  #[test]
+  fn starts_with_produces_string_starts_with() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$startsWith": "Al" } })).unwrap();
+    let Where::Field(_, FieldCompare::StringStartsWith(bytes)) = w else {
+      panic!("ожидался StringStartsWith");
+    };
+    assert_eq!(bytes, b"Al");
+  }
+
+  #[test]
+  fn includes_produces_string_includes() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let w = parse_where(&schema, entity, &json!({ "name": { "$includes": "ice" } })).unwrap();
+    let Where::Field(_, FieldCompare::StringIncludes(bytes)) = w else {
+      panic!("ожидался StringIncludes");
+    };
+    assert_eq!(bytes, b"ice");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Ошибки скалярных операторов
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn error_not_an_object_for_parse_where() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let result = parse_where(&schema, entity, &json!([1, 2, 3]));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::NotAnObject));
+  }
+
+  #[test]
+  fn error_unsupported_operation_unknown_op() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let result = parse_where(&schema, entity, &json!({ "age": { "$unknown": 5 } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::UnsupportedOperation(_)));
+  }
+
+  #[test]
+  fn error_only_one_key_expected_multiple_ops() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let result = parse_where(&schema, entity, &json!({ "age": { "$gt": 5, "$lt": 10 } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::OnlyOneKeyExpected(_, _)));
+  }
+
+  #[test]
+  fn error_in_not_array() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let result = parse_where(&schema, entity, &json!({ "age": { "$in": 5 } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::NotAnArray));
+  }
+
+  #[test]
+  fn error_starts_with_not_string() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let result = parse_where(&schema, entity, &json!({ "name": { "$startsWith": 123 } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::TypeMismatch { .. }));
+  }
+
+  #[test]
+  fn error_includes_not_string() {
+    let schema = simple_user_schema();
+    let entity = &schema.models[0];
+    let result = parse_where(&schema, entity, &json!({ "name": { "$includes": 999 } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::TypeMismatch { .. }));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Ref-поле (FieldType::Ref)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn ref_field_null_produces_not_exists() {
+    let schema = ref_schema();
+    let post = &schema.models[0];
+    let w = parse_where(&schema, post, &json!({ "author": null })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Field с Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::NotExists);
+  }
+
+  #[test]
+  fn ref_field_ne_null_produces_exists() {
+    let schema = ref_schema();
+    let post = &schema.models[0];
+    let w = parse_where(&schema, post, &json!({ "author": { "$ne": null } })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Field с Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::Exists);
+  }
+
+  #[test]
+  fn ref_field_ne_nonnull_produces_ne() {
+    let schema = ref_schema();
+    let post = &schema.models[0];
+    let w = parse_where(&schema, post, &json!({ "author": { "$ne": { "name": "Bob" } } })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Field с Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::Ne(_));
+  }
+
+  #[test]
+  fn ref_field_object_produces_eq() {
+    let schema = ref_schema();
+    let post = &schema.models[0];
+    let w = parse_where(&schema, post, &json!({ "author": { "name": "Alice" } })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Field с Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::Eq(_));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // RefList-поле (FieldType::RefList)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn ref_list_every_parsed_correctly() {
+    let schema = ref_list_schema();
+    let user = &schema.models[0];
+    let w = parse_where(&schema, user, &json!({ "posts": { "$every": {} } })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::Every(_));
+  }
+
+  #[test]
+  fn ref_list_some_parsed_correctly() {
+    let schema = ref_list_schema();
+    let user = &schema.models[0];
+    let w = parse_where(&schema, user, &json!({ "posts": { "$some": {} } })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::Some(_));
+  }
+
+  #[test]
+  fn ref_list_none_parsed_correctly() {
+    let schema = ref_list_schema();
+    let user = &schema.models[0];
+    let w = parse_where(&schema, user, &json!({ "posts": { "$none": {} } })).unwrap();
+    let Where::Field(_, crate::query_op::FieldCompare::Ref(_, _, ref_cmp)) = w else {
+      panic!("ожидался Ref");
+    };
+    assert_matches!(ref_cmp, crate::query_op::FieldCompareRef::None(_));
+  }
+
+  #[test]
+  fn ref_list_error_unsupported_key() {
+    let schema = ref_list_schema();
+    let user = &schema.models[0];
+    let result = parse_where(&schema, user, &json!({ "posts": { "$contains": {} } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::UnsupportedOperation(_)));
+  }
+
+  #[test]
+  fn ref_list_error_only_one_key_expected() {
+    let schema = ref_list_schema();
+    let user = &schema.models[0];
+    let result = parse_where(&schema, user, &json!({ "posts": { "$some": {}, "$every": {} } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::OnlyOneKeyExpected(_, _)));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // EnumList-поле (FieldType::EnumList) — parse_field_compare
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn enum_list_shorthand_string_produces_some() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let w = parse_where(&schema, project, &json!({ "roles": "owner" })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn enum_list_some_with_variant_filter() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let w = parse_where(&schema, project, &json!({ "roles": { "$some": { "$variant": "editor" } } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn enum_list_every_parsed() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let w = parse_where(&schema, project, &json!({ "roles": { "$every": "owner" } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListEvery(_)));
+  }
+
+  #[test]
+  fn enum_list_none_parsed() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let w = parse_where(&schema, project, &json!({ "roles": { "$none": "viewer" } })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListNone(_)));
+  }
+
+  #[test]
+  fn enum_list_error_unsupported_key() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let result = parse_where(&schema, project, &json!({ "roles": { "$contains": "owner" } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::UnsupportedOperation(_)));
+  }
+
+  #[test]
+  fn enum_list_error_only_one_key_expected() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let result = parse_where(&schema, project, &json!({ "roles": { "$some": "viewer", "$every": "owner" } }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::OnlyOneKeyExpected(_, _)));
+  }
+
+  #[test]
+  fn enum_list_error_type_mismatch_non_object_non_string() {
+    let schema = enum_list_schema();
+    let project = &schema.models[0];
+    let result = parse_where(&schema, project, &json!({ "roles": 123 }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::TypeMismatch { .. }));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // parse_field_compare_primitive (через EnumList с вариантными полями)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn primitive_cmp_eq_null_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "$variant": "updated", "note": null } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_ne_null_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "$variant": "updated", "note": { "$ne": null } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_gt_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "$variant": "updated", "at": { "$gt": 100 } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_lt_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$lt": 50 } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_lte_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$lte": 50 } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_gte_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$gte": 100 } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_in_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$in": [100, 200] } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_in_with_null_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "$variant": "updated", "note": { "$in": [null, "fix"] } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_not_in_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$notIn": [100] } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_eq_nonnull_in_enum_list_filter() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$eq": 200 } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_error_unsupported_op() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let result = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$startsWith": "x" } } }
+    }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::UnsupportedOperation(_)));
+  }
+
+  #[test]
+  fn primitive_cmp_error_only_one_key() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let result = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$gt": 5, "$lt": 100 } } }
+    }));
+    assert_matches!(result, Err(crate::json_parsers::parsers::EncodeError::OnlyOneKeyExpected(_, _)));
+  }
+
+  #[test]
+  fn primitive_cmp_implicit_eq_in_enum_list_filter() {
+    // Прямое значение (не объект) → Eq
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": 200 } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // parse_enum_list_item_filter: поиск без $variant (все варианты)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  #[test]
+  fn enum_list_filter_without_variant_matches_all_variants() {
+    let schema = enum_list_with_fields_schema();
+    let doc = &schema.models[0];
+    // Без $variant — ищем поле 'at' во всех вариантах
+    let w = parse_where(&schema, doc, &json!({
+        "events": { "$some": { "at": { "$gt": 50 } } }
+    })).unwrap();
+    assert_matches!(w, Where::Field(_, FieldCompare::EnumListSome(_)));
+    let Where::Field(_, FieldCompare::EnumListSome(filter)) = w else { unreachable!() };
+    // variant_idx = None (все варианты)
+    assert!(filter.variant_idx.is_none());
+    // Должны быть field_filters для обоих вариантов (created.at + updated.at)
+    assert!(!filter.field_filters.is_empty());
+  }
 
   #[test]
   fn basic_where_test() {

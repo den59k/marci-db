@@ -1,0 +1,172 @@
+// ============================================================
+//  Prisma-схема AS-IS — усечённая до моделей, используемых
+//  в MarciDB-реализации (TO-BE).
+//
+//  Архитектурные проблемы:
+//  [P1] Разрежённые таблицы (sparse columns)
+//  [P2] Массивы ID без ссылочной целостности
+//  [P3] Неструктурированный JSON (AppTour.events)
+// ============================================================
+
+datasource postgresql {
+  url      = env("PG_DATABASE_URL")
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "cargo run --bin prisma --"
+  output = "../benches/prisma.rs"
+}
+
+// ── File ────────────────────────────────────────────────────
+// id — Int autoincrement, соответствует TO-BE.
+// Нет FK-связей с другими моделями — ссылки хранятся
+// как Int[] в других таблицах без ссылочной целостности [P2].
+model File {
+  id       Int     @id @default(autoincrement())
+  name     String?
+  fileSize Int
+  src      String
+  landmark Landmark?
+}
+
+// ── LandmarkGroup ───────────────────────────────────────────
+// photoIds Int[] — массив ID без FK [P2].
+model LandmarkGroup {
+  id          Int        @id @default(autoincrement())
+  name        String
+  description String     @default("")
+  photoIds    Int[]      @default([])   // [P2] нет FK на File
+  landmarks   Landmark[]
+}
+
+// ── Landmark ────────────────────────────────────────────────
+// photoIds Int[], simillarLandmarks Int[] — без FK [P2].
+model Landmark {
+  id                Int            @id @default(autoincrement())
+  name              String
+  description       String
+  location          String
+  audioFileId       Int?	   @unique
+  audioFile	    File?	   @relation(fields: [audioFileId], references: [id])
+  photoIds          Int[]          @default([])   // [P2]
+  indexOnLine       Int            @default(1)
+  groupId           Int?
+  group             LandmarkGroup? @relation(fields: [groupId], references: [id])
+  simillarLandmarks Int[]          @default([])   // [P2]
+  favourites        Favourite[]    @relation("LandmarkFavourites")
+
+  @@index([indexOnLine])
+  @@index([groupId])
+}
+
+// ── Place ───────────────────────────────────────────────────
+// [P1] placeType String + 9 nullable-полей вариантов.
+// [P2] imageFileIds Int[], simillarPlaces Int[] — без FK.
+model Place {
+  id                Int                @id @default(autoincrement())
+  name              String
+  description       String
+  address           String
+  tags              PlaceCategoryTag[]
+
+  // [P1] Дискриминатор типа места
+  placeType         String
+
+  // [P1] Поля варианта food
+  averageBill       Int?
+  deliveryAvailable Boolean?
+
+  // [P1] Поля варианта museum / food
+  price             Int?
+  openingHours      String?
+
+  // [P1] Поля варианта museum / square
+  childZone         Boolean?
+
+  // [P1] Поля варианта square
+  hasParking        Boolean?
+
+  // [P1] Поля варианта park
+  isPayEntrance     Boolean?
+  hasWifi           Boolean?
+
+  // [P1] Поля варианта hotel
+  starRating        Int?
+  pricePerNight     Int?
+
+  // [P2] Массивы ID без FK
+  photoIds	    Int[]              @default([])
+  simillarPlaces    Int[]              @default([])
+
+  favourites        Favourite[]        @relation("PlaceFavourites")
+
+}
+
+// ── AppUser ─────────────────────────────────────────────────
+// [P1] Четыре nullable-поля аутентификации + строковый дискриминатор.
+// Ровно одно из {email, yandexId, vkId, appleId} не NULL.
+// Нет аватара — File не имеет FK-связей.
+model AppUser {
+  id                 Int         @id @default(autoincrement())
+  name               String
+
+  // [P1] Дискриминатор — явный, для индексирования
+  authenticationType String
+
+  // [P1] Поля вариантов; только одно заполнено, остальные NULL
+  emailVerified      Boolean?
+  accessToken        String?
+  address            String?
+
+  favourite          Favourite[]
+
+}
+
+// ── Favourite ───────────────────────────────────────────────
+// [P1] type + два nullable FK (один всегда NULL).
+// Нет уникальных ограничений. Индекс только по userId.
+model Favourite {
+  id         BigInt        @id @default(autoincrement())
+  createdAt  DateTime      @default(now())
+  userId     Int
+  user       AppUser       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // [P1] Дискриминатор объекта избранного
+  type       FavouriteType
+
+  // [P1] Ровно одно из двух полей заполнено
+  placeId    Int?
+  place      Place?        @relation("PlaceFavourites",    fields: [placeId],    references: [id], onDelete: Cascade)
+  landmarkId Int?
+  landmark   Landmark?     @relation("LandmarkFavourites", fields: [landmarkId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ── AppTour ─────────────────────────────────────────────────
+// [P3] events Json — структура не гарантирована СУБД.
+model AppTour {
+  id     Int      @id @default(autoincrement())
+  title  String
+  text   String
+  start  DateTime
+  end    DateTime
+  events Json     // [P3]
+
+  @@index([start])
+}
+
+// ── Enums ───────────────────────────────────────────────────
+
+enum FavouriteType {
+  place
+  landmark
+}
+
+enum PlaceCategoryTag {
+  culture
+  fast
+  walk
+  art
+}

@@ -5,7 +5,7 @@ use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{Encod
 
 pub fn parse_query<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<QueryOp<'a>, ParseError> {
   let Some(obj) = json_val.as_object() else {
-    return Err(ParseError::NotAnObject)
+    return Ok(QueryOp::all(entity));
   };
   return parse_query_internal(schema, entity, obj);
 }
@@ -51,6 +51,13 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: op });
       }
       _ => {
+        mask.set(field_index, true);
+      }
+    }
+  }
+  if mask.not_any() && includes.is_empty() {
+    for (field_index, field) in entity.fields.iter().enumerate() {
+      if !matches!(field.ty, FieldType::Ref(_) | FieldType::RefList(_)) {
         mask.set(field_index, true);
       }
     }

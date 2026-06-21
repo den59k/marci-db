@@ -16,17 +16,17 @@ pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Уменьшает буффер на один бит
-pub fn decrease_bit(start: &[u8]) -> Option<Vec<u8>> {
-  let mut end = SmallVec::<u8, 256>::from_slice_copy(start);
-  for (i, b) in end.iter_mut().enumerate().rev() {
-      if *b > 0 {
-          *b -= 1;
-          end.truncate(i + 1);
-          return Some(end.to_vec());
-      }
-  }
-  return None;
-}
+// pub fn decrease_bit(start: &[u8]) -> Option<Vec<u8>> {
+//   let mut end = SmallVec::<u8, 256>::from_slice_copy(start);
+//   for (i, b) in end.iter_mut().enumerate().rev() {
+//       if *b > 0 {
+//           *b -= 1;
+//           end.truncate(i + 1);
+//           return Some(end.to_vec());
+//       }
+//   }
+//   return None;
+// }
 
 #[inline]
 /// Для точного сравнения по индексу (Eq) мы сравниваем по префиксу
@@ -160,15 +160,15 @@ pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> O
       }
 
       for index in field.indexes.iter() {
-        match index {
-            FieldIndex::Value { tree_name,  .. } => {
-              return match field_compare {
-                  FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name),
-                  // Здесь мы не ставим нуль терминатор в конец, поскольку не обязательно, чтобы длина строк совпадала
-                  FieldCompare::StringStartsWith(val) => generate_prefix_starts_with(val.clone(), tree_name), 
-                  _ => None
+          match index {
+              FieldIndex::Value { tree_name,  .. } => {
+                  return match field_compare {
+                      FieldCompare::Eq(val) => generate_prefix(encode_index_data(field, val), tree_name),
+                      // Здесь мы не ставим нуль терминатор в конец, поскольку не обязательно, чтобы длина строк совпадала
+                      FieldCompare::StringStartsWith(val) => generate_prefix_starts_with(val.clone(), tree_name),
+                      _ => None
+                  }
               }
-            }
             FieldIndex::Number { tree_name, ty, .. } => {
               return match field_compare {
                 FieldCompare::Eq(val) => generate_prefix( encode_index_number(ty, val), tree_name),
@@ -179,10 +179,11 @@ pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> O
                   Some(PrefixKey::IndexRange { start: increase_bit(&encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() })
                 }
                 FieldCompare::Lte(val) => {
-                  Some(PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() })
+                    let encoded = encode_num_wh(val);
+                    Some(PrefixKey::IndexRange { start: None, end: increase_bit(&encoded), tree_name: tree_name.clone(), fixed_size: field.get_size() })
                 }
                 FieldCompare::Lt(val) => {
-                  Some(PrefixKey::IndexRange { start: None, end: decrease_bit(&encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() })
+                    Some(PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() })
                 }
                 _ => None
               }
@@ -220,3 +221,4 @@ pub fn try_to_generate_id_prefix<'a>(entity: &Entity, items: Vec<(&Field,&Vec<u8
   }
   return Some(PrefixKey::IdPrefix(prefix_value))
 }
+

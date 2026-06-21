@@ -36,6 +36,9 @@ fn parse_update_op<'a>(
                 });
 
                 if value.is_null() {
+                    if !field.nullable {
+                        return Err(EncodeError::NullNotAllowed(field.full_name.clone()));
+                    }
                     match field.location {
                         FieldLocation::Key { .. } => return Err(EncodeError::OnlyBodyKeyAvailableToEdit(field.full_name.clone())),
                         FieldLocation::Body { offset_pos } => {
@@ -124,12 +127,12 @@ fn parse_update_op<'a>(
                         // },
                         "$set" => {
                             let write_op = parse_many(field, value, |v| parse_insert_nested(schema, ref_info, v))?;
-                            
+
                             let delete_op = prepare_delete(schema, ref_entity, None, rev_field);
                             if write_op.is_empty() {
                                 UpdateRelationOp::RemoveAll(delete_op)
                             } else {
-                                update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::Remove(delete_op), ref_info, rev_ref_info });
+                                update_refs.push(UpdateRelation { field, st: ref_entity, op: UpdateRelationOp::RemoveAll(delete_op), ref_info, rev_ref_info });
                                 UpdateRelationOp::Push(write_op)
                             }
                         },
@@ -153,6 +156,9 @@ fn parse_update_op<'a>(
         };
 
         if value.is_null() {
+            if !field.nullable {
+                return Err(EncodeError::NullNotAllowed(field.full_name.clone()));
+            }
             update_fields.push(UpdateField { field, value: UpdateValue::Null, offset_pos });
             continue;
         }

@@ -1,57 +1,131 @@
-model User {
-    id          Byte[16]      @id   @format(uuid)
-    name        String
-    info        UserInfo?
-    posts       Post[]        @bind(Post.author)
-    roles 	RoleKind[]
-    gender	Gender	
+model Place {
+    name		String
+    description		String
+    address		String?
+    type		PlaceType
+    tags		PlaceCategoryTag[]
+    photoIds		File[]			@default([])
+    simillarPlaces	Place[]			@default([])
+}	
+
+model Favourite {
+    userId	AppUser			@onDelete(CASCADE)
+    object	FavouriteObject
+    createdAt	DateTime		@default(now())
 }
 
-enum Gender {
-    male {
-        experience	Int
+model AppUser {
+    name		String
+    authentication	AuthenticationInfo
+    favourites		Favourite[]		@bind(Favourite.userId)
+}
+
+model Landmark {
+    name		String
+    description		String
+    location		String
+    audioFileId		File?		@unique
+    photoIds		File[]		@default([])
+    indexOnLine		Int		@index
+    groupId		LandmarkGroup?
+    simillarLandmarks	Landmark[]	@default([])
+}
+
+model LandmarkGroup {
+    name	String
+    description	String
+    photoIds	File[]		@default([])
+    landmarks	Landmark[]	@bind(Landmark.groupId)
+}
+
+model AppTour {
+    title	String
+    text	String
+    start	DateTime	@index
+    end		DateTime
+    events	Events[]
+}
+
+model File {
+    name	String?
+    fileSize	Int
+    src		String
+}
+
+struct Events {
+    order	Int
+    info	EventsInfo
+}
+
+enum EventsInfo {
+    visit_place
+    eating
+    visit_landmark {
+	landmarkId	Landmark
     }
-    female
-    male | female {
-        weight		Int
-	height		Int
+    visit_place | eating {
+        placeId		Place
+    }
+    visit_place | visit_landmark | eating {
+	time		DateTime
     }
 }
 
-enum RoleKind {
-    viewer
-    admin {
-        features  String[]
-        level     Int
+enum AuthenticationInfo {
+    email {
+        emailVerified		Bool
     }
-    moderator {
-        section   String
+    vkId
+    appleId
+    yandexId
+    vkId | yandexId {
+        accessToken		String
     }
-}
-
-struct UserInfo {
-    bio         String
-    age         Int
-}
-
-model Post {
-    title       String
-    author      User?
-}
-
-model Project {
-    name        String
-    users       UserRole[]
-}
-
-enum Role {
-    creator
-    admin {
-    sign      String
+    email | vkId | appleId | yandexId {
+        address			String		@unique
     }
 }
 
-struct UserRole {
-    user        User          @id
-    role        Role
+
+enum FavouriteObject {
+    place {
+        placeId		Place
+    }
+    landmark {
+	landmarkId	Landmark
+    }
+}
+
+enum PlaceType {
+    food {
+        averageBill  		Int
+        deliveryAvailable 	Bool
+    }
+    museum {
+        price        		Int
+    }
+    square {
+        hasParking   		Bool
+    }
+    park {
+        isPayEntrance 		Bool
+        hasWifi      		Bool
+    }
+    hotel {
+        starRating   		Int
+        pricePerNight 		Int
+    }
+    museum | square {
+	childZone		Bool
+    }
+    food | museum {
+	openingHours		String
+    }
+}
+
+enum PlaceCategoryTag {
+    culture
+    fast
+    walk
+    art
 }

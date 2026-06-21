@@ -371,7 +371,8 @@ pub enum EncodeError {
     UnsupportedOperation(String),
     NotAnArray,
     OnlyBodyKeyAvailableToEdit(String),
-    RevFieldRequired(String)
+    RevFieldRequired(String),
+    NullNotAllowed(String)
 }
 
 

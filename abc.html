@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Index - Criterion.rs</title>
+    <style type="text/css">
+        body {
+            font: 14px Helvetica Neue;
+            text-rendering: optimizelegibility;
+        }
+
+        .body {
+            width: 960px;
+            margin: auto;
+        }
+
+        a:link {
+            color: #1F78B4;
+            text-decoration: none;
+        }
+
+        h2 {
+            font-size: 36px;
+            font-weight: 300;
+        }
+
+        h3 {
+            font-size: 24px;
+            font-weight: 300;
+        }
+
+        #footer {
+            height: 40px;
+            background: #888;
+            color: white;
+            font-size: larger;
+            font-weight: 300;
+        }
+
+        #footer a {
+            color: white;
+            text-decoration: underline;
+        }
+
+        #footer p {
+            text-align: center
+        }
+
+        table {
+            border-collapse: collapse;
+        }
+
+        table,
+        th,
+        td {
+            border: 1px solid #888;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="body">
+        <h2>Criterion.rs Benchmark Index</h2>
+        See individual benchmark pages below for more details.
+        <ul>
+            <li><a href="../b1_insert\report/index.html">B1_insert</a></li>
+            
+            <ul>
+                <li><a href="../b1_insert\as-is _ apptour+events (postgresql jsonb)\report/index.html">AS-IS / AppTour+events (PostgreSQL JSONB)</a></li>
+                <li><a href="../b1_insert\as-is _ appuser (postgresql)\report/index.html">AS-IS / AppUser (PostgreSQL)</a></li>
+                <li><a href="../b1_insert\as-is _ place (postgresql)\report/index.html">AS-IS / Place (PostgreSQL)</a></li>
+                <li><a href="../b1_insert\to-be _ apptour+events (marcidb)\report/index.html">TO-BE / AppTour+events (MarciDB)</a></li>
+                <li><a href="../b1_insert\to-be _ appuser (marcidb)\report/index.html">TO-BE / AppUser (MarciDB)</a></li>
+                <li><a href="../b1_insert\to-be _ place (marcidb)\report/index.html">TO-BE / Place (MarciDB)</a></li>
+            </ul>
+            <li><a href="../b2_point_lookup\report/index.html">B2_point_lookup</a></li>
+            
+            <ul>
+                <li><a href="../b2_point_lookup\as-is _ landmark by pk (postgresql)\report/index.html">AS-IS / Landmark by PK (PostgreSQL)</a></li>
+                <li><a href="../b2_point_lookup\as-is _ place by pk (postgresql)\report/index.html">AS-IS / Place by PK (PostgreSQL)</a></li>
+                <li><a href="../b2_point_lookup\to-be _ landmark by pk (marcidb)\report/index.html">TO-BE / Landmark by PK (MarciDB)</a></li>
+                <li><a href="../b2_point_lookup\to-be _ place by pk (marcidb)\report/index.html">TO-BE / Place by PK (MarciDB)</a></li>
+            </ul>
+            <li><a href="../b3_indexed_field_search\report/index.html">B3_indexed_field_search</a></li>
+            
+            <ul>
+                <li><a href="../b3_indexed_field_search\as-is _ apptour start range (pg index)\report/index.html">AS-IS / AppTour start range (PG index)</a></li>
+                <li><a href="../b3_indexed_field_search\as-is _ landmark indexonline_20 (pg index)\report/index.html">AS-IS / Landmark indexOnLine&gt;20 (PG index)</a></li>
+                <li><a href="../b3_indexed_field_search\as-is _ place by place_type=museum (pg index)\report/index.html">AS-IS / Place by place_type=museum (PG index)</a></li>
+                <li><a href="../b3_indexed_field_search\to-be _ apptour start range (marcidb @index)\report/index.html">TO-BE / AppTour start range (MarciDB @index)</a></li>
+                <li><a href="../b3_indexed_field_search\to-be _ landmark indexonline_20 (marcidb @index)\report/index.html">TO-BE / Landmark indexOnLine&gt;20 (MarciDB @index)</a></li>
+                <li><a href="../b3_indexed_field_search\to-be _ place by type=museum (marcidb @index)\report/index.html">TO-BE / Place by type=museum (MarciDB @index)</a></li>
+            </ul>
+            <li><a href="../b4_non_indexed_field\report/index.html">B4_non_indexed_field</a></li>
+            
+            <ul>
+                <li><a href="../b4_non_indexed_field\as-is _ place average_bill_600 (nullable col, full scan)\report/index.html">AS-IS / Place average_bill&gt;600 (nullable col, full scan)</a></li>
+                <li><a href="../b4_non_indexed_field\as-is _ place name like (full scan, pg)\report/index.html">AS-IS / Place name LIKE (full scan, PG)</a></li>
+                <li><a href="../b4_non_indexed_field\as-is _ place star_rating=4 (nullable, full scan)\report/index.html">AS-IS / Place star_rating=4 (nullable, full scan)</a></li>
+                <li><a href="../b4_non_indexed_field\to-be _ place averagebill_600 (enum variant, no nulls)\report/index.html">TO-BE / Place averageBill&gt;600 (enum variant, no nulls)</a></li>
+                <li><a href="../b4_non_indexed_field\to-be _ place name $includes (full scan, marcidb)\report/index.html">TO-BE / Place name $includes (full scan, MarciDB)</a></li>
+                <li><a href="../b4_non_indexed_field\to-be _ place starrating=4 (enum hotel variant)\report/index.html">TO-BE / Place starRating=4 (enum hotel variant)</a></li>
+            </ul>
+            <li><a href="../b5_joins\report/index.html">B5_joins</a></li>
+            
+            <ul>
+                <li><a href="../b5_joins\as-is _ appuser-_favourites (sql join on user_id)\report/index.html">AS-IS / AppUser-&gt;Favourites (SQL JOIN on user_id)</a></li>
+                <li><a href="../b5_joins\as-is _ landmarkgroup-_landmarks (sql join)\report/index.html">AS-IS / LandmarkGroup-&gt;Landmarks (SQL JOIN)</a></li>
+                <li><a href="../b5_joins\as-is _ place.simillarplaces unnest (pg)\report/index.html">AS-IS / Place.simillarPlaces unnest (PG)</a></li>
+                <li><a href="../b5_joins\to-be _ appuser-_favourites (@bind, prefix scan)\report/index.html">TO-BE / AppUser-&gt;Favourites (@bind, prefix scan)</a></li>
+                <li><a href="../b5_joins\to-be _ landmarkgroup-_landmarks (@bind index)\report/index.html">TO-BE / LandmarkGroup-&gt;Landmarks (@bind index)</a></li>
+                <li><a href="../b5_joins\to-be _ place.simillarplaces $some (marcidb reflist)\report/index.html">TO-BE / Place.simillarPlaces $some (MarciDB RefList)</a></li>
+            </ul>
+            <li><a href="../b6_events_search\report/index.html">B6_events_search</a></li>
+            
+            <ul>
+                <li><a href="../b6_events_search\as-is _ apptour events jsonb @_ (no gin, full scan)\report/index.html">AS-IS / AppTour events JSONB @&gt; (no GIN, full scan)</a></li>
+                <li><a href="../b6_events_search\as-is _ apptour events jsonb type=eating (full scan)\report/index.html">AS-IS / AppTour events JSONB type=eating (full scan)</a></li>
+                <li><a href="../b6_events_search\to-be _ apptour events $some eating (marcidb)\report/index.html">TO-BE / AppTour events $some eating (MarciDB)</a></li>
+                <li><a href="../b6_events_search\to-be _ apptour events $some visit_landmark (marcidb)\report/index.html">TO-BE / AppTour events $some visit_landmark (MarciDB)</a></li>
+            </ul>
+            <li><a href="../b7_update\report/index.html">B7_update</a></li>
+            
+            <ul>
+                <li><a href="../b7_update\as-is _ appuser authentication_type update (postgresql)\report/index.html">AS-IS / AppUser authentication_type UPDATE (PostgreSQL)</a></li>
+                <li><a href="../b7_update\as-is _ place description update (postgresql)\report/index.html">AS-IS / Place description UPDATE (PostgreSQL)</a></li>
+                <li><a href="../b7_update\to-be _ appuser authentication update (marcidb enum)\report/index.html">TO-BE / AppUser authentication update (MarciDB enum)</a></li>
+                <li><a href="../b7_update\to-be _ place description update (marcidb)\report/index.html">TO-BE / Place description update (MarciDB)</a></li>
+            </ul>
+            <li><a href="../b8_delete\report/index.html">B8_delete</a></li>
+            
+            <ul>
+                <li><a href="../b8_delete\as-is _ landmarkgroup delete + set null (postgresql)\report/index.html">AS-IS / LandmarkGroup DELETE + SET NULL (PostgreSQL)</a></li>
+                <li><a href="../b8_delete\as-is _ place delete (postgresql)\report/index.html">AS-IS / Place DELETE (PostgreSQL)</a></li>
+                <li><a href="../b8_delete\to-be _ landmarkgroup delete + setnull @bind (marcidb)\report/index.html">TO-BE / LandmarkGroup delete + SetNull @bind (MarciDB)</a></li>
+            </ul>
+            <li><a href="../b9_bulk_insert\report/index.html">B9_bulk_insert</a></li>
+            
+            <ul>
+                <li>
+                    <table>
+                        <tr>
+                            <th></th>
+                            <th><a href="../b9_bulk_insert\as-is _ bulk landmark (postgresql)\report/index.html">AS-IS / bulk Landmark (PostgreSQL)</a></th>
+                            <th><a href="../b9_bulk_insert\to-be _ bulk landmark (marcidb)\report/index.html">TO-BE / bulk Landmark (MarciDB)</a></th>
+                        </tr>
+                        <tr>
+                            <th><a href="../b9_bulk_insert\10\report/index.html">10</a></th>
+                            <td><a href="../b9_bulk_insert/as-is _ bulk landmark (postgresql)/10\report/index.html">B9_bulk_insert/AS-IS / bulk Landmark (PostgreSQL)/10</a></td>
+                            <td><a href="../b9_bulk_insert/to-be _ bulk landmark (marcidb)/10\report/index.html">B9_bulk_insert/TO-BE / bulk Landmark (MarciDB)/10</a></td>
+                        </tr>
+                        <tr>
+                            <th><a href="../b9_bulk_insert\50\report/index.html">50</a></th>
+                            <td><a href="../b9_bulk_insert/as-is _ bulk landmark (postgresql)/50\report/index.html">B9_bulk_insert/AS-IS / bulk Landmark (PostgreSQL)/50</a></td>
+                            <td><a href="../b9_bulk_insert/to-be _ bulk landmark (marcidb)/50\report/index.html">B9_bulk_insert/TO-BE / bulk Landmark (MarciDB)/50</a></td>
+                        </tr>
+                        <tr>
+                            <th><a href="../b9_bulk_insert\100\report/index.html">100</a></th>
+                            <td><a href="../b9_bulk_insert/as-is _ bulk landmark (postgresql)/100\report/index.html">B9_bulk_insert/AS-IS / bulk Landmark (PostgreSQL)/100</a></td>
+                            <td><a href="../b9_bulk_insert/to-be _ bulk landmark (marcidb)/100\report/index.html">B9_bulk_insert/TO-BE / bulk Landmark (MarciDB)/100</a></td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </ul>
+    </div>
+    <div id="footer">
+        <p>This report was generated by
+            <a href="https://github.com/bheisler/criterion.rs">Criterion.rs</a>, a statistics-driven benchmarking
+            library in Rust.</p>
+    </div>
+</body>
+</html>

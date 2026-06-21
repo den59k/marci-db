@@ -19,12 +19,14 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
 
   let mut write_id = insert.id.clone();
   let mut temp_data: Option<Vec<u8>> = None;
-  
+
+  let mut key_shift: usize = 0;
   for field in insert.defaults.iter() {
     match field {
       WriteDefault::Key(offset, FieldDefault::Counter(counter_idx)) => {
         let next_value = db.counters[*counter_idx].fetch_add(1, Ordering::Relaxed);
-        write_id[*offset..*offset+8].copy_from_slice(&next_value.to_be_bytes());
+        let pos = *offset + key_shift;
+        write_id[pos..pos+8].copy_from_slice(&next_value.to_be_bytes());
       }
       WriteDefault::Body(offset, FieldDefault::Counter(counter_idx)) => {
         let next_value = db.counters[*counter_idx].fetch_add(1, Ordering::Relaxed);
@@ -36,6 +38,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
           return Err(InsertError::ParentIdRequired)
         };
         write_id.splice(offset..offset, parent_id.iter().copied());
+        key_shift += parent_id.len();
       },
       WriteDefault::BodyInsert(offset_pos, offset, WriteDefaultInsert::ParentId) => {
         let Some(parent_id) = parent_id else {
@@ -90,7 +93,6 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
       }
     }
   }
-
   Ok(write_id)
 }
 
