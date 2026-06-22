@@ -39,6 +39,12 @@ pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFi
             let b = v.as_bool().ok_or_else(|| EncodeError::type_mismatch(field, "bool"))?;
             dst.push(if b { 1 } else { 0 });
         }
+
+        // Any JSON value encodes; a top-level `null` is handled upstream as field-absence (offset 0), not
+        // stored as a JSON null — consistent with every other type.
+        PrimitiveFieldType::Json => {
+            crate::json_parsers::jsonb::encode_into(dst, v);
+        }
     }
     Ok(())
 }

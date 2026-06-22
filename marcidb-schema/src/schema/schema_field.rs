@@ -99,7 +99,10 @@ pub enum PrimitiveFieldType {
     Double,
     Bool,
     DateTime,
-    Byte
+    Byte,
+    /// A JSON document stored as a JSONB binary blob (see the engine's `jsonb` codec). Variable-length,
+    /// not numeric, not indexable inline — like `String`, it lives behind a body offset.
+    Json
 }
 
 impl PrimitiveFieldType {
@@ -139,6 +142,7 @@ impl fmt::Display for PrimitiveFieldType {
             PrimitiveFieldType::Bool => "bool",
             PrimitiveFieldType::Byte => "u8",
             PrimitiveFieldType::DateTime => "datetime",
+            PrimitiveFieldType::Json => "json",
         };
         write!(f, "{}", s)
     }
@@ -322,6 +326,9 @@ fn get_primitive_type(s: &str) -> Option<PrimitiveFieldType> {
         "f64" => Some(PrimitiveFieldType::Double),
         
         "DateTime" => Some(PrimitiveFieldType::DateTime),
+
+        "Json" => Some(PrimitiveFieldType::Json),
+        "json" => Some(PrimitiveFieldType::Json),
         _ => None
     }
 }

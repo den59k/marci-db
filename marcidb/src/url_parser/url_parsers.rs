@@ -51,6 +51,11 @@ pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFi
             };
             dst.push(if b { 1 } else { 0 });
         }
+
+        // JSON fields can't be expressed as a flat URL query value.
+        PrimitiveFieldType::Json => {
+            return Err(UrlParseError::type_mismatch(field, "json (not supported in URL parameters)"));
+        }
     }
 
     Ok(())

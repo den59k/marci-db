@@ -457,6 +457,8 @@ fn decode_primitive_value(ty: &PrimitiveFieldType, data: &[u8]) -> Result<String
             Ok((data[0] != 0).to_string())
             // Ok(Value::Bool(data[offset] != 0))
         }
+        // The stored blob decodes to valid JSON text; it is inserted verbatim (insert_value), not escaped.
+        PrimitiveFieldType::Json => crate::json_parsers::jsonb::decode(data),
     }
 }
 

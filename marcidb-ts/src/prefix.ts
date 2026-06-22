@@ -1,5 +1,9 @@
 type ServiceKeys = "$where" | "$order" | "$limit" | "$skip" | "$cursor";
 
+// A `Json` field: any JSON value. Stored as a JSONB binary blob server-side; on the wire it is a plain
+// decoded JSON value.
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
 // Aggregate query over related records inside select
 type AggregateKeys = { $count: true } | { $sum: string } | { $avg: string } | { $min: string } | { $max: string }
 

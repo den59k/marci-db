@@ -67,6 +67,11 @@ pub fn shape_supported(query: &QueryOp) -> bool {
     if !matches!(field.ty, FieldType::Primitive(_)) {
       return false;
     }
+    // JSON fields decode through the jsonb codec on the JSON read path; the binary transport doesn't carry
+    // them yet, so a query selecting a JSON field transparently falls back to JSON (Part 3).
+    if matches!(field.ty, FieldType::Primitive(PrimitiveFieldType::Json)) {
+      return false;
+    }
     // A variant (enum-payload) field is *absent* in JSON when its enum isn't on the matching value, which
     // binary's present/null tag can't reproduce — keep these on the JSON path.
     if !matches!(field.condition, crate::schema::FieldExistsCondition::None) {
@@ -241,6 +246,10 @@ fn encode_primitive(out: &mut Vec<u8>, ty: &PrimitiveFieldType, data: &[u8]) -> 
     }
     PrimitiveFieldType::Bool => out.push(if data[0] != 0 { 1 } else { 0 }),
     PrimitiveFieldType::Byte => out.push(data[0]),
+    // Gated out by shape_supported (JSON fallback) — reaching here is a contract bug.
+    PrimitiveFieldType::Json => {
+      return Err(DecodeError::TypeMismatch("json is not supported by the binary encoder".into()));
+    }
   }
   Ok(())
 }
