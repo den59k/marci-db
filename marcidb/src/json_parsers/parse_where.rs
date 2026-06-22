@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{FieldCompare, FieldCompareRef, Where}, schema::{Entity, FieldType, Schema}};
+use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, Where}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
 
 /// Parses a JSON object into a where condition
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,EncodeError> {
@@ -10,7 +10,8 @@ pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value
 
   if let Some(or_condition) = where_obj.get("$or") {
     let or_condition = collect_where_conditions(schema, entity, or_condition, false)?;
-    if or_condition.iter().any(|f| !matches!(f, Where::True)) {
+    // True is OR's absorbing element: if any branch matches everything, the whole OR does.
+    if or_condition.iter().any(|f| matches!(f, Where::True)) {
       return Ok(Where::True)
     }
     return match or_condition.len() {
@@ -117,6 +118,23 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
     _ => { }
   }
 
+  // A Json field keyed by JSON paths (non-`$` keys) is path-mode. `$`-operators and bare values fall through
+  // to whole-value handling below (a whole-blob `$eq`, which works via the canonical encoding).
+  if matches!(field.ty, FieldType::Primitive(PrimitiveFieldType::Json)) {
+    if let Some(obj) = value.as_object() {
+      let has_path = obj.keys().any(|k| !k.starts_with('$'));
+      let has_op = obj.keys().any(|k| k.starts_with('$'));
+      if has_path && has_op {
+        return Err(EncodeError::UnsupportedOperation(
+          "a JSON filter cannot mix path keys and $-operators".to_string(),
+        ));
+      }
+      if has_path {
+        return Ok(FieldCompare::Json(parse_json_filters(obj)?));
+      }
+    }
+  }
+
   if value.is_null() { return Ok(FieldCompare::EqNull) }
 
   if let Some(obj) = value.as_object() {
@@ -203,6 +221,65 @@ fn parse_field_value_in(field: &Field, value: &Value) -> Result<(Vec<Vec<u8>>,bo
     buf.push(parse_field_value_binary(field, v)?);
   }
   Ok((buf,has_null))
+}
+
+/// Parses the path-mode object of a JSON filter: each entry is `"<dot.path>": <condition>`, all ANDed.
+fn parse_json_filters(obj: &serde_json::Map<String, Value>) -> Result<Vec<JsonFilter>, EncodeError> {
+  obj.iter()
+    .map(|(path, cond)| Ok(JsonFilter {
+      path: path.split('.').map(str::to_string).collect(),
+      op: parse_json_op(cond)?,
+    }))
+    .collect()
+}
+
+/// A condition on a single path. A single-`$`-key object is an operator; any other value (scalar, array, or
+/// a plain object) is a literal `$eq` against the leaf (so a plain object means whole-subtree equality).
+fn parse_json_op(cond: &Value) -> Result<JsonOp, EncodeError> {
+  if let Some(obj) = cond.as_object() {
+    if obj.keys().any(|k| k.starts_with('$')) {
+      if obj.len() != 1 {
+        return Err(EncodeError::UnsupportedOperation(
+          "a JSON path condition takes exactly one operator".to_string(),
+        ));
+      }
+      let (key, v) = obj.iter().next().unwrap();
+      return parse_json_operator(key, v);
+    }
+  }
+  Ok(JsonOp::Eq(cond.clone()))
+}
+
+fn parse_json_operator(key: &str, v: &Value) -> Result<JsonOp, EncodeError> {
+  let as_str = |v: &Value| v.as_str().map(str::to_string)
+    .ok_or_else(|| EncodeError::UnsupportedOperation(format!("{} expects a string", key)));
+  let as_arr = |v: &Value| v.as_array().cloned().ok_or(EncodeError::NotAnArray);
+  Ok(match key {
+    "$eq" => JsonOp::Eq(v.clone()),
+    "$ne" | "$not" => JsonOp::Ne(v.clone()),
+    "$gt" => JsonOp::Gt(v.clone()),
+    "$gte" => JsonOp::Gte(v.clone()),
+    "$lt" => JsonOp::Lt(v.clone()),
+    "$lte" => JsonOp::Lte(v.clone()),
+    "$in" => JsonOp::In(as_arr(v)?),
+    "$notIn" => JsonOp::NotIn(as_arr(v)?),
+    "$startsWith" => JsonOp::StringStartsWith(as_str(v)?),
+    "$includes" => JsonOp::StringIncludes(as_str(v)?),
+    "$contains" => JsonOp::Contains(v.clone()),
+    "$exists" => JsonOp::Exists(
+      v.as_bool().ok_or_else(|| EncodeError::UnsupportedOperation("$exists expects a boolean".to_string()))?,
+    ),
+    "$type" => JsonOp::Type(parse_json_type(v)?),
+    _ => return Err(EncodeError::UnsupportedOperation(key.to_string())),
+  })
+}
+
+fn parse_json_type(v: &Value) -> Result<String, EncodeError> {
+  let s = v.as_str().ok_or_else(|| EncodeError::UnsupportedOperation("$type expects a string".to_string()))?;
+  match s {
+    "string" | "number" | "boolean" | "object" | "array" | "null" => Ok(s.to_string()),
+    _ => Err(EncodeError::UnsupportedOperation(format!("unknown $type '{}'", s))),
+  }
 }
 
 #[cfg(test)]

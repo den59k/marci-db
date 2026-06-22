@@ -32,6 +32,8 @@
 //! UTF-8 (never tagged — they are always strings) sorted bytewise, so the layout is canonical: two objects
 //! with the same entries encode to identical bytes regardless of source key order.
 
+use std::cmp::Ordering;
+
 use serde_json::{Map, Value};
 
 use crate::json_parsers::json_decoder::DecodeError;
@@ -256,6 +258,124 @@ fn slice(data: &[u8], start: usize, end: usize) -> Result<&[u8], DecodeError> {
     data.get(start..end).ok_or(DecodeError::OffsetOutOfRange)
 }
 
+// ──────────────────────────── navigation (for filtering) ────────────────────────────
+
+/// Walks `path` through the blob and returns the tagged slice of the leaf it lands on, or `None` if any
+/// segment doesn't resolve — a missing object key, an out-of-range/non-numeric array index, or a descent
+/// into a scalar. Only the headers and keys along the path are read; the rest of the document is skipped.
+/// This is the random-access property the format exists for. A structurally broken blob also yields `None`
+/// (a residual filter must never crash a query); engine-written blobs are well-formed.
+pub fn navigate<'a>(mut data: &'a [u8], path: &[String]) -> Option<&'a [u8]> {
+    for seg in path {
+        data = match *data.first()? {
+            TAG_OBJECT => object_get(data, seg)?,
+            TAG_ARRAY => array_get(data, seg.parse().ok()?)?,
+            _ => return None, // can't descend into a scalar
+        };
+    }
+    Some(data)
+}
+
+/// Binary-search an object's sorted key table for `key`, returning the matching value's slice.
+fn object_get<'a>(data: &'a [u8], key: &str) -> Option<&'a [u8]> {
+    let n = read_u32(data, 1).ok()?;
+    let key_table = 5;
+    let val_table = key_table + (n + 1) * 4;
+    let key_region = val_table + (n + 1) * 4;
+    let val_region = key_region + read_u32(data, key_table + n * 4).ok()?;
+
+    let target = key.as_bytes();
+    let (mut lo, mut hi) = (0usize, n);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let ks = key_region + read_u32(data, key_table + mid * 4).ok()?;
+        let ke = key_region + read_u32(data, key_table + (mid + 1) * 4).ok()?;
+        match data.get(ks..ke)?.cmp(target) {
+            Ordering::Less => lo = mid + 1,
+            Ordering::Greater => hi = mid,
+            Ordering::Equal => {
+                let vs = val_region + read_u32(data, val_table + mid * 4).ok()?;
+                let ve = val_region + read_u32(data, val_table + (mid + 1) * 4).ok()?;
+                return data.get(vs..ve);
+            }
+        }
+    }
+    None
+}
+
+/// Index into an array via its offset table.
+fn array_get(data: &[u8], idx: usize) -> Option<&[u8]> {
+    let n = read_u32(data, 1).ok()?;
+    if idx >= n {
+        return None;
+    }
+    let table = 5;
+    let region = table + (n + 1) * 4;
+    let start = region + read_u32(data, table + idx * 4).ok()?;
+    let end = region + read_u32(data, table + (idx + 1) * 4).ok()?;
+    data.get(start..end)
+}
+
+/// The JSON type name of the value at the head of `data` (for the `$type` operator) — reads only the tag.
+pub fn type_name(data: &[u8]) -> Option<&'static str> {
+    Some(match *data.first()? {
+        TAG_NULL => "null",
+        TAG_FALSE | TAG_TRUE => "boolean",
+        TAG_INT | TAG_UINT | TAG_DOUBLE => "number",
+        TAG_STRING => "string",
+        TAG_ARRAY => "array",
+        TAG_OBJECT => "object",
+        _ => return None,
+    })
+}
+
+/// Decodes one value (occupying exactly `data`) into a `serde_json::Value`. Used by the filter evaluator to
+/// compare a leaf against the query value; for scalars it's a couple of bytes, for containers it rebuilds
+/// the subtree. The inverse of [`encode_into`].
+pub fn decode_to_value(data: &[u8]) -> Result<Value, DecodeError> {
+    let tag = *data.first().ok_or(DecodeError::BufferTooSmall)?;
+    Ok(match tag {
+        TAG_NULL => Value::Null,
+        TAG_FALSE => Value::Bool(false),
+        TAG_TRUE => Value::Bool(true),
+        TAG_INT => Value::from(i64::from_be_bytes(read_8(data, 1)?)),
+        TAG_UINT => Value::from(u64::from_be_bytes(read_8(data, 1)?)),
+        TAG_DOUBLE => {
+            let f = f64::from_be_bytes(read_8(data, 1)?);
+            serde_json::Number::from_f64(f)
+                .map(Value::Number)
+                .ok_or_else(|| DecodeError::TypeMismatch("non-finite float in jsonb".into()))?
+        }
+        TAG_STRING => Value::String(read_str(data, 1)?.to_string()),
+        TAG_ARRAY => {
+            let n = read_u32(data, 1)?;
+            let mut arr = Vec::with_capacity(n);
+            for i in 0..n {
+                arr.push(decode_to_value(array_get(data, i).ok_or(DecodeError::OffsetOutOfRange)?)?);
+            }
+            Value::Array(arr)
+        }
+        TAG_OBJECT => {
+            let n = read_u32(data, 1)?;
+            let key_table = 5;
+            let val_table = key_table + (n + 1) * 4;
+            let key_region = val_table + (n + 1) * 4;
+            let val_region = key_region + read_u32(data, key_table + n * 4)?;
+            let mut map = Map::new();
+            for i in 0..n {
+                let ks = key_region + read_u32(data, key_table + i * 4)?;
+                let ke = key_region + read_u32(data, key_table + (i + 1) * 4)?;
+                let key = std::str::from_utf8(slice(data, ks, ke)?).map_err(|_| DecodeError::Utf8Error)?;
+                let vs = val_region + read_u32(data, val_table + i * 4)?;
+                let ve = val_region + read_u32(data, val_table + (i + 1) * 4)?;
+                map.insert(key.to_string(), decode_to_value(slice(data, vs, ve)?)?);
+            }
+            Value::Object(map)
+        }
+        other => return Err(DecodeError::TypeMismatch(format!("unknown jsonb tag {}", other))),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decode, encode};
@@ -336,4 +456,54 @@ mod tests {
     }
 
     const TAG_BAD: u8 = 99;
+
+    use super::{decode_to_value, navigate, type_name};
+
+    fn path(s: &str) -> Vec<String> {
+        s.split('.').map(str::to_string).collect()
+    }
+
+    /// `navigate` reaches a leaf and `decode_to_value` reconstructs it; misses return `None`.
+    #[test]
+    fn navigate_and_decode() {
+        let doc = json!({
+            "address": { "city": "Tokyo", "zip": 1000 },
+            "tags": ["a", "b", "c"],
+            "age": 30,
+            "items": [ { "id": 1 }, { "id": 2 } ],
+            "flag": false,
+            "nested": null
+        });
+        let blob = encode(&doc);
+        let at = |p: &str| navigate(&blob, &path(p)).map(|leaf| decode_to_value(leaf).unwrap());
+
+        assert_eq!(at("address.city"), Some(json!("Tokyo")));
+        assert_eq!(at("address.zip"), Some(json!(1000)));
+        assert_eq!(at("tags.1"), Some(json!("b")));
+        assert_eq!(at("items.0.id"), Some(json!(1)));
+        assert_eq!(at("age"), Some(json!(30)));
+        assert_eq!(at("flag"), Some(json!(false)));
+        assert_eq!(at("nested"), Some(json!(null)));      // present, JSON null
+        assert_eq!(at("address"), Some(json!({ "city": "Tokyo", "zip": 1000 })));
+
+        // Misses
+        assert_eq!(at("address.country"), None);          // missing key
+        assert_eq!(at("tags.9"), None);                   // index out of range
+        assert_eq!(at("tags.x"), None);                   // non-numeric index into array
+        assert_eq!(at("age.city"), None);                 // descend into a scalar
+        assert_eq!(navigate(&blob, &path("missing")), None);
+    }
+
+    #[test]
+    fn type_names() {
+        let blob = encode(&json!({ "s": "x", "n": 1, "f": 1.5, "b": true, "a": [], "o": {}, "z": null }));
+        let t = |p: &str| navigate(&blob, &path(p)).and_then(type_name);
+        assert_eq!(t("s"), Some("string"));
+        assert_eq!(t("n"), Some("number"));
+        assert_eq!(t("f"), Some("number"));
+        assert_eq!(t("b"), Some("boolean"));
+        assert_eq!(t("a"), Some("array"));
+        assert_eq!(t("o"), Some("object"));
+        assert_eq!(t("z"), Some("null"));
+    }
 }

@@ -1,6 +1,9 @@
-use memchr::memmem;
+use std::cmp::Ordering;
 
-use crate::{StorageError, query_op::{FieldCompare, FieldCompareRef, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
+use memchr::memmem;
+use serde_json::Value;
+
+use crate::{StorageError, json_parsers::jsonb, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
 
 pub fn process_where<'a, 'b, U, F>(id: &'b [u8], body: &'b [u8], ctx: &mut TransationContext<'a, U, F>, entity: &Entity, where_op: &Where<'a>) -> Result<bool, StorageError> {
 
@@ -44,6 +47,12 @@ pub fn process_where<'a, 'b, U, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Trans
             Ok(!has_one_item_exists(ctx, *ref_entity, prefix_key, entity, id, body)?)
           }
         };
+      }
+
+      // JSON path filter: navigate the blob (which may be absent) and apply every path condition (ANDed).
+      if let FieldCompare::Json(filters) = field_compare {
+        let blob = get_data(entity, field, id, body, ctx.schema);
+        return Ok(filters.iter().all(|jf| eval_json_filter(blob, jf)));
       }
 
       let Some(data) = get_data(entity, field, id, body, ctx.schema) else {
@@ -167,4 +176,56 @@ pub fn has_one_item_exists<'a, U, F>(
 
   let tree = ctx.get_tree(&entity.name)?;
   return Ok(tree.prefix_keys(&item_id)?.next().transpose()?.is_some())
+}
+
+/// Evaluates one JSON path condition against the field's blob (`None` if the field itself is null/absent).
+/// Navigates to the leaf, then applies the operator. A missing leaf or a type mismatch is "no match",
+/// except `$ne`/`$notIn`, which also match a missing leaf (mirroring scalar `$ne` on a null field).
+fn eval_json_filter(blob: Option<&[u8]>, jf: &JsonFilter) -> bool {
+  let leaf = blob.and_then(|b| jsonb::navigate(b, &jf.path));
+  match &jf.op {
+    JsonOp::Exists(want) => leaf.is_some() == *want,
+    JsonOp::Type(name) => leaf.and_then(jsonb::type_name).is_some_and(|n| n == name),
+    op => {
+      let Some(leaf) = leaf else {
+        return matches!(op, JsonOp::Ne(_) | JsonOp::NotIn(_));
+      };
+      let Ok(val) = jsonb::decode_to_value(leaf) else { return false };
+      match op {
+        JsonOp::Eq(x) => json_eq(&val, x),
+        JsonOp::Ne(x) => !json_eq(&val, x),
+        JsonOp::In(xs) => xs.iter().any(|x| json_eq(&val, x)),
+        JsonOp::NotIn(xs) => !xs.iter().any(|x| json_eq(&val, x)),
+        JsonOp::Gt(x) => json_cmp(&val, x).is_some_and(Ordering::is_gt),
+        JsonOp::Gte(x) => json_cmp(&val, x).is_some_and(Ordering::is_ge),
+        JsonOp::Lt(x) => json_cmp(&val, x).is_some_and(Ordering::is_lt),
+        JsonOp::Lte(x) => json_cmp(&val, x).is_some_and(Ordering::is_le),
+        JsonOp::StringStartsWith(s) => val.as_str().is_some_and(|v| v.starts_with(s.as_str())),
+        JsonOp::StringIncludes(s) => val.as_str().is_some_and(|v| v.contains(s.as_str())),
+        JsonOp::Contains(x) => val.as_array().is_some_and(|a| a.iter().any(|e| json_eq(e, x))),
+        JsonOp::Exists(_) | JsonOp::Type(_) => unreachable!("handled above"),
+      }
+    }
+  }
+}
+
+/// JSON equality with numeric leniency: `5` equals `5.0`. Other types use structural `Value` equality.
+fn json_eq(a: &Value, b: &Value) -> bool {
+  match (a, b) {
+    (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+      (Some(x), Some(y)) => x == y,
+      _ => false,
+    },
+    _ => a == b,
+  }
+}
+
+/// Ordering for `$gt`/`$lt`… — defined only between two numbers (by value) or two strings (lexicographic);
+/// any other pairing (including a type mismatch) is `None`, i.e. no match.
+fn json_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+  match (a, b) {
+    (Value::Number(x), Value::Number(y)) => x.as_f64()?.partial_cmp(&y.as_f64()?),
+    (Value::String(x), Value::String(y)) => Some(x.as_str().cmp(y.as_str())),
+    _ => None,
+  }
 }

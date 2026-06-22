@@ -105,6 +105,79 @@ fn json_rides_the_binary_transport() {
   ]);
 }
 
+// ─────────────────────────────── Phase 2: filtering by JSON path ───────────────────────────────
+
+fn filter_db(dir: &tempfile::TempDir) -> MarciDB {
+  let db = create_db(dir);
+  insert_data(&db, "Doc", json!({ "name": "alice", "data": { "city": "Tokyo", "age": 30, "tags": ["vip", "early"], "address": { "zip": 200 } } }));
+  insert_data(&db, "Doc", json!({ "name": "bob",   "data": { "city": "Oslo",  "age": 17, "tags": ["new"], "address": { "zip": 100 } } }));
+  insert_data(&db, "Doc", json!({ "name": "carol", "data": { "city": "Tokyo", "age": "old", "items": [{ "id": 1 }, { "id": 2 }] } })); // age is a string
+  insert_data(&db, "Doc", json!({ "name": "dave",  "data": { "city": "Lima", "tags": [] } }));                                          // no age, no address
+  db
+}
+
+/// Names of the docs matching a `$where`, in id (insertion) order.
+fn names(db: &MarciDB, where_clause: Value) -> Vec<String> {
+  let resp = get_data(db, "Doc", json!({ "name": true, "$where": where_clause }));
+  resp.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn json_filter_eq_and_paths() {
+  let dir = tempdir().unwrap();
+  let db = filter_db(&dir);
+
+  // Bare value = $eq on the leaf; nested + array-index paths.
+  assert_eq!(names(&db, json!({ "data": { "city": "Tokyo" } })), ["alice", "carol"]);
+  assert_eq!(names(&db, json!({ "data": { "address.zip": 200 } })), ["alice"]);
+  assert_eq!(names(&db, json!({ "data": { "items.0.id": 1 } })), ["carol"]);
+  // $ne excludes matches and also matches docs missing the leaf (all have city here).
+  assert_eq!(names(&db, json!({ "data": { "city": { "$ne": "Tokyo" } } })), ["bob", "dave"]);
+  // $in over a path.
+  assert_eq!(names(&db, json!({ "data": { "city": { "$in": ["Oslo", "Lima"] } } })), ["bob", "dave"]);
+}
+
+#[test]
+fn json_filter_numeric_type_mismatch_and_missing() {
+  let dir = tempdir().unwrap();
+  let db = filter_db(&dir);
+
+  // Only alice (30) qualifies: bob is 17, carol's age is a string (no match), dave has no age.
+  assert_eq!(names(&db, json!({ "data": { "age": { "$gt": 18 } } })), ["alice"]);
+  assert_eq!(names(&db, json!({ "data": { "age": { "$gte": 17 } } })), ["alice", "bob"]);
+  // $type filters by the leaf's JSON type.
+  assert_eq!(names(&db, json!({ "data": { "age": { "$type": "number" } } })), ["alice", "bob"]);
+  assert_eq!(names(&db, json!({ "data": { "age": { "$type": "string" } } })), ["carol"]);
+}
+
+#[test]
+fn json_filter_exists_contains_and_compose() {
+  let dir = tempdir().unwrap();
+  let db = filter_db(&dir);
+
+  assert_eq!(names(&db, json!({ "data": { "age": { "$exists": true } } })), ["alice", "bob", "carol"]);
+  assert_eq!(names(&db, json!({ "data": { "age": { "$exists": false } } })), ["dave"]);
+  assert_eq!(names(&db, json!({ "data": { "tags": { "$contains": "vip" } } })), ["alice"]);
+
+  // Multiple paths under one field are ANDed.
+  assert_eq!(names(&db, json!({ "data": { "city": "Tokyo", "age": { "$gt": 18 } } })), ["alice"]);
+
+  // $or across separate field filters composes as usual.
+  assert_eq!(
+    names(&db, json!({ "$or": [ { "data": { "city": "Oslo" } }, { "data": { "city": "Lima" } } ] })),
+    ["bob", "dave"]
+  );
+}
+
+#[test]
+fn json_filter_whole_value_eq_still_works() {
+  let dir = tempdir().unwrap();
+  let db = filter_db(&dir);
+
+  // $-operator on the field = whole-blob compare (key order doesn't matter — canonical encoding).
+  assert_eq!(names(&db, json!({ "data": { "$eq": { "tags": [], "city": "Lima" } } })), ["dave"]);
+}
+
 // ── Minimal reader for the binary result buffer, mirroring the TS client decoder (all ints little-endian).
 // Shape: [u8 version][u32 count]{ id:u64 | name: tag+str | data: tag+str }. A Json field is a length-prefixed
 // UTF-8 string that the client JSON.parses — here we do the same with serde_json::from_str.

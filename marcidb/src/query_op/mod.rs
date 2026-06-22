@@ -10,7 +10,7 @@ use crate::{Field, schema::{Entity, FieldLocation, FieldType}};
 pub use process_query::{DecodeCtx,TransationContext,IncludeResult};
 pub use process_query_one::process_query_one;
 pub use process_query_many::process_query_many;
-pub use r#where::{Where,FieldCompare,FieldCompareRef};
+pub use r#where::{Where,FieldCompare,FieldCompareRef,JsonFilter,JsonOp};
 
 pub(crate) use process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, range_keys_iter};
 pub(crate) use process_where::process_where;
