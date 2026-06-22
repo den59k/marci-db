@@ -50,6 +50,21 @@ type WhereValue<T> = T | { "$and": T[] } | { "$or": T[] } | { "$not": T }
 type CompareValue<T> = T | { "$eq": T } | { "$not": T } | { "$in": T[] } | { "$notIn": T[] }
 type CompareNumValue<T> = { "$gt": T } | { "$gte": T } | { "$lt": T } | { "$lte": T }
 type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
+
+// Filtering into a Json field by dot-path. Keys are JSON paths (e.g. "address.city", "items.0"); a numeric
+// segment indexes an array. A bare value is shorthand for `$eq` (a plain object matches the whole subtree).
+// Path keys must not start with `$`. A missing leaf or a type mismatch simply doesn't match.
+type JsonType = "string" | "number" | "boolean" | "object" | "array" | "null"
+type JsonCondition =
+  | JsonValue
+  | { "$eq": JsonValue } | { "$ne": JsonValue } | { "$not": JsonValue }
+  | { "$gt": number | string } | { "$gte": number | string } | { "$lt": number | string } | { "$lte": number | string }
+  | { "$in": JsonValue[] } | { "$notIn": JsonValue[] }
+  | { "$startsWith": string } | { "$includes": string }
+  | { "$contains": JsonValue }
+  | { "$exists": boolean }
+  | { "$type": JsonType }
+type JsonPathWhere = { [path: string]: JsonCondition }
 type CompareRefValue<T> = T | { "$not": T }
 type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
 
