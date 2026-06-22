@@ -21,14 +21,16 @@
 //! * **To-many relation**: `u32 count` then that many related rows inline (Part 1 repeats shared rows).
 //!
 //! Scalar value encodings (chosen for exact parity with the JSON→JS path; see [`encode_primitive`]):
-//! fixed-width LE for numbers, `u32 len` + UTF-8 for strings.
+//! fixed-width LE for numbers, `u32 len` + UTF-8 for strings. A `Json` field ships as its decoded JSON
+//! text using that same `u32 len` + UTF-8 framing; the client `JSON.parse`s it (its `json` type code tells
+//! it apart from a plain string). So one JSON field no longer forces the whole query onto the JSON path.
 //!
-//! ## Scope (Part 1, MVP)
+//! ## Scope
 //!
 //! Supported shapes are gated by [`shape_supported`]; anything outside falls back to JSON transparently
-//! (the FFI reports "unsupported" and the client re-issues over the JSON path). v1 covers the eight
-//! primitives + nested to-one / to-many relations. Formats (uuid/hex), enums, primitive lists, and
-//! composite/ref keys are intentionally deferred — they stay on the JSON path until a later slice.
+//! (the FFI reports "unsupported" and the client re-issues over the JSON path). Covered: the scalar
+//! primitives (including `Json`) + nested to-one / to-many relations. Formats (uuid/hex), enums, primitive
+//! lists, and composite/ref keys are intentionally deferred — they stay on the JSON path until a later slice.
 
 use serde_json::Value;
 
@@ -65,11 +67,6 @@ pub fn shape_supported(query: &QueryOp) -> bool {
       return false;
     }
     if !matches!(field.ty, FieldType::Primitive(_)) {
-      return false;
-    }
-    // JSON fields decode through the jsonb codec on the JSON read path; the binary transport doesn't carry
-    // them yet, so a query selecting a JSON field transparently falls back to JSON (Part 3).
-    if matches!(field.ty, FieldType::Primitive(PrimitiveFieldType::Json)) {
       return false;
     }
     // A variant (enum-payload) field is *absent* in JSON when its enum isn't on the matching value, which
@@ -215,6 +212,8 @@ fn encode_body_field(out: &mut Vec<u8>, data: &[u8], offset_pos: usize, field: &
 ///   JSON path prints `f32::to_string()` ("0.1") which JS parses to the f64 nearest 0.1; going through the
 ///   string here reproduces exactly that f64, so binary and JSON agree.
 /// * `Bool` → 1 byte 0/1; `Byte` → 1 byte; `String` → `u32 len` + UTF-8 (raw, no JSON escaping).
+/// * `Json` → the stored JSONB blob decoded to JSON text, then `u32 len` + UTF-8 (same framing as a
+///   string); the client `JSON.parse`s it back into a value.
 fn encode_primitive(out: &mut Vec<u8>, ty: &PrimitiveFieldType, data: &[u8]) -> Result<(), DecodeError> {
   let fixed = |data: &[u8]| -> Result<[u8; 8], DecodeError> {
     data.try_into().map_err(|_| DecodeError::InvalidLength { expected: 8, got: data.len() })
@@ -246,9 +245,13 @@ fn encode_primitive(out: &mut Vec<u8>, ty: &PrimitiveFieldType, data: &[u8]) -> 
     }
     PrimitiveFieldType::Bool => out.push(if data[0] != 0 { 1 } else { 0 }),
     PrimitiveFieldType::Byte => out.push(data[0]),
-    // Gated out by shape_supported (JSON fallback) — reaching here is a contract bug.
+    // Ship the decoded JSON text, length-prefixed UTF-8 — the same framing as a string. The client tells
+    // it apart by the field's `json` type code and `JSON.parse`s it. We decode the stored JSONB blob with
+    // the one tested codec here rather than duplicating a JSONB reader in the client decoder.
     PrimitiveFieldType::Json => {
-      return Err(DecodeError::TypeMismatch("json is not supported by the binary encoder".into()));
+      let text = crate::json_parsers::jsonb::decode(data)?;
+      put_u32(out, text.len());
+      out.extend_from_slice(text.as_bytes());
     }
   }
   Ok(())
