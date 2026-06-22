@@ -60,6 +60,10 @@ fn parse_default_value(ty: &PrimitiveFieldType, value: &str, field: &Field) -> R
                 _ => return Err(bad())
             }
         },
+        // A JSON field has no scalar literal form in the schema; `@default` on it isn't supported.
+        PrimitiveFieldType::Json => return Err(SchemaError(format!(
+            "Default values are not supported for Json fields. Field: {}", field.full_name
+        ))),
     })
 }
 

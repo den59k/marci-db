@@ -72,6 +72,7 @@ fn get_primitive_str(ty: &PrimitiveFieldType) -> &str {
     PrimitiveFieldType::Byte => "number",
     PrimitiveFieldType::Bool => "boolean",
     PrimitiveFieldType::DateTime => "Date | number",
+    PrimitiveFieldType::Json => "JsonValue",
   }
 }
 
@@ -396,9 +397,10 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
 
 /// Binary-transport type code for a primitive, or `None` for types the binary decoder doesn't cover yet
 /// (kept on the JSON path). `Float` is decoded as f64 (the engine widens it on the wire for exact parity)
-/// and `DateTime` as i64 (an epoch number, matching the JSON path).
-fn binary_type_code(ty: &PrimitiveFieldType) -> &'static str {
-  match ty {
+/// and `DateTime` as i64 (an epoch number, matching the JSON path). `Json` returns `None` — JSON fields ride
+/// the JSON path (mirrors the engine's `shape_supported` gate).
+fn binary_type_code(ty: &PrimitiveFieldType) -> Option<&'static str> {
+  Some(match ty {
     PrimitiveFieldType::String => "str",
     PrimitiveFieldType::Int64 => "i64",
     PrimitiveFieldType::UInt64 => "u64",
@@ -407,7 +409,8 @@ fn binary_type_code(ty: &PrimitiveFieldType) -> &'static str {
     PrimitiveFieldType::Bool => "bool",
     PrimitiveFieldType::Byte => "u8",
     PrimitiveFieldType::DateTime => "i64",
-  }
+    PrimitiveFieldType::Json => return None,
+  })
 }
 
 /// One field descriptor for the binary decoder-compiler: `{ n: name, k: kind, t: typecode, m: relModel }`.
@@ -436,7 +439,10 @@ fn binary_field_descriptor(field: &Field, schema: &Schema) -> Option<String> {
         FieldType::Primitive(ty)
           if field.format.is_none() && matches!(field.condition, FieldExistsCondition::None) =>
         {
-          format!("\"{}\"", binary_type_code(ty))
+          match binary_type_code(ty) {
+            Some(code) => format!("\"{}\"", code),
+            None => "null".to_string(),
+          }
         }
         _ => "null".to_string(),
       };

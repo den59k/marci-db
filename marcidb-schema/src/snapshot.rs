@@ -164,6 +164,7 @@ fn primitive_name(ty: &PrimitiveFieldType) -> &'static str {
     PrimitiveFieldType::Bool => "Bool",
     PrimitiveFieldType::Byte => "Byte",
     PrimitiveFieldType::DateTime => "DateTime",
+    PrimitiveFieldType::Json => "Json",
   }
 }
 
@@ -534,6 +535,7 @@ fn snap_primitive(s: &str) -> Option<PrimitiveFieldType> {
     "Bool" => PrimitiveFieldType::Bool,
     "Byte" => PrimitiveFieldType::Byte,
     "DateTime" => PrimitiveFieldType::DateTime,
+    "Json" => PrimitiveFieldType::Json,
     _ => return None,
   })
 }

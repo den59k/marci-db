@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, parse_id, schema::{Entity, FieldExistsCondition, FieldLocation, FieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
+use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, parse_id, schema::{Entity, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
 
 pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<UpdateOp<'a>, EncodeError> {
     let obj = json_val
@@ -190,6 +190,13 @@ fn parse_update_op<'a>(
 fn parse_field<'a>(field: &'a Field, value: &Value) -> Result<UpdateValue, EncodeError> {
     return match &field.ty {
         FieldType::Primitive(primitive_field_type) => {
+            // A Json field's value is itself a JSON document (object/array/scalar) — encode it directly.
+            // It must not be interpreted as an update operator (the `{ "$..." }` object form below).
+            if matches!(primitive_field_type, PrimitiveFieldType::Json) {
+                let mut dst = vec![];
+                encode_primitive_value(&mut dst, field, primitive_field_type, value)?;
+                return Ok(UpdateValue::Value(dst));
+            }
             if let Some(obj) = value.as_object() {
                 if obj.len() != 1 {
                     return Err(EncodeError::OnlyOneKeyExpected(field.full_name.clone(), value.to_string()))
