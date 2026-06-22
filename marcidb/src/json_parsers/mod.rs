@@ -5,7 +5,8 @@ mod json_decoder;
 mod parse_where;
 mod parse_update_op;
 mod parsers;
-mod jsonb;
+// pub(crate) so the binary read encoder (a sibling of json_parsers) can decode a Json blob to text.
+pub(crate) mod jsonb;
 
 pub use crate::json_parsers::parse_query_op::{parse_query};
 pub use crate::json_parsers::parse_aggregate_op::{parse_aggregate,aggregate_to_json};

@@ -103,6 +103,8 @@ function readScalar(r: BinReader, t: string): any {
     case "f64": return r.f64();
     case "bool": return r.u8() !== 0;
     case "u8": return r.u8();
+    // A Json field arrives as its decoded JSON text (same framing as a string); parse it back to a value.
+    case "json": return JSON.parse(r.str());
     default: throw new Error(`marcidb: unknown binary type code '${t}'`);
   }
 }
