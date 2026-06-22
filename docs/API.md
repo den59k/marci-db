@@ -46,6 +46,7 @@ enum Role {
 | `Bool` / `Boolean` | `boolean` | |
 | `Byte` / `u8` | `number` | |
 | `DateTime` | `Date \| number` | stored as epoch millis |
+| `Json` | `JsonValue` | any JSON value, stored as a compact binary blob; filter by path — see [JSON fields](#json-fields) |
 | `T[]`, `T[n]` | `T[]` | primitive lists, fixed size optional |
 | `Byte[16] @format(uuid)` | `string` | uuid in JSON, 16 bytes in storage |
 | `Byte[] @format(hex)` | `string` | hex in JSON |
@@ -100,8 +101,61 @@ The result type is inferred from the select shape. Keys that are not selected do
 | `$startsWith`, `$includes` | strings | `{ name: { $startsWith: "Al" } }` |
 | `$some`, `$every`, `$none` | list relations | `{ posts: { $some: { title: "x" } } }` |
 | nested where | single relations | `{ author: { name: "Alice" } }` |
+| path filters | `Json` fields | `{ meta: { "address.city": "Tokyo" } }` — see [JSON fields](#json-fields) |
 
 The planner picks the most selective indexed condition (exact id → unique eq → eq → startsWith → range); all other conditions are re-checked per row, so the index choice never affects correctness.
+
+### JSON fields
+
+A `Json` field stores **any** JSON value (object, array, or scalar) in a compact binary format — use it for schemaless or variable-shape data without declaring a sub-schema.
+
+```
+model Event {
+    name    String
+    payload Json
+    meta    Json?
+}
+```
+
+Insert and update take the value directly; reads return it as-is (typed `JsonValue`):
+
+```ts
+await db.event.insert({ name: "signup", payload: { plan: "pro", seats: 5, tags: ["beta"] } })
+```
+
+**Filter by path.** Under a `Json` field, keys are dot-paths into the document and a bare value is shorthand for `$eq`:
+
+```ts
+await db.event.findMany({
+  name: true,
+  $where: {
+    payload: {
+      "plan": "pro",                 // = $eq
+      "seats": { $gt: 3 },
+      "tags": { $contains: "beta" },
+      "coupon": { $exists: false },
+    },
+  },
+})
+```
+
+Multiple paths under one field are ANDed; combine fields with `$or` / `$and` / `$not` as usual. A numeric path segment indexes an array (`"items.0.id"`).
+
+| Operator | Meaning |
+|---|---|
+| value / `$eq`, `$ne` (`$not`) | leaf equals / differs from a JSON value (a plain object compares the whole subtree) |
+| `$gt`, `$gte`, `$lt`, `$lte` | numeric, or lexicographic between two strings |
+| `$in`, `$notIn` | leaf is (not) one of a set |
+| `$startsWith`, `$includes` | string prefix / substring |
+| `$contains` | leaf is an array containing the value |
+| `$exists` | `true` / `false` — whether the path resolves |
+| `$type` | `"string"` \| `"number"` \| `"boolean"` \| `"object"` \| `"array"` \| `"null"` |
+
+Semantics for schemaless data: a **missing path or a type mismatch is simply "no match"** (e.g. `$gt` against a string leaf), except `$ne` / `$notIn`, which also match a missing path. Numbers compare by value (`5` equals `5.0`).
+
+To compare against the **whole** value instead of a path, put a `$`-operator (or a bare value) directly on the field: `{ payload: { $eq: { plan: "pro" } } }`.
+
+> JSON path filters run as a residual scan (no index in this version), though each row reads only the bytes along the path. Keys beginning with `$` are interpreted as operators, so they can't be addressed as paths.
 
 ### `$order`, `$limit`, `$skip`, `$cursor`
 

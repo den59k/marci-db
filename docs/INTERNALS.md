@@ -43,6 +43,8 @@ This buys the central performance property: **zero-copy field access**. `get_dat
 
 Values are stored big-endian, so numeric bytes are also directly comparable where the encoding allows (see below).
 
+A `Json` field occupies one body slot holding a self-contained **JSONB blob** — tagged values (`null`/`bool`/`int`/`uint`/`double`/`string`/`array`/`object`) with sorted-key and array offset tables. The blob is opaque to the row framing (variable-length, like a string), so it needed no change to the row format. Its internal offset tables are what let a `$where` path filter binary-search to a nested key and decode just that leaf, without walking the whole document. Over the binary read transport a `Json` field is sent as its decoded JSON text (the client `JSON.parse`s it), so one tested codec serves both sides.
+
 ### Enums with payload
 
 `enum Role { viewer, admin { sign String } }` stores the variant as a `u16` and **injects variant fields into the model itself** as ordinary body fields with an *existence condition* (`field exists iff role == admin`). Readers check the condition against the row bytes; writers skip fields whose condition fails. On update, switching the variant clears the other variants' fields (otherwise stale bytes would "resurrect" on switching back) and rejects writes into inactive variants.
