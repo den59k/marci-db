@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -51,7 +51,13 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           }
         },
         UpdateRelationOp::DisconnectAll => {
-          return Err(UpdateError::Unsupported("disconnecting a relation (set null / $connect on a single ref) is not supported yet"));
+          // Break the single-ref relation without deleting the related object. The forward FK (body
+          // field) is already nulled/overwritten by the `update_fields` pass above; here we only tear
+          // down the index entries for the previously-connected object. `data` still holds the
+          // pre-update body, so the old target id is recoverable.
+          let ids: Vec<Vec<u8>> = get_id_from_ref_info(tx, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema)?
+            .into_iter().collect();
+          delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
         },
         UpdateRelationOp::Create(write_op) => {
           process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
@@ -73,13 +79,20 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
             process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
           }
         },
-        UpdateRelationOp::RemoveItems(_items, _delete_op) =>
-          return Err(UpdateError::Unsupported("$remove of specific items from an owned relation list is not supported yet")),
+        UpdateRelationOp::RemoveItems(item_ids, delete_op) => {
+          // $remove on an owned (autoinsert) list: delete the named children. The ids are full storage
+          // keys (same form Connect/Disconnect use); a missing id makes `process_delete` a no-op.
+          let mut tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
+          for item_id in item_ids {
+            process_delete(tx, item_id, update_ref.st, delete_op, &db.schema, &db.providers, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
+          }
+        },
         UpdateRelationOp::Connect(item_ids) => {
           write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?
         },
-        UpdateRelationOp::Disconnect(_items) =>
-          return Err(UpdateError::Unsupported("$remove (disconnect specific items) from a relation list is not supported yet")),
+        UpdateRelationOp::Disconnect(item_ids) => {
+          delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
+        },
     }
   }
 

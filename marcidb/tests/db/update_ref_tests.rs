@@ -173,12 +173,10 @@ fn update_ref_connect_test() {
 }
 
 
-/// Not-yet-implemented relation operations → a typed `UpdateError::Unsupported`,
-/// not a `todo!()` panic. The transaction rolls back, so the cases are independent
+/// `DisconnectAll` (set-null / `$connect` on a single ref) and `Disconnect` (`$remove` on a ref list)
+/// break relations without deleting the related objects, tearing down the index entries on both sides.
 #[test]
-fn update_unsupported_relation_ops() {
-  use marcidb::{UpdateError, parse_id, parse_update};
-
+fn update_disconnect_relation_ops() {
   let schema_str = "
     model User {
       name        String
@@ -197,19 +195,45 @@ fn update_unsupported_relation_ops() {
   let db: MarciDB = MarciDB::new(schema_str, dir.path().to_str().unwrap());
 
   let user_a = insert_data(&db, "User", json!({ "name": "Alice" }));
-  let post = insert_data(&db, "Post", json!({ "title": "Hi", "author": &user_a, "viewers": [ &user_a ] }));
+  let user_b = insert_data(&db, "User", json!({ "name": "Bob" }));
+  let post = insert_data(&db, "Post", json!({ "title": "Hi", "author": &user_a, "viewers": [ &user_a, &user_b ] }));
 
-  let entity = db.get_model("Post").unwrap();
-  let post_id = parse_id(&db.schema, entity, &post).unwrap();
+  assert_eq!(db.count_dev("User.posts->Post"), 1);
+  assert_eq!(db.count_dev("Post.viewers->User"), 2);
+  assert_eq!(db.count_dev("User.postsView->Post"), 2);
 
-  let cases = [
-    json!({ "author": { "$connect": &user_a } }), // DisconnectAll
-    json!({ "author": null }),                     // DisconnectAll
-    json!({ "viewers": { "$remove": [ &user_a ] } }), // Disconnect
-  ];
-  for upd in cases {
-    let op = parse_update(&db.schema, entity, &upd).unwrap();
-    let res = db.update_item(entity, &post_id, &op);
-    assert!(matches!(res, Err(UpdateError::Unsupported(_))), "upd {} -> {:?}", upd, res);
+  // `$connect` on a single ref: DisconnectAll tears down the old author entry, Connect writes the new one.
+  {
+    update_data(&db, "Post", &post, json!({ "author": { "$connect": &user_b } }));
+    assert_eq!(db.count_dev("User.posts->Post"), 1);
+    assert_eq!(
+      get_data(&db, "Post", json!({ "title": true, "author": { "name": true } })),
+      json!([ { "title": "Hi", "author": { "name": "Bob" } } ])
+    );
+    assert_eq!(
+      get_data(&db, "User", json!({ "name": true, "posts": { "title": true }, "$where": { "name": "Alice" } })),
+      json!([ { "name": "Alice", "posts": [] } ])
+    );
+  }
+
+  // Set-null on a single ref: DisconnectAll removes the reverse index entry, the FK body field goes null.
+  {
+    update_data(&db, "Post", &post, json!({ "author": null }));
+    assert_eq!(db.count_dev("User.posts->Post"), 0);
+    assert_eq!(
+      get_data(&db, "Post", json!({ "title": true, "author": { "name": true } })),
+      json!([ { "title": "Hi", "author": null } ])
+    );
+  }
+
+  // `$remove` on a ref list: Disconnect drops both sides of the index for the given item, leaving Bob.
+  {
+    update_data(&db, "Post", &post, json!({ "viewers": { "$remove": [ &user_a ] } }));
+    assert_eq!(db.count_dev("Post.viewers->User"), 1);
+    assert_eq!(db.count_dev("User.postsView->Post"), 1);
+    assert_eq!(
+      get_data(&db, "Post", json!({ "title": true, "viewers": { "name": true } })),
+      json!([ { "title": "Hi", "viewers": [ { "name": "Bob" } ] } ])
+    );
   }
 }
