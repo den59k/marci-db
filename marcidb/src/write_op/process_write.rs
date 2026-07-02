@@ -159,6 +159,33 @@ pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Sch
   Ok(())
 }
 
+/// The inverse of [`write_ref_indexes`]: tears down the index entries that link `id` to `ids`,
+/// on both the forward binding and the opposite (reverse-field) binding. Used to disconnect a
+/// relation without deleting the related objects. Deleting a missing entry is a harmless no-op.
+pub fn delete_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &[Vec<u8>]) -> Result<(), WriteIndexesError> {
+  if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+    let mut tree = tx.require_tree(tree_name.as_bytes())?;
+    for item_id in ids {
+      tree.delete(&[ id, item_id.as_slice() ].concat())?;
+    }
+  }
+
+  if let Some(ref_field_idx) = ref_info.rev_field_idx {
+    let rev_binding = match &schema.models[ref_info.model_index].fields[ref_field_idx].ty {
+      FieldType::Ref(ref_info) | FieldType::RefList(ref_info) => &ref_info.binding,
+      _ => panic!("Trying to disconnect from non-Ref field")
+    };
+    if let RefBinding::IndexTree(tree_name) = rev_binding {
+      let mut tree = tx.require_tree(tree_name.as_bytes())?;
+      for item_id in ids {
+        tree.delete(&[ item_id.as_slice(), id ].concat())?;
+      }
+    }
+  }
+
+  Ok(())
+}
+
 fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>, check_unique: bool) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
     let mut tree = tx.require_tree(tree_name.as_bytes())?;

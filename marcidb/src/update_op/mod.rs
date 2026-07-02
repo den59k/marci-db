@@ -32,7 +32,7 @@ pub enum UpdateError {
   WriteIndexesError(WriteIndexesError),
   /// A live `@custom` index hook (e.g. full-text `on_update`) failed while maintaining the index.
   IndexError(ProviderError),
-  /// The relation operation is not implemented yet (disconnect of a single relation, $remove of list items)
+  /// The relation operation is not implemented yet.
   Unsupported(&'static str),
   Storage(StorageError)
 }

@@ -1,7 +1,7 @@
 mod process_write;
 use crate::{Field, schema::{Entity, FieldDefault, FieldIndex, RefInfo}};
 
-pub use process_write::{process_write,InsertError,write_ref_indexes,WriteIndexesError};
+pub use process_write::{process_write,InsertError,write_ref_indexes,delete_ref_indexes,WriteIndexesError};
 
 #[derive(Debug)]
 pub struct WriteOp<'a> {
