@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, num_utils::NumberValue, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, Where}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
+use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, Where}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
 
 /// Parses a JSON object into a where condition
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,EncodeError> {
@@ -39,8 +39,12 @@ pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value
     let Some(field_val) = where_obj.get(&field.name) else {
         continue;
     };
-    let field_compare = parse_field_compare(schema, field, field_val)?;
-    conditions.push(Where::Field(field, field_compare));
+    // A field may carry several operators (`{ $gte: 18, $lt: 65 }`); they are ANDed, so each becomes its
+    // own condition. The planner recognises a lower/upper pair on one field and fuses it into a single
+    // bounded index range — see `generate_prefix_scored`.
+    for field_compare in parse_field_compare(schema, field, field_val)? {
+      conditions.push(Where::Field(field, field_compare));
+    }
   }
   
   return match conditions.len() {
@@ -69,14 +73,16 @@ fn collect_where_conditions<'a>(schema: &'a Schema, entity: &'a Entity, json_val
   }
 }
 
-fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) -> Result<FieldCompare<'a>,EncodeError> {
+/// Parses one field's condition into the list of comparisons it implies — several operators on the same
+/// field are ANDed. Relation and JSON-path conditions always yield exactly one.
+fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) -> Result<Vec<FieldCompare<'a>>,EncodeError> {
   match &field.ty {
     FieldType::Ref(ref_info) => {
       let entity = &schema.models[ref_info.model_index];
       let prefix = get_prefix_key(&ref_info.binding, field);
 
       if value.is_null() {
-        return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::NotExists))
+        return Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::NotExists)])
       }
       let Some(obj) = value.as_object() else {
         return Err(EncodeError::type_mismatch(field, "object"))
@@ -86,16 +92,16 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
         let (key, value) = obj.iter().next().unwrap();
         match key.as_str() {
           "$ne" | "$not" => {
-            if value.is_null() { return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Exists))  }
+            if value.is_null() { return Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::Exists)])  }
             let filter = Box::new(parse_where(schema, entity, value)?);
-            return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Ne(filter)))
+            return Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::Ne(filter))])
           }
           _ => {}
         }
       }
 
       let filter = Box::new(parse_where(schema, entity, value)?);
-      return Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Eq(filter)))
+      return Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::Eq(filter))])
     },
     FieldType::RefList(ref_info) => {
       let Some(obj) = value.as_object() else {
@@ -109,9 +115,9 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
       let prefix = get_prefix_key(&ref_info.binding, field);
       let filter = Box::new(parse_where(schema, entity, value)?);
       return match key.as_str() {
-        "$every" => Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Every(filter))),
-        "$some" => Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::Some(filter))),
-        "$none" => Ok(FieldCompare::Ref(entity, prefix, FieldCompareRef::None(filter))),
+        "$every" => Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::Every(filter))]),
+        "$some" => Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::Some(filter))]),
+        "$none" => Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::None(filter))]),
         _ => Err(EncodeError::UnsupportedOperation(key.clone()))
       };
     },
@@ -130,83 +136,68 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
         ));
       }
       if has_path {
-        return Ok(FieldCompare::Json(parse_json_filters(obj)?));
+        return Ok(vec![FieldCompare::Json(parse_json_filters(obj)?)]);
       }
     }
   }
 
-  if value.is_null() { return Ok(FieldCompare::EqNull) }
+  if value.is_null() { return Ok(vec![FieldCompare::EqNull]) }
 
   if let Some(obj) = value.as_object() {
-    if obj.len() != 1 {
+    if obj.is_empty() {
       return Err(EncodeError::OnlyOneKeyExpected(field.full_name.clone(), value.to_string()))
     }
-    let (key, value) = obj.iter().next().unwrap();
-
-    match key.as_str() {
-      "$eq" => {
-        if value.is_null() { return Ok(FieldCompare::EqNull) }
-        Ok(FieldCompare::Eq(parse_field_value_binary(field, value)?))
-      },
-      "$ne" | "$not" => {
-        if value.is_null() { return Ok(FieldCompare::NeNull)  }
-        Ok(FieldCompare::Ne(parse_field_value_binary(field, value)?))
-      },
-      "$gt" => Ok(FieldCompare::Gt(
-        parse_field_value_num(field, value)?
-      )),
-      "$gte" => Ok(FieldCompare::Gte(
-        parse_field_value_num(field, value)?
-      )),
-      "$lt" => Ok(FieldCompare::Lt(
-        parse_field_value_num(field, value)?
-      )),
-      "$lte" => Ok(FieldCompare::Lte(
-        parse_field_value_num(field, value)?
-      )),
-      "$between" => {
-        let (min, max) = parse_field_value_between(field, value)?;
-        Ok(FieldCompare::Between(min, max))
-      },
-      "$in" => {
-        let (buf, has_null) = parse_field_value_in(field, value)?;
-        Ok(FieldCompare::In(buf, has_null))
-      },
-      "$notIn" => {
-        let (buf, has_null) = parse_field_value_in(field, value)?;
-        Ok(FieldCompare::NotIn(buf, has_null))
-      },
-      "$startsWith" => {
-        let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
-        Ok(FieldCompare::StringStartsWith(value.as_bytes().to_vec()))
-      },
-      "$includes" => {
-        let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
-        Ok(FieldCompare::StringIncludes(value.as_bytes().to_vec()))
-      },
-      // Module-index search: hand the raw payload to the provider (resolved during query execution).
-      // The field must carry a `@custom` index; that (and payload validity) is checked at execution.
-      "$near" | "$search" => Ok(FieldCompare::Search(value.clone())),
-      _ => return Err(EncodeError::UnsupportedOperation(key.clone())),
-    }
+    // Every operator on the field is a separate condition; they are ANDed, so `{ $gte: a, $lt: b }`
+    // is a half-open range and `{ $gte: a, $ne: c }` punches a hole in one.
+    obj.iter().map(|(key, value)| parse_scalar_operator(field, key, value)).collect()
   } else {
-    Ok(FieldCompare::Eq(parse_field_value_binary(field, value)?))
+    Ok(vec![FieldCompare::Eq(parse_field_value_binary(field, value)?)])
   }
 }
 
-/// `$between: [min, max]` — both bounds inclusive. A reversed pair (`min > max`) isn't rejected here;
-/// it simply matches nothing, the same as `$gte`+`$lte` with crossed bounds would.
-fn parse_field_value_between<'a>(field: &'a Field, v: &Value) -> Result<(NumberValue, NumberValue), EncodeError> {
-  let Some(items) = v.as_array() else { return Err(EncodeError::NotAnArray) };
-  if items.len() != 2 {
-    return Err(EncodeError::UnsupportedOperation(
-      "$between expects exactly two values: [min, max]".to_string(),
-    ));
+fn parse_scalar_operator<'a>(field: &'a Field, key: &str, value: &Value) -> Result<FieldCompare<'a>, EncodeError> {
+  match key {
+    "$eq" => {
+      if value.is_null() { return Ok(FieldCompare::EqNull) }
+      Ok(FieldCompare::Eq(parse_field_value_binary(field, value)?))
+    },
+    "$ne" | "$not" => {
+      if value.is_null() { return Ok(FieldCompare::NeNull)  }
+      Ok(FieldCompare::Ne(parse_field_value_binary(field, value)?))
+    },
+    "$gt" => Ok(FieldCompare::Gt(
+      parse_field_value_num(field, value)?
+    )),
+    "$gte" => Ok(FieldCompare::Gte(
+      parse_field_value_num(field, value)?
+    )),
+    "$lt" => Ok(FieldCompare::Lt(
+      parse_field_value_num(field, value)?
+    )),
+    "$lte" => Ok(FieldCompare::Lte(
+      parse_field_value_num(field, value)?
+    )),
+    "$in" => {
+      let (buf, has_null) = parse_field_value_in(field, value)?;
+      Ok(FieldCompare::In(buf, has_null))
+    },
+    "$notIn" => {
+      let (buf, has_null) = parse_field_value_in(field, value)?;
+      Ok(FieldCompare::NotIn(buf, has_null))
+    },
+    "$startsWith" => {
+      let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
+      Ok(FieldCompare::StringStartsWith(value.as_bytes().to_vec()))
+    },
+    "$includes" => {
+      let Some(value) = value.as_str() else { return Err(EncodeError::type_mismatch(field, "string")) };
+      Ok(FieldCompare::StringIncludes(value.as_bytes().to_vec()))
+    },
+    // Module-index search: hand the raw payload to the provider (resolved during query execution).
+    // The field must carry a `@custom` index; that (and payload validity) is checked at execution.
+    "$near" | "$search" => Ok(FieldCompare::Search(value.clone())),
+    _ => Err(EncodeError::UnsupportedOperation(key.to_string())),
   }
-  Ok((
-    parse_field_value_num(field, &items[0])?,
-    parse_field_value_num(field, &items[1])?,
-  ))
 }
 
 // For Eq comparisons the binary representation of the data is enough
@@ -244,29 +235,33 @@ fn parse_field_value_in(field: &Field, value: &Value) -> Result<(Vec<Vec<u8>>,bo
 
 /// Parses the path-mode object of a JSON filter: each entry is `"<dot.path>": <condition>`, all ANDed.
 fn parse_json_filters(obj: &serde_json::Map<String, Value>) -> Result<Vec<JsonFilter>, EncodeError> {
-  obj.iter()
-    .map(|(path, cond)| Ok(JsonFilter {
-      path: path.split('.').map(str::to_string).collect(),
-      op: parse_json_op(cond)?,
-    }))
-    .collect()
+  let mut filters = vec![];
+  for (path, cond) in obj.iter() {
+    let path: Vec<String> = path.split('.').map(str::to_string).collect();
+    // As with scalar fields, several operators on one path are ANDed
+    for op in parse_json_op(cond)? {
+      filters.push(JsonFilter { path: path.clone(), op });
+    }
+  }
+  Ok(filters)
 }
 
 /// A condition on a single path. A single-`$`-key object is an operator; any other value (scalar, array, or
 /// a plain object) is a literal `$eq` against the leaf (so a plain object means whole-subtree equality).
-fn parse_json_op(cond: &Value) -> Result<JsonOp, EncodeError> {
+fn parse_json_op(cond: &Value) -> Result<Vec<JsonOp>, EncodeError> {
   if let Some(obj) = cond.as_object() {
     if obj.keys().any(|k| k.starts_with('$')) {
-      if obj.len() != 1 {
+      // A mix of operator and non-operator keys is ambiguous: the non-`$` ones would read as a literal
+      // object to compare the whole subtree against, which is not what writing them together implies.
+      if obj.keys().any(|k| !k.starts_with('$')) {
         return Err(EncodeError::UnsupportedOperation(
-          "a JSON path condition takes exactly one operator".to_string(),
+          "a JSON path condition cannot mix operators with plain keys".to_string(),
         ));
       }
-      let (key, v) = obj.iter().next().unwrap();
-      return parse_json_operator(key, v);
+      return obj.iter().map(|(key, v)| parse_json_operator(key, v)).collect();
     }
   }
-  Ok(JsonOp::Eq(cond.clone()))
+  Ok(vec![JsonOp::Eq(cond.clone())])
 }
 
 fn parse_json_operator(key: &str, v: &Value) -> Result<JsonOp, EncodeError> {
@@ -280,15 +275,6 @@ fn parse_json_operator(key: &str, v: &Value) -> Result<JsonOp, EncodeError> {
     "$gte" => JsonOp::Gte(v.clone()),
     "$lt" => JsonOp::Lt(v.clone()),
     "$lte" => JsonOp::Lte(v.clone()),
-    "$between" => {
-      let items = as_arr(v)?;
-      if items.len() != 2 {
-        return Err(EncodeError::UnsupportedOperation(
-          "$between expects exactly two values: [min, max]".to_string(),
-        ));
-      }
-      JsonOp::Between(items[0].clone(), items[1].clone())
-    },
     "$in" => JsonOp::In(as_arr(v)?),
     "$notIn" => JsonOp::NotIn(as_arr(v)?),
     "$startsWith" => JsonOp::StringStartsWith(as_str(v)?),
@@ -359,7 +345,7 @@ use crate::{json_parsers::{parse_where::parse_where, parsers::EncodeError}, num_
   }
 
   #[test]
-  fn between_where_test() {
+  fn multi_operator_where_test() {
     let schema = parse_schema("
       model User {
           name        String
@@ -368,34 +354,42 @@ use crate::{json_parsers::{parse_where::parse_where, parsers::EncodeError}, num_
     ");
     let user_model = &schema.models[0];
 
-    // A lone condition collapses to a bare Where::Field
-    let where_op = parse_where(&schema, user_model, &json!({ "age": { "$between": [18, 65] } })).unwrap();
-    let Where::Field(_, compare) = &where_op else { panic!("Wrong where_op type") };
-    assert_matches!(compare, FieldCompare::Between(NumberValue::UInt64(18), NumberValue::UInt64(65)));
+    // Several operators on one field become several ANDed conditions on that field
+    let where_op = parse_where(&schema, user_model, &json!({ "age": { "$gte": 18, "$lt": 65 } })).unwrap();
+    let Where::And(ops) = where_op else { panic!("Wrong where_op type") };
+    assert_eq!(ops.len(), 2);
+    let compares: Vec<_> = ops.iter().map(|op| {
+      let Where::Field(field, compare) = op else { panic!("Wrong where_op type") };
+      assert_eq!(field.name, "age");
+      compare
+    }).collect();
+    assert_matches!(compares[0], FieldCompare::Gte(NumberValue::UInt64(18)));
+    assert_matches!(compares[1], FieldCompare::Lt(NumberValue::UInt64(65)));
 
-    // Needs exactly two bounds
-    for bad in [json!([18]), json!([18, 65, 99]), json!([])] {
-      assert_matches!(
-        parse_where(&schema, user_model, &json!({ "age": { "$between": bad } })),
-        Err(EncodeError::UnsupportedOperation(_))
-      );
-    }
-
-    // The bounds still have to be numbers
+    // Each operator is still validated on its own
     assert_matches!(
-      parse_where(&schema, user_model, &json!({ "age": { "$between": [18, "x"] } })),
+      parse_where(&schema, user_model, &json!({ "age": { "$gte": 18, "$lt": "x" } })),
       Err(EncodeError::TypeMismatch { .. })
     );
-
-    // …and $between isn't available on a non-numeric field
     assert_matches!(
-      parse_where(&schema, user_model, &json!({ "name": { "$between": [1, 2] } })),
+      parse_where(&schema, user_model, &json!({ "age": { "$gte": 18, "$bogus": 1 } })),
+      Err(EncodeError::UnsupportedOperation(_))
+    );
+    // Ordering operators remain numeric-only
+    assert_matches!(
+      parse_where(&schema, user_model, &json!({ "name": { "$gte": 1, "$lt": 2 } })),
       Err(EncodeError::NotNumber(_))
+    );
+
+    // An empty condition object selects nothing in particular, so it is rejected rather than
+    // silently matching every row
+    assert_matches!(
+      parse_where(&schema, user_model, &json!({ "age": {} })),
+      Err(EncodeError::OnlyOneKeyExpected(_, _))
     );
   }
 
-  /// A field takes exactly one operator, so the intuitive two-sided form is rejected outright —
-  /// this is the case `$between` exists to serve (the alternative being an explicit `$and`).
+  /// The compact two-sided form and the explicit `$and` spelling are both accepted.
   #[test]
   fn two_sided_range_on_one_field_test() {
     let schema = parse_schema("
@@ -406,16 +400,8 @@ use crate::{json_parsers::{parse_where::parse_where, parsers::EncodeError}, num_
     ");
     let event_model = &schema.models[0];
 
-    assert_matches!(
-      parse_where(&schema, event_model, &json!({
-        "startsAt": { "$gte": "2026-01-01T00:00:00.0Z", "$lt": "2026-02-01T00:00:00.0Z" }
-      })),
-      Err(EncodeError::OnlyOneKeyExpected(_, _))
-    );
-
-    // The two supported spellings both parse
     parse_where(&schema, event_model, &json!({
-      "startsAt": { "$between": ["2026-01-01T00:00:00.0Z", "2026-02-01T00:00:00.0Z"] }
+      "startsAt": { "$gte": "2026-01-01T00:00:00.0Z", "$lt": "2026-02-01T00:00:00.0Z" }
     })).unwrap();
 
     parse_where(&schema, event_model, &json!({

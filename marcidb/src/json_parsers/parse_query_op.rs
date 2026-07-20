@@ -394,6 +394,7 @@ mod tests {
     let schema = parse_schema("
       model User {
           age         UInt      @index
+          score       UInt      @index
           email       String    @unique
           city        String    @index
       }
@@ -407,6 +408,69 @@ mod tests {
       })).unwrap();
       match &q.prefix_key {
         Some(PrefixKey::IndexRange { tree_name, .. }) => assert_eq!(tree_name.as_str(), "index_User.email"),
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // A lower and an upper bound on one indexed field fuse into a range bounded on both sides,
+    // rather than scanning from one bound to the end of the index
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "age": { "$gte": 10, "$lt": 20 } }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, start, end, .. }) => {
+          assert_eq!(tree_name.as_str(), "index_User.age");
+          assert!(start.is_some() && end.is_some(), "expected a bounded range, got {:?}..{:?}", start, end);
+        },
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // The same pair written out under $and fuses identically
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "$and": [ { "age": { "$gte": 10 } }, { "age": { "$lt": 20 } } ] }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { start, end, .. }) => {
+          assert!(start.is_some() && end.is_some(), "expected a bounded range, got {:?}..{:?}", start, end);
+        },
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // A bounded range beats a half-open one on another indexed field
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "age": { "$gte": 10, "$lt": 20 }, "score": { "$gte": 5 } }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, .. }) => assert_eq!(tree_name.as_str(), "index_User.age"),
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // …but $startsWith still outranks it, as it does a half-open range
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "age": { "$gte": 10, "$lt": 20 }, "city": { "$startsWith": "O" } }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { tree_name, .. }) => assert_eq!(tree_name.as_str(), "index_User.city"),
+        _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
+      }
+    }
+
+    // A lone bound still leaves the far side open
+    {
+      let q = parse_query(&schema, user_model, &json!({
+        "age": true, "$where": { "age": { "$gte": 10 } }
+      })).unwrap();
+      match &q.prefix_key {
+        Some(PrefixKey::IndexRange { start, end, .. }) => {
+          assert!(start.is_some() && end.is_none(), "expected a half-open range, got {:?}..{:?}", start, end);
+        },
         _ => panic!("Expected IndexRange, got {:?}", q.prefix_key)
       }
     }

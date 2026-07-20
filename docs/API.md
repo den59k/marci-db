@@ -98,13 +98,20 @@ The result type is inferred from the select shape. Keys that are not selected do
 | `null` / `{ $not: null }` | nullable | `{ email: null }` |
 | `$in`, `$notIn` | all | `{ age: { $in: [20, 30] } }` |
 | `$gt`, `$gte`, `$lt`, `$lte` | numbers, DateTime | `{ age: { $gt: 18 } }` |
-| `$between` | numbers, DateTime | `{ age: { $between: [18, 65] } }` — inclusive on both ends |
 | `$startsWith`, `$includes` | strings | `{ name: { $startsWith: "Al" } }` |
 | `$some`, `$every`, `$none` | list relations | `{ posts: { $some: { title: "x" } } }` |
 | nested where | single relations | `{ author: { name: "Alice" } }` |
 | path filters | `Json` fields | `{ meta: { "address.city": "Tokyo" } }` — see [JSON fields](#json-fields) |
 
-A field takes exactly one operator, so a two-sided range is either `$between` or two conditions under `$and`. Prefer `$between`: on an indexed field it plans as a single bounded index range, while `$and` of `$gte` + `$lte` scans the half-open range of whichever bound the planner picks and re-checks the other per row.
+**Operators on one field are ANDed**, so a two-sided range is just both bounds together:
+
+```ts
+$where: { age: { $gte: 18, $lt: 65 } }        // 18 ≤ age < 65
+$where: { age: { $gte: 18, $ne: 30 } }        // ≥ 18, but not exactly 30
+$where: { startsAt: { $gte: from, $lt: to } } // DateTime works the same way
+```
+
+On an indexed numeric field the planner fuses a lower and an upper bound into a **single bounded index scan** instead of scanning from one bound to the end of the index. The equivalent `$and` spelling is fused the same way, so `{ age: { $gte: 18, $lt: 65 } }` and `$and: [{ age: { $gte: 18 } }, { age: { $lt: 65 } }]` plan identically — the compact form is just shorter.
 
 ### Combining conditions — `$and` / `$or` / `$not`
 
@@ -123,9 +130,9 @@ $where: { $and: [{ capacity: { $gte: 2 } }], capacity: 999 }   // ✗ `capacity:
 $where: { $and: [{ capacity: { $gte: 2 } }, { capacity: 999 }] } // ✓
 ```
 
-The generated types reject both this and two operators on one field, so neither compiles. Combinators nest freely and work inside a nested relation filter (`{ trainer: { $or: [...] } }`) as well as at the top level.
+The generated types reject this, so it doesn't compile. Combinators nest freely and work inside a nested relation filter (`{ trainer: { $or: [...] } }`) as well as at the top level.
 
-The planner picks the most selective indexed condition (exact id → unique eq → eq → startsWith → `$between` → range); all other conditions are re-checked per row, so the index choice never affects correctness.
+The planner picks the most selective indexed condition (exact id → unique eq → eq → startsWith → two-sided range → half-open range); all other conditions are re-checked per row, so the index choice never affects correctness.
 
 ### JSON fields
 
@@ -161,13 +168,12 @@ await db.event.findMany({
 })
 ```
 
-Multiple paths under one field are ANDed; combine fields with `$or` / `$and` / `$not` as usual. A numeric path segment indexes an array (`"items.0.id"`).
+Multiple paths under one field are ANDed, as are multiple operators on one path (`{ "seats": { $gte: 2, $lt: 8 } }`); combine fields with `$or` / `$and` / `$not` as usual. A numeric path segment indexes an array (`"items.0.id"`).
 
 | Operator | Meaning |
 |---|---|
 | value / `$eq`, `$ne` (`$not`) | leaf equals / differs from a JSON value (a plain object compares the whole subtree) |
 | `$gt`, `$gte`, `$lt`, `$lte` | numeric, or lexicographic between two strings |
-| `$between` | `[min, max]`, inclusive on both ends — same numeric / string rules |
 | `$in`, `$notIn` | leaf is (not) one of a set |
 | `$startsWith`, `$includes` | string prefix / substring |
 | `$contains` | leaf is an array containing the value |
