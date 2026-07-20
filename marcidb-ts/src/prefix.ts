@@ -45,11 +45,41 @@ type RefListUpdateStruct<I,U> = {
   "$set"?: I[]
 }
 
-type WhereValue<T> = T | { "$and": T[] } | { "$or": T[] } | { "$not": T }
+// Marks a set of keys as forbidden. Needed because TypeScript's excess-property check against a *union*
+// permits any key present in some member: a plain union of single-key objects accepts `{ $gte, $lt }`,
+// and a plain `T | { $and: T[] }` accepts a field sitting next to `$and`. Both are runtime errors or
+// silently-wrong queries, so every branch below spells out the keys it excludes.
+type Never<T> = { [K in keyof T]?: never }
 
-type CompareValue<T> = T | { "$eq": T } | { "$not": T } | { "$in": T[] } | { "$notIn": T[] }
-type CompareNumValue<T> = { "$gt": T } | { "$gte": T } | { "$lt": T } | { "$lte": T } | { "$between": [T, T] }
-type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
+// Every field-level operator, so each one can exclude all the others. The engine accepts exactly one
+// operator per field and errors with OnlyOneKeyExpected otherwise.
+type FieldOps = {
+  "$eq": unknown, "$ne": unknown, "$not": unknown, "$in": unknown, "$notIn": unknown,
+  "$gt": unknown, "$gte": unknown, "$lt": unknown, "$lte": unknown, "$between": unknown,
+  "$startsWith": unknown, "$includes": unknown,
+  "$every": unknown, "$some": unknown, "$none": unknown,
+  "$near": unknown, "$search": unknown
+}
+type Only<K extends keyof FieldOps, V> = { [P in K]: V } & Never<Omit<FieldOps, K>>
+
+// A `$where` is either a set of field conditions or exactly one boolean combinator wrapping more of the
+// same. Conditions belong *inside* the array: the engine returns on the first combinator it finds, so a
+// sibling key next to `$and`/`$or` would be silently ignored — here it is a type error instead.
+type WhereValue<T> =
+  | (T & Never<{ "$and": unknown, "$or": unknown, "$not": unknown }>)
+  | ({ "$and": WhereValue<T>[] } & Never<T> & Never<{ "$or": unknown, "$not": unknown }>)
+  | ({ "$or":  WhereValue<T>[] } & Never<T> & Never<{ "$and": unknown, "$not": unknown }>)
+  | ({ "$not": WhereValue<T> }   & Never<T> & Never<{ "$and": unknown, "$or": unknown }>)
+
+type CompareValue<T> = T | Only<"$eq", T> | Only<"$not", T> | Only<"$in", T[]> | Only<"$notIn", T[]>
+type CompareNumValue<T> = Only<"$gt", T> | Only<"$gte", T> | Only<"$lt", T> | Only<"$lte", T> | Only<"$between", [T, T]>
+type CompareStrValue = Only<"$includes", string> | Only<"$startsWith", string>
+
+// A numeric field can also be updated in place: `{ balance: { $increment: -800 } }` reads, adds and writes
+// inside the update's own transaction, so it is atomic against concurrent writers. The delta is signed, so
+// decrementing requires a signed field (`Int`) — a negative delta on an unsigned field is rejected.
+// Incrementing a field that is currently null is a no-op.
+type UpdateNumValue = { "$increment": number }
 
 // Filtering into a Json field by dot-path. Keys are JSON paths (e.g. "address.city", "items.0"); a numeric
 // segment indexes an array. A bare value is shorthand for `$eq` (a plain object matches the whole subtree).
@@ -66,14 +96,14 @@ type JsonCondition =
   | { "$exists": boolean }
   | { "$type": JsonType }
 type JsonPathWhere = { [path: string]: JsonCondition }
-type CompareRefValue<T> = T | { "$not": T }
-type CompareRefListValue<T> = { "$every": T } | { "$some": T } | { "$none": T }
+type CompareRefValue<T> = T | Only<"$not", T>
+type CompareRefListValue<T> = Only<"$every", T> | Only<"$some", T> | Only<"$none", T>
 
 // Module-index search (@custom): $near/$search hand a raw payload to the field's index provider.
 type VectorSearch = { vector: number[], k?: number, threshold?: number }      // @custom(vector, …)
 type FullTextSearch = string | { query: string, limit?: number }             // @custom(fulltext, …)
 type CustomSearch = Record<string, any>                                       // other providers
-type CustomSearchValue<P> = { "$near": P } | { "$search": P }
+type CustomSearchValue<P> = Only<"$near", P> | Only<"$search", P>
 
 // Aggregate result: only the requested keys; an empty set yields null (except count)
 type AggregateResult<TModel, T> =

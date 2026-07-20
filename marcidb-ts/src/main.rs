@@ -26,6 +26,12 @@ fn get_model_where_name(model: &Entity) -> String {
   format!("{}Model$Where", model.name.replace('.', "_"))
 }
 
+/// The bare field conditions. `$Where` itself is this wrapped in [`WhereValue`], which adds `$and`/`$or`/
+/// `$not` and makes them mutually exclusive with the fields.
+fn get_model_where_fields_name(model: &Entity) -> String {
+  format!("{}Model$WhereFields", model.name.replace('.', "_"))
+}
+
 fn get_model_order_name(model: &Entity) -> String {
   format!("{}Model$Order", model.name.replace('.', "_"))
 }
@@ -394,6 +400,10 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
       };
       format!("  {}?: {}{}", field.name, to_update, field_nullable)
     },
+    // Numeric fields also take an atomic in-place `$increment` (see `UpdateNumValue`).
+    FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
+      format!("  {}?: {} | UpdateNumValue{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
+    },
     _ => format!("  {}?: {}{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
   }
 }
@@ -575,13 +585,15 @@ fn generate_types(input: &str, output_dir: &str) {
     }
     lines.push("}".to_string());
 
-    // Fill in the fields for Where
-    lines.push(format!("type {} = {{", get_model_where_name(model)));
+    // Fill in the fields for Where. The boolean combinators come from `WhereValue`, which also forbids
+    // mixing them with sibling field conditions (the engine ignores such siblings).
+    lines.push(format!("type {} = {{", get_model_where_fields_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
       lines.push(get_field_where_str(field, &schema));
     }
     lines.push("}".to_string());
+    lines.push(format!("type {} = WhereValue<{}>", get_model_where_name(model), get_model_where_fields_name(model)));
 
     // Fill in the fields for Order (mirror of parse_order: key fields + primitives/enums from body)
     lines.push(format!("type {} = {{", get_model_order_name(model)));

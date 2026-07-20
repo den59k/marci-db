@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::{Field, num_utils::NumberValue, schema::{Entity, EnumInfo, FieldLocation, FieldType, PrimitiveFieldType, Schema}};
+use crate::{Field, num_utils::{NumberDelta, NumberValue}, schema::{Entity, EnumInfo, FieldLocation, FieldType, PrimitiveFieldType, Schema}};
 
 /// Encodes a single value and appends it to the end of `dst`
 pub fn encode_primitive_value(dst: &mut Vec<u8>, field: &Field, ty: &PrimitiveFieldType, v: &Value) -> Result<(), EncodeError> {
@@ -250,6 +250,25 @@ pub fn parse_field_value_num<'a>(field: &'a Field, v: &Value) -> Result<NumberVa
           .map(|val| NumberValue::Float(val)),
         PrimitiveFieldType::Double => as_f64(v, field)
           .map(|val| NumberValue::Double(val)),
+        _ => Err(EncodeError::NotNumber(field.full_name.clone()))
+      }
+    },
+    _ => Err(EncodeError::NotNumber(field.full_name.clone()))
+  }
+}
+
+/// Parses the delta of an `$increment`. Unlike [`parse_field_value_num`] the delta is signed even on an
+/// unsigned field, so a `UInt` column can be decremented; the result is range-checked when it is applied.
+/// A `DateTime` delta is a plain number of milliseconds, not a date.
+pub fn parse_field_value_delta<'a>(field: &'a Field, v: &Value) -> Result<NumberDelta,EncodeError> {
+  match &field.ty {
+    FieldType::Primitive(primitive_field_type) => {
+      match primitive_field_type {
+        PrimitiveFieldType::DateTime => as_i64(v, field).map(NumberDelta::DateTime),
+        PrimitiveFieldType::Int64 => as_i64(v, field).map(NumberDelta::Int64),
+        PrimitiveFieldType::UInt64 => as_i64(v, field).map(NumberDelta::UInt64),
+        PrimitiveFieldType::Float => as_f32(v, field).map(NumberDelta::Float),
+        PrimitiveFieldType::Double => as_f64(v, field).map(NumberDelta::Double),
         _ => Err(EncodeError::NotNumber(field.full_name.clone()))
       }
     },

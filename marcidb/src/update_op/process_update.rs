@@ -176,12 +176,15 @@ fn update_fields<F>(fields: &[UpdateField], id: &[u8], source_data: &[u8], entit
         let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
         update_data(buf, item_data, entity, update_field.offset_pos, offset_start, offset_end);
       },
-      UpdateValue::Increment(number_value) => {
+      UpdateValue::Increment(delta) => {
         if offset_start == 0 { continue; }
         let offset_end = get_end_optimized(data, update_field.field, offset_start, update_field.offset_pos, entity.payload_offset);
 
         let old_value = &data[offset_start..offset_end];
-        let new_value = number_value.increment_bytes(old_value);
+        // Out of range is a rejection, not a wrap: returning here aborts the whole transaction.
+        let Some(new_value) = delta.checked_apply(old_value) else {
+          return Err(UpdateError::IncrementOutOfRange(update_field.field.full_name.clone()))
+        };
 
         on_change(update_field.field, Some(old_value), Some(new_value.as_slice()))?; // <-- update
 
