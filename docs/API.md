@@ -241,6 +241,12 @@ await db.user.update({ id }, {
 await db.user.delete({ id })
 ```
 
+**Key fields cannot be updated** — `@id` fields (and each part of a composite key) are absent from the update type. Write the new row and delete the old one if you need to move a record's identity.
+
+A relation-list field takes **one object**, not a list of them: `{ $connect: …, $remove: … }` applies every operator it contains in a single update.
+
+A `Byte` field with `@format(uuid | hex)` accepts either the formatted string or the raw byte array anywhere it is written — insert, `$where`, or update. Reads always return the formatted string.
+
 ## Aggregations
 
 ```ts
