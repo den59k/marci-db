@@ -51,11 +51,10 @@ type RefListUpdateStruct<I,U> = {
 // silently-wrong queries, so every branch below spells out the keys it excludes.
 type Never<T> = { [K in keyof T]?: never }
 
-// Every field-level operator, so each one can exclude all the others. The engine accepts exactly one
-// operator per field and errors with OnlyOneKeyExpected otherwise.
+// Every field-level operator, so a field's condition can exclude the ones its type doesn't support.
 type FieldOps = {
   "$eq": unknown, "$ne": unknown, "$not": unknown, "$in": unknown, "$notIn": unknown,
-  "$gt": unknown, "$gte": unknown, "$lt": unknown, "$lte": unknown, "$between": unknown,
+  "$gt": unknown, "$gte": unknown, "$lt": unknown, "$lte": unknown,
   "$startsWith": unknown, "$includes": unknown,
   "$every": unknown, "$some": unknown, "$none": unknown,
   "$near": unknown, "$search": unknown
@@ -71,9 +70,19 @@ type WhereValue<T> =
   | ({ "$or":  WhereValue<T>[] } & Never<T> & Never<{ "$and": unknown, "$not": unknown }>)
   | ({ "$not": WhereValue<T> }   & Never<T> & Never<{ "$and": unknown, "$or": unknown }>)
 
-type CompareValue<T> = T | Only<"$eq", T> | Only<"$not", T> | Only<"$in", T[]> | Only<"$notIn", T[]>
-type CompareNumValue<T> = Only<"$gt", T> | Only<"$gte", T> | Only<"$lt", T> | Only<"$lte", T> | Only<"$between", [T, T]>
-type CompareStrValue = Only<"$includes", string> | Only<"$startsWith", string>
+// Operators on one field are ANDed, so they combine freely: `{ $gte: 18, $lt: 65 }` is a half-open
+// range and `{ $gte: 18, $ne: 30 }` punches a hole in one. Each group below is all-optional; a field's
+// condition type intersects the groups its type supports and marks every remaining operator forbidden,
+// so a string operator on a number is still a type error.
+type ValueOps<T> = { "$eq"?: T, "$ne"?: T, "$not"?: T, "$in"?: T[], "$notIn"?: T[] }
+type NumOps<T>   = { "$gt"?: T, "$gte"?: T, "$lt"?: T, "$lte"?: T }
+type StrOps      = { "$includes"?: string, "$startsWith"?: string }
+
+// The numeric and string variants re-admit the type-agnostic operators, so a mixed condition such as
+// `{ $gte: 18, $ne: 30 }` still matches a single member of the union the field's type resolves to.
+type CompareValue<T>    = T | (ValueOps<T> & Never<Omit<FieldOps, keyof ValueOps<T>>>)
+type CompareNumValue<T> = ValueOps<T> & NumOps<T> & Never<Omit<FieldOps, keyof ValueOps<T> | keyof NumOps<T>>>
+type CompareStrValue<T> = ValueOps<T> & StrOps    & Never<Omit<FieldOps, keyof ValueOps<T> | keyof StrOps>>
 
 // A numeric field can also be updated in place: `{ balance: { $increment: -800 } }` reads, adds and writes
 // inside the update's own transaction, so it is atomic against concurrent writers. The delta is signed, so
@@ -85,16 +94,19 @@ type UpdateNumValue = { "$increment": number }
 // segment indexes an array. A bare value is shorthand for `$eq` (a plain object matches the whole subtree).
 // Path keys must not start with `$`. A missing leaf or a type mismatch simply doesn't match.
 type JsonType = "string" | "number" | "boolean" | "object" | "array" | "null"
+// As on scalar fields, operators on one path are ANDed and may be combined.
 type JsonCondition =
   | JsonValue
-  | { "$eq": JsonValue } | { "$ne": JsonValue } | { "$not": JsonValue }
-  | { "$gt": number | string } | { "$gte": number | string } | { "$lt": number | string } | { "$lte": number | string }
-  | { "$between": [number, number] | [string, string] }
-  | { "$in": JsonValue[] } | { "$notIn": JsonValue[] }
-  | { "$startsWith": string } | { "$includes": string }
-  | { "$contains": JsonValue }
-  | { "$exists": boolean }
-  | { "$type": JsonType }
+  | {
+      "$eq"?: JsonValue, "$ne"?: JsonValue, "$not"?: JsonValue,
+      "$gt"?: number | string, "$gte"?: number | string,
+      "$lt"?: number | string, "$lte"?: number | string,
+      "$in"?: JsonValue[], "$notIn"?: JsonValue[],
+      "$startsWith"?: string, "$includes"?: string,
+      "$contains"?: JsonValue,
+      "$exists"?: boolean,
+      "$type"?: JsonType
+    }
 type JsonPathWhere = { [path: string]: JsonCondition }
 type CompareRefValue<T> = T | Only<"$not", T>
 type CompareRefListValue<T> = Only<"$every", T> | Only<"$some", T> | Only<"$none", T>

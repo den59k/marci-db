@@ -91,7 +91,7 @@ The single most load-bearing design decision: **`filter` always contains the com
 
 Runs at parse time, purely rule-based, no maintained statistics ("simpler, but reliable"):
 
-1. **Access path from `$where`** — among all indexed conditions, pick the most selective by static priority: exact primary key → unique eq → primary-key prefix → eq → `$startsWith` → `$between` (range bounded on both sides) → range (half-open). (`Or`/`Not` never produce an access path; the filter handles them.)
+1. **Access path from `$where`** — among all indexed conditions, pick the most selective by static priority: exact primary key → unique eq → primary-key prefix → eq → `$startsWith` → two-sided range → half-open range. A lower and an upper bound on the same numerically-indexed field are first fused into one bounded range, whether they were written as two operators on one field or as two conditions under `$and`. (`Or`/`Not` never produce an access path; the filter handles them.)
 2. **`$order` resolution**:
    - by primary key → native tree order, `desc` = reverse scan (canopydb iterators are double-ended)
    - by an indexed, non-nullable, non-variant field → scan the *sort* index; if `$where` already ranges over the same index, reuse that range; if `$where` chose a different index and `$limit` is present, prefer the sort index (early exit beats selectivity)

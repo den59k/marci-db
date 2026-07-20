@@ -201,8 +201,8 @@ const SCORE_UNIQUE_EQ: u8 = 1;   // eq on a unique index
 const SCORE_ID_PREFIX: u8 = 2;   // prefix of a composite primary key
 const SCORE_EQ: u8 = 3;          // eq on a regular index
 const SCORE_STARTS_WITH: u8 = 4;
-const SCORE_BETWEEN: u8 = 5;     // range bounded on both sides
-const SCORE_RANGE: u8 = 6;       // half-open range
+const SCORE_RANGE_BOUNDED: u8 = 5;  // range bounded on both sides
+const SCORE_RANGE: u8 = 6;          // half-open range
 
 // Generates an index for Where
 pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> Option<PrefixKey<'a>> {
@@ -214,6 +214,46 @@ fn id_prefix_score(prefix: &PrefixKey) -> u8 {
     PrefixKey::Id(_) => SCORE_ID,
     _ => SCORE_ID_PREFIX
   }
+}
+
+/// The range bound a comparison contributes to a numeric index scan, if any. `start` bounds are
+/// inclusive and `end` bounds exclusive, matching the half-open range the scan is given.
+fn range_bound(compare: &FieldCompare) -> Option<(bool, Option<Vec<u8>>)> {
+  match compare {
+    // Index keys are `encoded_value ++ id`, so stepping past a value means stepping past every key
+    // that shares it — hence `increase_bit` for an exclusive lower / inclusive upper bound.
+    FieldCompare::Gte(v) => Some((true, Some(encode_num_wh(v)))),
+    FieldCompare::Gt(v) => Some((true, increase_bit(&encode_num_wh(v)))),
+    FieldCompare::Lte(v) => Some((false, increase_bit(&encode_num_wh(v)))),
+    FieldCompare::Lt(v) => Some((false, Some(encode_num_wh(v)))),
+    _ => None,
+  }
+}
+
+/// Fuses a lower and an upper bound on the same numerically-indexed field into one bounded range.
+/// Which pair is picked when a field carries several bounds doesn't affect correctness — every
+/// condition is still re-checked per row — so the first complete pair wins.
+fn fuse_range_bounds<'a>(items: &[Where<'_>]) -> Option<(PrefixKey<'a>, u8)> {
+  for (i, item) in items.iter().enumerate() {
+    let Where::Field(field, compare) = item else { continue };
+    let Some((true, start)) = range_bound(compare) else { continue };
+
+    // Only the field's first non-custom index is considered, as in the single-condition path above
+    let Some(FieldIndex::Number { tree_name, .. }) =
+      field.indexes.iter().find(|i| !matches!(i, FieldIndex::Custom { .. })) else { continue };
+
+    for other in items.iter().skip(i + 1) {
+      let Where::Field(other_field, other_compare) = other else { continue };
+      if !std::ptr::eq(*field, *other_field) { continue }
+      let Some((false, end)) = range_bound(other_compare) else { continue };
+
+      return Some((
+        PrefixKey::IndexRange { start, end, tree_name: tree_name.clone(), fixed_size: field.get_size() },
+        SCORE_RANGE_BOUNDED,
+      ));
+    }
+  }
+  None
 }
 
 /// Returns the access path along with its priority. Among several indexed
@@ -235,8 +275,11 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
         return id_prefix.map(|p| (p, SCORE_ID));
       }
 
+      // A lower and an upper bound on one field (`{ $gte: a, $lt: b }`) arrive here as two separate
+      // conditions. Considered individually each is only a half-open range, so fuse them first.
       let best = items.iter()
         .filter_map(|f| generate_prefix_scored(entity, f))
+        .chain(fuse_range_bounds(items))
         .min_by_key(|(_, score)| *score);
 
       match (id_prefix, best) {
@@ -275,27 +318,12 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
               return match field_compare {
                 FieldCompare::Eq(val) => generate_prefix( encode_index_number(ty, val), tree_name)
                   .map(|p| (p, if *unique { SCORE_UNIQUE_EQ } else { SCORE_EQ })),
-                FieldCompare::Gte(val) => {
-                  Some((PrefixKey::IndexRange { start: Some(encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
-                }
-                FieldCompare::Gt(val) => {
-                  Some((PrefixKey::IndexRange { start: increase_bit(&encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
-                }
-                // Index keys are `encoded_value ++ id` and the range end is exclusive, so an inclusive
-                // upper bound has to step past every key sharing the boundary value — hence `increase_bit`
-                // (the same trick `generate_prefix` uses for Eq). A bare `encode_num_wh(val)` as the end
-                // sorts *before* `enc(val) ++ id` and would drop every row on the boundary.
-                FieldCompare::Lte(val) => {
-                  Some((PrefixKey::IndexRange { start: None, end: increase_bit(&encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
-                }
-                FieldCompare::Lt(val) => {
-                  Some((PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
-                }
-                // Bounded on both sides, so more selective than a half-open range.
-                FieldCompare::Between(min, max) => {
-                  Some((PrefixKey::IndexRange { start: Some(encode_num_wh(min)), end: increase_bit(&encode_num_wh(max)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_BETWEEN))
-                }
-                _ => None
+                // A lone bound leaves the other side of the range open; a matching pair is fused into a
+                // bounded range earlier, by `fuse_range_bounds`.
+                compare => range_bound(compare).map(|(is_start, bound)| {
+                  let (start, end) = if is_start { (bound, None) } else { (None, bound) };
+                  (PrefixKey::IndexRange { start, end, tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE)
+                })
               }
             },
             FieldIndex::Custom { .. } => {

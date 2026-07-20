@@ -68,7 +68,7 @@ fn update_many_over_scanned_index_test() {
 
   // The index itself must still be consistent — query through it after the rewrite
   assert_eq!(
-    get_data(&db, "Item", json!({ "name": true, "$where": { "score": { "$between": [25, 35] } } })),
+    get_data(&db, "Item", json!({ "name": true, "$where": { "score": { "$gte": 25, "$lte": 35 } } })),
     json!([{ "name": "i20" }, { "name": "i30" }])
   );
 }

@@ -79,9 +79,6 @@ pub fn process_where<'a, 'b, U, F>(id: &'b [u8], body: &'b [u8], ctx: &mut Trans
         FieldCompare::Gte(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_ge()).unwrap_or(false),
         FieldCompare::Lt(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_lt()).unwrap_or(false),
         FieldCompare::Lte(num_value) => num_value.compare_with_bytes(data).map(|f| f.is_le()).unwrap_or(false),
-        FieldCompare::Between(min, max) =>
-          min.compare_with_bytes(data).map(|f| f.is_ge()).unwrap_or(false)
-          && max.compare_with_bytes(data).map(|f| f.is_le()).unwrap_or(false),
 
         FieldCompare::StringStartsWith(value) => data.starts_with(value),
         FieldCompare::StringIncludes(value) => memmem::find(data, value).is_some(),
@@ -203,9 +200,6 @@ fn eval_json_filter(blob: Option<&[u8]>, jf: &JsonFilter) -> bool {
         JsonOp::Gte(x) => json_cmp(&val, x).is_some_and(Ordering::is_ge),
         JsonOp::Lt(x) => json_cmp(&val, x).is_some_and(Ordering::is_lt),
         JsonOp::Lte(x) => json_cmp(&val, x).is_some_and(Ordering::is_le),
-        JsonOp::Between(min, max) =>
-          json_cmp(&val, min).is_some_and(Ordering::is_ge)
-          && json_cmp(&val, max).is_some_and(Ordering::is_le),
         JsonOp::StringStartsWith(s) => val.as_str().is_some_and(|v| v.starts_with(s.as_str())),
         JsonOp::StringIncludes(s) => val.as_str().is_some_and(|v| v.contains(s.as_str())),
         JsonOp::Contains(x) => val.as_array().is_some_and(|a| a.iter().any(|e| json_eq(e, x))),

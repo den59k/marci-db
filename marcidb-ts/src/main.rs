@@ -347,7 +347,7 @@ fn get_field_where_str(field: &Field, schema: &Schema) -> String {
       if ty.get_num_type().is_some() {
         format!("  {}?: CompareValue<{}{}> | CompareNumValue<{}>", field.name, get_field_ty(&field.ty, schema), field_nullable, get_field_ty(&field.ty, schema))
       } else if matches!(ty, PrimitiveFieldType::String) {
-        format!("  {}?: CompareValue<{}{}> | CompareStrValue", field.name, get_field_ty(&field.ty, schema), field_nullable)
+        format!("  {}?: CompareValue<{}{}> | CompareStrValue<{}>", field.name, get_field_ty(&field.ty, schema), field_nullable, get_field_ty(&field.ty, schema))
       } else if matches!(ty, PrimitiveFieldType::Json) {
         // Whole-value compare, or a map of JSON paths → per-leaf conditions.
         format!("  {}?: CompareValue<{}{}> | JsonPathWhere", field.name, get_field_ty(&field.ty, schema), field_nullable)
