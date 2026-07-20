@@ -82,6 +82,18 @@ fn get_primitive_str(ty: &PrimitiveFieldType) -> &str {
   }
 }
 
+/// The type a field accepts when *written* (insert / `$where` / update). A byte list travels as either a
+/// `@format`-encoded string or a raw array of bytes, and the engine accepts both in every write position
+/// regardless of whether the field declares a `@format` — so every write shape has to say so. Read shapes
+/// (`Model`, `ModelId`) stay narrow: the decoder emits one form, a string when the field is formatted.
+fn get_field_write_ty(field: &Field, schema: &Schema) -> String {
+  match &field.ty {
+    FieldType::PrimitiveList(PrimitiveFieldType::Byte, _) =>
+      format!("{} | string", get_field_ty(&field.ty, schema)),
+    _ => get_field_ty(&field.ty, schema)
+  }
+}
+
 fn get_field_ty(ty: &FieldType, schema: &Schema) -> String {
   match ty {
     FieldType::Primitive(ty) => get_primitive_str(ty).to_string(),
@@ -343,7 +355,7 @@ fn get_field_where_str(field: &Field, schema: &Schema) -> String {
         format!("  {}?: CompareValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
       }
     },
-    _ => format!("  {}?: CompareValue<{}{}>", field.name, get_field_ty(&field.ty, schema), field_nullable)
+    _ => format!("  {}?: CompareValue<{}{}>", field.name, get_field_write_ty(field, schema), field_nullable)
   };
   match get_custom_search_str(field) {
     Some(suffix) => format!("{}{}", line, suffix),
@@ -371,10 +383,7 @@ fn get_field_insert_str(field: &Field, schema: &Schema) -> String {
       };
       format!("  {}{}: {}{}", field.name, field_optional, to_insert, field_nullable)
     },
-    FieldType::PrimitiveList(PrimitiveFieldType::Byte, _) => {
-      format!("  {}{}: {} | string{}", field.name, field_optional, get_field_ty(&field.ty, schema), field_nullable)
-    },
-    _ => format!("  {}{}: {}{}", field.name, field_optional, get_field_ty(&field.ty, schema), field_nullable)
+    _ => format!("  {}{}: {}{}", field.name, field_optional, get_field_write_ty(field, schema), field_nullable)
   }
 }
 
@@ -384,12 +393,14 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
   match &field.ty {
     FieldType::RefList(ref_info) => {
       let ref_model = &schema.models[ref_info.model_index];
-      let to_update = if ref_model.autoinsert { 
+      let to_update = if ref_model.autoinsert {
         format!("RefListUpdateStruct<{},{}>", get_model_insert_name(ref_model), get_model_update_name(ref_model))
       } else {
         format!("RefListUpdate<{}>", get_model_id_name(ref_model))
       };
-      format!("  {}?: {}[]", field.name, to_update)
+      // One object, not a list of them: the engine reads this field as a single object and applies every
+      // operator key in it (`{ $connect: …, $remove: … }`). An array is rejected outright.
+      format!("  {}?: {}", field.name, to_update)
     },
     FieldType::Ref(ref_info) => {
       let ref_model = &schema.models[ref_info.model_index];
@@ -404,7 +415,7 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
     FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
       format!("  {}?: {} | UpdateNumValue{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
     },
-    _ => format!("  {}?: {}{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
+    _ => format!("  {}?: {}{}", field.name, get_field_write_ty(field, schema), field_nullable)
   }
 }
 
@@ -566,11 +577,13 @@ fn generate_types(input: &str, output_dir: &str) {
     push_union_blocks(&mut lines, &payload_enums,
       payload_enums.iter().map(|field| get_insert_enum_branches(field, model, &schema)).collect());
 
-    // Fill in the fields for Update
+    // Fill in the fields for Update. Key fields are omitted: the engine refuses to edit them
+    // (`OnlyBodyKeyAvailableToEdit`), so offering them in the type only invites a runtime error.
     lines.push(format!("type {} = {{", get_model_update_name(model)));
     for field in model.fields.iter() {
       if field.name.starts_with("@") { continue; }
       if is_variant_field(field) || is_payload_enum(field) { continue; }
+      if matches!(field.location, FieldLocation::Key { .. }) { continue; }
       lines.push(get_field_update_str(field, &schema));
     }
     push_union_blocks(&mut lines, &payload_enums,
