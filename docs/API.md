@@ -299,6 +299,7 @@ db.<model>.findMany(query)        // Promise<Result[]>
 db.<model>.findFirst(query)       // Promise<Result | null>
 db.<model>.insert(data)           // Promise<Id>
 db.<model>.update(id, data)       // Promise<void>
+db.<model>.updateMany(query, data) // Promise<number> — rows matched
 db.<model>.delete(id)             // Promise<void>
 db.<model>.count(query?)          // Promise<number>
 db.<model>.aggregate(query)       // Promise<AggregateResult>
@@ -308,3 +309,23 @@ db.$transaction([ ...ops ])       // Promise<[...results]> — atomic, see Trans
 ```
 
 (The per-model methods return a lazy `Op<T>`, which is awaitable like a `Promise<T>` and can also be passed to `$transaction`.)
+
+### updateMany
+
+Applies one update to every row matching `$where`, in a single transaction — either all of them land or none do:
+
+```ts
+const n = await db.user.updateMany({ $where: { age: { $lt: 18 } } }, { active: false })
+```
+
+The returned number counts rows **matched**, not rows whose stored bytes changed — re-applying a value a row already holds still counts, as in SQL. An empty query (`{}`) matches every row.
+
+Matching ids are resolved before any row is written, so the filter sees the pre-update state: a row that stops matching part-way through is still updated, and one that starts matching is not.
+
+Three things are rejected rather than silently ignored:
+
+- **`$limit` / `$skip` / `$cursor`** — without a total order these would update an arbitrary subset. Narrow the `$where` instead.
+- **`$near` / `$search`** — module-index search is not available on this path.
+- **relation operations** (`$connect`, `$push`, `$update`, …) in `data` — these recurse per matched row, so the work is unbounded. Use per-row `update` for those.
+
+Field selections in the query are ignored: `updateMany` only ever resolves ids.

@@ -3,7 +3,7 @@ use marcidb_schema::{diff, evolve, migration_ops, reconcile, serialize_migration
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::db::{get_data, get_data_one, insert_data};
+use crate::db::{get_data, get_data_one, insert_data, update_data};
 
 /// Declarative `$sync` against a live DB: parse the `.marci` schema, carry slots/ids from the stored
 /// snapshot, diff, then apply through the engine's commit primitive. This is what the server's `$sync`
@@ -54,6 +54,31 @@ fn migrate_add_field() {
   assert_eq!(
     get_data_one(&db, "User", json!({ "name": true, "age": true, "$where": { "name": "Carol" } })),
     json!({ "name": "Carol", "age": 30 })
+  );
+}
+
+/// Writing a field added by a migration into a row written BEFORE it: the row's stored header is
+/// shorter than the new schema's payload_offset, so the new field's slot lies past the row's header.
+#[test]
+fn migrate_then_update_added_field() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new("model User {\n  name String\n}", dir.path().to_str().unwrap());
+
+  let alice = insert_data(&db, "User", json!({ "name": "Alice" }));
+  insert_data(&db, "User", json!({ "name": "Bob" }));
+
+  migrate_to(&mut db, "model User {\n  name String\n  bio  String?\n}").unwrap();
+
+  update_data(&db, "User", &alice, json!({ "bio": "hello" }));
+
+  assert_eq!(
+    get_data_one(&db, "User", json!({ "name": true, "bio": true, "$where": { "name": "Alice" } })),
+    json!({ "name": "Alice", "bio": "hello" })
+  );
+  // The untouched pre-migration row still reads back intact
+  assert_eq!(
+    get_data_one(&db, "User", json!({ "name": true, "bio": true, "$where": { "name": "Bob" } })),
+    json!({ "name": "Bob", "bio": null })
   );
 }
 

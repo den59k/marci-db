@@ -118,3 +118,80 @@ fn batch_unknown_model_reports_index() {
   assert!(matches!(err.kind, BatchErrorKind::UnknownModel(_)));
   assert_eq!(user_count(&db), 0); // operation #0 rolled back
 }
+
+#[test]
+fn batch_update_many_returns_matched_count() {
+  let (_dir, db) = make_db();
+
+  let results = execute_batch(&db, &[
+    json!({ "model": "User", "action": "insert", "data": { "name": "Alice", "email": "a@x.com" } }),
+    json!({ "model": "User", "action": "insert", "data": { "name": "Bob",   "email": "b@x.com" } }),
+    json!({ "model": "User", "action": "insert", "data": { "name": "Carol", "email": "c@x.com" } }),
+    // Rename everyone whose email starts with "a" or "b"
+    json!({ "model": "User", "action": "updateMany",
+            "query": { "$where": { "email": { "$startsWith": "a" } } },
+            "data": { "name": "Renamed" } }),
+    json!({ "model": "User", "action": "findMany", "query": { "name": true, "$order": { "email": "asc" } } }),
+  ]).unwrap();
+
+  assert_eq!(results[3], json!(1));
+  assert_eq!(results[4], json!([{ "name": "Renamed" }, { "name": "Bob" }, { "name": "Carol" }]));
+}
+
+#[test]
+fn batch_update_many_rolls_back_with_the_batch() {
+  let (_dir, db) = make_db();
+
+  execute_batch(&db, &[
+    json!({ "model": "User", "action": "insert", "data": { "name": "Alice", "email": "a@x.com" } }),
+    json!({ "model": "User", "action": "insert", "data": { "name": "Bob",   "email": "b@x.com" } }),
+  ]).unwrap();
+
+  // The updateMany succeeds, then a later op fails — the whole batch must roll back
+  let err = execute_batch(&db, &[
+    json!({ "model": "User", "action": "updateMany", "query": {}, "data": { "name": "Renamed" } }),
+    json!({ "model": "User", "action": "insert", "data": { "name": "Dup", "email": "a@x.com" } }),
+  ]).unwrap_err();
+
+  assert_eq!(err.index, 1);
+  assert!(matches!(err.kind, BatchErrorKind::Insert(InsertError::UniqueViolation(_, _))), "unexpected: {:?}", err.kind);
+
+  // Both names are unchanged
+  let results = execute_batch(&db, &[
+    json!({ "model": "User", "action": "findMany", "query": { "name": true, "$order": { "email": "asc" } } }),
+  ]).unwrap();
+  assert_eq!(results[0], json!([{ "name": "Alice" }, { "name": "Bob" }]));
+}
+
+/// The single-op path used by the FFI / embedded transport.
+#[test]
+fn execute_op_update_many() {
+  use marcidb::{execute_op, OpError};
+  let (_dir, db) = make_db();
+
+  execute_op(&db, &json!({ "model": "User", "action": "insert", "data": { "name": "Alice", "email": "a@x.com" } })).unwrap();
+  execute_op(&db, &json!({ "model": "User", "action": "insert", "data": { "name": "Bob", "email": "b@x.com" } })).unwrap();
+
+  let updated = execute_op(&db, &json!({
+    "model": "User", "action": "updateMany",
+    "query": { "$where": { "name": "Alice" } },
+    "data": { "name": "Renamed" }
+  })).unwrap();
+  assert_eq!(updated, json!(1));
+
+  // Field selections in the query are ignored — updateMany only resolves ids
+  let updated = execute_op(&db, &json!({
+    "model": "User", "action": "updateMany",
+    "query": { "name": true, "posts": { "title": true } },
+    "data": { "name": "All" }
+  })).unwrap();
+  assert_eq!(updated, json!(2));
+
+  // $limit is rejected rather than silently ignored
+  let err = execute_op(&db, &json!({
+    "model": "User", "action": "updateMany",
+    "query": { "$limit": 1 },
+    "data": { "name": "Nope" }
+  })).unwrap_err();
+  assert!(matches!(err, OpError::Update(_)), "unexpected: {:?}", err);
+}

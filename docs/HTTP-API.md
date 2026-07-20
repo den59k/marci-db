@@ -33,6 +33,7 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | `POST /:db/:model/findFirst` | query object | object or `null` |
 | `POST /:db/:model/insert` | insert object | id object |
 | `POST /:db/:model/update/:id` | update object | empty body |
+| `POST /:db/:model/updateMany` | `{ "$where"?: ..., "data": ... }` | bare number — rows matched |
 | `POST /:db/:model/delete/:id` | — | empty body |
 | `POST /:db/:model/count` | `{ "$where"?: ... }` (or `{}`) | bare number |
 | `POST /:db/:model/aggregate` | aggregate object | object with requested keys |
@@ -142,6 +143,7 @@ Each operation is `{ "model", "action", <payload> }`. The payload field and the 
 |---|---|---|
 | `insert` | `data` (insert object) | id object |
 | `update` | `id` + `data` (update object) | `null` |
+| `updateMany` | `query` (`{ "$where"?: ... }`) + `data` | number — rows matched |
 | `delete` | `id` | `true` / `false` |
 | `findFirst` | `query` | object or `null` |
 | `findMany` | `query` | array |
