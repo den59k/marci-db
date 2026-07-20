@@ -98,12 +98,15 @@ The result type is inferred from the select shape. Keys that are not selected do
 | `null` / `{ $not: null }` | nullable | `{ email: null }` |
 | `$in`, `$notIn` | all | `{ age: { $in: [20, 30] } }` |
 | `$gt`, `$gte`, `$lt`, `$lte` | numbers, DateTime | `{ age: { $gt: 18 } }` |
+| `$between` | numbers, DateTime | `{ age: { $between: [18, 65] } }` — inclusive on both ends |
 | `$startsWith`, `$includes` | strings | `{ name: { $startsWith: "Al" } }` |
 | `$some`, `$every`, `$none` | list relations | `{ posts: { $some: { title: "x" } } }` |
 | nested where | single relations | `{ author: { name: "Alice" } }` |
 | path filters | `Json` fields | `{ meta: { "address.city": "Tokyo" } }` — see [JSON fields](#json-fields) |
 
-The planner picks the most selective indexed condition (exact id → unique eq → eq → startsWith → range); all other conditions are re-checked per row, so the index choice never affects correctness.
+A field takes exactly one operator, so a two-sided range is either `$between` or two conditions under `$and`. Prefer `$between`: on an indexed field it plans as a single bounded index range, while `$and` of `$gte` + `$lte` scans the half-open range of whichever bound the planner picks and re-checks the other per row.
+
+The planner picks the most selective indexed condition (exact id → unique eq → eq → startsWith → `$between` → range); all other conditions are re-checked per row, so the index choice never affects correctness.
 
 ### JSON fields
 
@@ -145,6 +148,7 @@ Multiple paths under one field are ANDed; combine fields with `$or` / `$and` / `
 |---|---|
 | value / `$eq`, `$ne` (`$not`) | leaf equals / differs from a JSON value (a plain object compares the whole subtree) |
 | `$gt`, `$gte`, `$lt`, `$lte` | numeric, or lexicographic between two strings |
+| `$between` | `[min, max]`, inclusive on both ends — same numeric / string rules |
 | `$in`, `$notIn` | leaf is (not) one of a set |
 | `$startsWith`, `$includes` | string prefix / substring |
 | `$contains` | leaf is an array containing the value |

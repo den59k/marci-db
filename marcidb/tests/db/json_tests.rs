@@ -148,6 +148,13 @@ fn json_filter_numeric_type_mismatch_and_missing() {
   // $type filters by the leaf's JSON type.
   assert_eq!(names(&db, json!({ "data": { "age": { "$type": "number" } } })), ["alice", "bob"]);
   assert_eq!(names(&db, json!({ "data": { "age": { "$type": "string" } } })), ["carol"]);
+
+  // $between is inclusive on both ends; carol's string age and dave's missing age still don't match.
+  assert_eq!(names(&db, json!({ "data": { "age": { "$between": [17, 30] } } })), ["alice", "bob"]);
+  assert_eq!(names(&db, json!({ "data": { "age": { "$between": [18, 30] } } })), ["alice"]);
+  assert_eq!(names(&db, json!({ "data": { "age": { "$between": [30, 17] } } })), [] as [String; 0]);
+  // Two strings compare lexicographically, like the other ordering operators.
+  assert_eq!(names(&db, json!({ "data": { "city": { "$between": ["Lima", "Oslo"] } } })), ["bob", "dave"]);
 }
 
 #[test]

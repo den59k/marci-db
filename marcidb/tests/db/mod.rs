@@ -16,6 +16,7 @@ pub mod migration_tests;
 pub mod composite_delete_tests;
 pub mod custom_index_tests;
 pub mod json_tests;
+pub mod range_tests;
 
 use std::str::FromStr;
 

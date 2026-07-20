@@ -48,7 +48,7 @@ type RefListUpdateStruct<I,U> = {
 type WhereValue<T> = T | { "$and": T[] } | { "$or": T[] } | { "$not": T }
 
 type CompareValue<T> = T | { "$eq": T } | { "$not": T } | { "$in": T[] } | { "$notIn": T[] }
-type CompareNumValue<T> = { "$gt": T } | { "$gte": T } | { "$lt": T } | { "$lte": T }
+type CompareNumValue<T> = { "$gt": T } | { "$gte": T } | { "$lt": T } | { "$lte": T } | { "$between": [T, T] }
 type CompareStrValue = { "$includes": string,  } | { "$startsWith": string }
 
 // Filtering into a Json field by dot-path. Keys are JSON paths (e.g. "address.city", "items.0"); a numeric
@@ -59,6 +59,7 @@ type JsonCondition =
   | JsonValue
   | { "$eq": JsonValue } | { "$ne": JsonValue } | { "$not": JsonValue }
   | { "$gt": number | string } | { "$gte": number | string } | { "$lt": number | string } | { "$lte": number | string }
+  | { "$between": [number, number] | [string, string] }
   | { "$in": JsonValue[] } | { "$notIn": JsonValue[] }
   | { "$startsWith": string } | { "$includes": string }
   | { "$contains": JsonValue }
