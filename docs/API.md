@@ -106,6 +106,25 @@ The result type is inferred from the select shape. Keys that are not selected do
 
 A field takes exactly one operator, so a two-sided range is either `$between` or two conditions under `$and`. Prefer `$between`: on an indexed field it plans as a single bounded index range, while `$and` of `$gte` + `$lte` scans the half-open range of whichever bound the planner picks and re-checks the other per row.
 
+### Combining conditions — `$and` / `$or` / `$not`
+
+Fields listed side by side are ANDed. For anything else, wrap the conditions in a combinator:
+
+```ts
+$where: { $and: [{ capacity: { $gte: 2 } }, { title: "spin" } ] }
+$where: { $or:  [{ capacity: 1 }, { capacity: 2 }] }
+$where: { $not: { capacity: 1 } }
+```
+
+**Every condition goes *inside* the array.** A combinator is resolved as soon as it is found, so a field sitting next to one is not merged — it is dropped:
+
+```ts
+$where: { $and: [{ capacity: { $gte: 2 } }], capacity: 999 }   // ✗ `capacity: 999` is ignored
+$where: { $and: [{ capacity: { $gte: 2 } }, { capacity: 999 }] } // ✓
+```
+
+The generated types reject both this and two operators on one field, so neither compiles. Combinators nest freely and work inside a nested relation filter (`{ trainer: { $or: [...] } }`) as well as at the top level.
+
 The planner picks the most selective indexed condition (exact id → unique eq → eq → startsWith → `$between` → range); all other conditions are re-checked per row, so the index choice never affects correctness.
 
 ### JSON fields
@@ -329,3 +348,32 @@ Three things are rejected rather than silently ignored:
 - **relation operations** (`$connect`, `$push`, `$update`, …) in `data` — these recurse per matched row, so the work is unbounded. Use per-row `update` for those.
 
 Field selections in the query are ignored: `updateMany` only ever resolves ids.
+
+### Atomic counters — `$increment`
+
+A numeric field can be updated relative to its current value instead of assigned:
+
+```ts
+await db.user.update({ id }, { depositRub: { $increment: -800 } })
+```
+
+The read, the addition and the write all happen inside the update's own transaction, so concurrent writers cannot lose an update the way a read-then-write from application code can.
+
+Combined with a guard in `$where`, `updateMany` becomes a **compare-and-set** — the returned count tells you whether it applied:
+
+```ts
+const n = await db.user.updateMany(
+  { $where: { id, depositRub: { $gte: 800 } } },
+  { depositRub: { $increment: -800 } },
+)
+if (n === 0) throw new Error("insufficient funds")
+```
+
+The predicate is evaluated in the same transaction as the write, so two concurrent debits cannot both succeed against one balance. This is the DB-level alternative to serializing the operation in application code.
+
+Notes:
+
+- **The delta is signed on every numeric type, including unsigned ones** — a `UInt` field can be decremented. The storage stays unsigned; only the delta is signed.
+- **A result outside the field's range is rejected, never wrapped.** Taking a `UInt` below zero, or any type past its min/max, fails the write and rolls the whole transaction back — so a batch or an `updateMany` that hits it commits nothing. Guard with `$where` (as above) if you want "skip" rather than "fail".
+- **A `DateTime` delta is a plain number of milliseconds**, not a date.
+- **Incrementing a field that is currently null is a no-op**, not an error — the row is left unchanged and still counts as matched.

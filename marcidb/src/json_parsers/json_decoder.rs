@@ -440,13 +440,11 @@ fn decode_primitive_value(ty: &PrimitiveFieldType, data: &[u8]) -> Result<String
         }
         PrimitiveFieldType::Float => {
             let n = f32::from_be_bytes(data.try_into().unwrap());
-            Ok(n.to_string())
-            // Ok(Value::Number(serde_json::Number::from_f64(n as f64).unwrap()))
+            Ok(if n.is_finite() { format!("{:?}", n) } else { "null".to_string() })
         }
         PrimitiveFieldType::Double => {
             let n = f64::from_be_bytes(data.try_into().unwrap());
-            Ok(n.to_string())
-            // Ok(Value::Number(serde_json::Number::from_f64(n).unwrap()))
+            Ok(if n.is_finite() { format!("{:?}", n) } else { "null".to_string() })
         }
         PrimitiveFieldType::Byte => {
             let n = u8::from_be_bytes(data.try_into().unwrap());

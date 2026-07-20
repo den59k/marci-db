@@ -1,6 +1,6 @@
 mod process_update;
 
-use crate::{Field, InsertError, ProviderError, StorageError, delete_op::{DeleteError, DeleteOp}, num_utils::NumberValue, schema::{Entity, RefInfo}, write_op::{WriteIndexesError, WriteOp}};
+use crate::{Field, InsertError, ProviderError, StorageError, delete_op::{DeleteError, DeleteOp}, num_utils::NumberDelta, schema::{Entity, RefInfo}, write_op::{WriteIndexesError, WriteOp}};
 pub use process_update::process_update;
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ pub struct UpdateField<'a> {
 pub enum UpdateValue {
   Null,
   Value(Vec<u8>),
-  Increment(NumberValue)
+  Increment(NumberDelta)
 }
 
 #[derive(Debug,PartialEq)]
@@ -34,6 +34,10 @@ pub enum UpdateError {
   IndexError(ProviderError),
   /// The relation operation is not implemented yet.
   Unsupported(&'static str),
+  /// An `$increment` would take the field outside its range — a negative result on an unsigned field, or
+  /// past the type's min/max. The write is rejected and the whole transaction rolls back, rather than
+  /// storing a wrapped value.
+  IncrementOutOfRange(String),
   Storage(StorageError)
 }
 
