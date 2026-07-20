@@ -24,6 +24,9 @@ pub enum FieldCompare<'a> {
     Gte(NumberValue),
     Lt(NumberValue),
     Lte(NumberValue),
+    /// `$between: [min, max]` — inclusive on both ends. Kept as one operator rather than desugared into
+    /// `$gte` + `$lte` so it fits the one-operator-per-field rule and plans as a single bounded index range.
+    Between(NumberValue, NumberValue),
     StringStartsWith(Vec<u8>),
     StringIncludes(Vec<u8>),
     /// A module-index search operator (`$near`/`$search`) on a `@custom`-indexed field. The raw payload is
@@ -54,6 +57,8 @@ pub enum JsonOp {
     Gte(Value),
     Lt(Value),
     Lte(Value),
+    /// `$between: [min, max]` — inclusive on both ends, over two numbers or two strings.
+    Between(Value, Value),
     In(Vec<Value>),
     NotIn(Vec<Value>),
     /// Prefix / substring on a string leaf.

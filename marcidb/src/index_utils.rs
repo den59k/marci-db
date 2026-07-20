@@ -15,19 +15,6 @@ pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {
   return None;
 }
 
-/// Decrements the buffer by one bit
-pub fn decrease_bit(start: &[u8]) -> Option<Vec<u8>> {
-  let mut end = SmallVec::<u8, 256>::from_slice_copy(start);
-  for (i, b) in end.iter_mut().enumerate().rev() {
-      if *b > 0 {
-          *b -= 1;
-          end.truncate(i + 1);
-          return Some(end.to_vec());
-      }
-  }
-  return None;
-}
-
 #[inline]
 /// For exact index comparison (Eq) we compare by prefix
 fn generate_prefix<'a>(val: Vec<u8>, tree_name: &String) -> Option<PrefixKey<'a>> {
@@ -214,7 +201,8 @@ const SCORE_UNIQUE_EQ: u8 = 1;   // eq on a unique index
 const SCORE_ID_PREFIX: u8 = 2;   // prefix of a composite primary key
 const SCORE_EQ: u8 = 3;          // eq on a regular index
 const SCORE_STARTS_WITH: u8 = 4;
-const SCORE_RANGE: u8 = 5;
+const SCORE_BETWEEN: u8 = 5;     // range bounded on both sides
+const SCORE_RANGE: u8 = 6;       // half-open range
 
 // Generates an index for Where
 pub fn generate_prefix_from_where<'a>(entity: &'a Entity, where_op: &Where) -> Option<PrefixKey<'a>> {
@@ -293,11 +281,19 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
                 FieldCompare::Gt(val) => {
                   Some((PrefixKey::IndexRange { start: increase_bit(&encode_num_wh(val)), end: None, tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
                 }
+                // Index keys are `encoded_value ++ id` and the range end is exclusive, so an inclusive
+                // upper bound has to step past every key sharing the boundary value — hence `increase_bit`
+                // (the same trick `generate_prefix` uses for Eq). A bare `encode_num_wh(val)` as the end
+                // sorts *before* `enc(val) ++ id` and would drop every row on the boundary.
                 FieldCompare::Lte(val) => {
-                  Some((PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
+                  Some((PrefixKey::IndexRange { start: None, end: increase_bit(&encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
                 }
                 FieldCompare::Lt(val) => {
-                  Some((PrefixKey::IndexRange { start: None, end: decrease_bit(&encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
+                  Some((PrefixKey::IndexRange { start: None, end: Some(encode_num_wh(val)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_RANGE))
+                }
+                // Bounded on both sides, so more selective than a half-open range.
+                FieldCompare::Between(min, max) => {
+                  Some((PrefixKey::IndexRange { start: Some(encode_num_wh(min)), end: increase_bit(&encode_num_wh(max)), tree_name: tree_name.clone(), fixed_size: field.get_size() }, SCORE_BETWEEN))
                 }
                 _ => None
               }

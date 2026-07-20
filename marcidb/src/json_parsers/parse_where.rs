@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, Where}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
+use crate::{Field, json_parsers::{parse_query_op::get_prefix_key, parsers::{EncodeError, encode_enum, encode_list, encode_primitive_value, parse_field_value_num}}, num_utils::NumberValue, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, Where}, schema::{Entity, FieldType, PrimitiveFieldType, Schema}};
 
 /// Parses a JSON object into a where condition
 pub fn parse_where<'a>(schema: &'a Schema, entity: &'a Entity, where_obj: &Value) -> Result<Where<'a>,EncodeError> {
@@ -164,6 +164,10 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
       "$lte" => Ok(FieldCompare::Lte(
         parse_field_value_num(field, value)?
       )),
+      "$between" => {
+        let (min, max) = parse_field_value_between(field, value)?;
+        Ok(FieldCompare::Between(min, max))
+      },
       "$in" => {
         let (buf, has_null) = parse_field_value_in(field, value)?;
         Ok(FieldCompare::In(buf, has_null))
@@ -188,6 +192,21 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
   } else {
     Ok(FieldCompare::Eq(parse_field_value_binary(field, value)?))
   }
+}
+
+/// `$between: [min, max]` — both bounds inclusive. A reversed pair (`min > max`) isn't rejected here;
+/// it simply matches nothing, the same as `$gte`+`$lte` with crossed bounds would.
+fn parse_field_value_between<'a>(field: &'a Field, v: &Value) -> Result<(NumberValue, NumberValue), EncodeError> {
+  let Some(items) = v.as_array() else { return Err(EncodeError::NotAnArray) };
+  if items.len() != 2 {
+    return Err(EncodeError::UnsupportedOperation(
+      "$between expects exactly two values: [min, max]".to_string(),
+    ));
+  }
+  Ok((
+    parse_field_value_num(field, &items[0])?,
+    parse_field_value_num(field, &items[1])?,
+  ))
 }
 
 // For Eq comparisons the binary representation of the data is enough
@@ -261,6 +280,15 @@ fn parse_json_operator(key: &str, v: &Value) -> Result<JsonOp, EncodeError> {
     "$gte" => JsonOp::Gte(v.clone()),
     "$lt" => JsonOp::Lt(v.clone()),
     "$lte" => JsonOp::Lte(v.clone()),
+    "$between" => {
+      let items = as_arr(v)?;
+      if items.len() != 2 {
+        return Err(EncodeError::UnsupportedOperation(
+          "$between expects exactly two values: [min, max]".to_string(),
+        ));
+      }
+      JsonOp::Between(items[0].clone(), items[1].clone())
+    },
     "$in" => JsonOp::In(as_arr(v)?),
     "$notIn" => JsonOp::NotIn(as_arr(v)?),
     "$startsWith" => JsonOp::StringStartsWith(as_str(v)?),
@@ -287,7 +315,7 @@ mod tests {
   use serde_json::json;
   use std::assert_matches;
 
-use crate::{json_parsers::parse_where::parse_where, num_utils::NumberValue, parse_schema, query_op::{FieldCompare, Where}};
+use crate::{json_parsers::{parse_where::parse_where, parsers::EncodeError}, num_utils::NumberValue, parse_schema, query_op::{FieldCompare, Where}};
 
   #[test]
   fn basic_where_test() {
@@ -328,5 +356,41 @@ use crate::{json_parsers::parse_where::parse_where, num_utils::NumberValue, pars
         assert_matches!(compare, &FieldCompare::Gt(NumberValue::UInt64(20)));
       }
     }
+  }
+
+  #[test]
+  fn between_where_test() {
+    let schema = parse_schema("
+      model User {
+          name        String
+          age         UInt
+      }
+    ");
+    let user_model = &schema.models[0];
+
+    // A lone condition collapses to a bare Where::Field
+    let where_op = parse_where(&schema, user_model, &json!({ "age": { "$between": [18, 65] } })).unwrap();
+    let Where::Field(_, compare) = &where_op else { panic!("Wrong where_op type") };
+    assert_matches!(compare, FieldCompare::Between(NumberValue::UInt64(18), NumberValue::UInt64(65)));
+
+    // Needs exactly two bounds
+    for bad in [json!([18]), json!([18, 65, 99]), json!([])] {
+      assert_matches!(
+        parse_where(&schema, user_model, &json!({ "age": { "$between": bad } })),
+        Err(EncodeError::UnsupportedOperation(_))
+      );
+    }
+
+    // The bounds still have to be numbers
+    assert_matches!(
+      parse_where(&schema, user_model, &json!({ "age": { "$between": [18, "x"] } })),
+      Err(EncodeError::TypeMismatch { .. })
+    );
+
+    // …and $between isn't available on a non-numeric field
+    assert_matches!(
+      parse_where(&schema, user_model, &json!({ "name": { "$between": [1, 2] } })),
+      Err(EncodeError::NotNumber(_))
+    );
   }
 }
