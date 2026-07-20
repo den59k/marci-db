@@ -17,6 +17,7 @@ pub mod composite_delete_tests;
 pub mod custom_index_tests;
 pub mod json_tests;
 pub mod range_tests;
+pub mod update_many_tests;
 
 use std::str::FromStr;
 
@@ -36,6 +37,21 @@ pub fn update_data(db: &MarciDB, model: &str, item_id: &Value, data: Value) {
   let id = parse_id(&db.schema, entity, item_id).unwrap();
   let to_update = parse_update(&db.schema, entity, &data).unwrap();
   db.update_item(entity, &id, &to_update).unwrap();
+}
+
+pub fn update_many_data(db: &MarciDB, model: &str, query: Value, data: Value) -> u64 {
+  let entity = db.get_model(model).unwrap();
+  let query_op = parse_query(&db.schema, entity, &query).unwrap();
+  let update_op = parse_update(&db.schema, entity, &data).unwrap();
+  db.update_many(entity, &query_op, &update_op).unwrap()
+}
+
+/// `update_many` without unwrapping, for the rejection / rollback cases.
+pub fn try_update_many(db: &MarciDB, model: &str, query: Value, data: Value) -> Result<u64, marcidb::UpdateError> {
+  let entity = db.get_model(model).unwrap();
+  let query_op = parse_query(&db.schema, entity, &query).unwrap();
+  let update_op = parse_update(&db.schema, entity, &data).unwrap();
+  db.update_many(entity, &query_op, &update_op)
 }
 
 pub fn get_data(db: &MarciDB, model: &str, json_query: Value) -> Value {

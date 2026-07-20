@@ -1,13 +1,20 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
-  let mut tree = tx.require_tree(entity.name.as_bytes())?;
-
-  let Some(data) = tree.get(id)? else {
-    return Ok(false)
+  // The read is scoped so the tree handle is released before anything below mutates. A handle that has
+  // served a `get` holds the looked-up node cached; writing back through that same handle asks canopydb
+  // to dirty a page it is still referencing, which trips an internal uniqueness assertion as soon as the
+  // page is already dirty — i.e. from the second update onwards within one transaction. The body is
+  // copied out for the same reason: it is a refcounted view over the tree's page and outlives the read.
+  let data = {
+    let tree = tx.require_tree(entity.name.as_bytes())?;
+    let Some(data) = tree.get(id)? else {
+      return Ok(false)
+    };
+    data.to_vec()
   };
 
   let resp = update_fields(&update.update_fields, id, &data, entity, &db.schema, | field, old_value, new_value | {
@@ -40,6 +47,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
   })?;
 
   if let Some(new_data) = resp {
+    let mut tree = tx.require_tree(entity.name.as_bytes())?;
     tree.insert(id, &new_data)?;
   }
 
@@ -100,10 +108,35 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
   Ok(true)
 }
 
+/// Rows written before an add-field migration carry a shorter offset table than the current schema
+/// (see [`row_header_len`]). Reads tolerate that — a slot past the row's header is simply "missing" —
+/// but the write path below indexes the offset table directly against `entity.payload_offset`, so a
+/// short row must first be grown to the current layout: append the missing slots (`0` = absent) and
+/// shift the payload right. Returns `None` when the row is already current.
+fn widen_row(source_data: &[u8], entity: &Entity) -> Option<Vec<u8>> {
+  let header_len = row_header_len(source_data);
+  if header_len >= entity.payload_offset {
+    return None;
+  }
+
+  let delta = entity.payload_offset - header_len;
+  let mut buf = Vec::with_capacity(source_data.len() + delta);
+  buf.extend_from_slice(&source_data[..header_len]);
+  buf.resize(entity.payload_offset, 0);
+  buf.extend_from_slice(&source_data[header_len..]);
+
+  // The payload moved `delta` bytes further in, so every stored offset shifts with it
+  move_offsets(&mut buf, 4, header_len, delta as u32);
+  buf[2..4].copy_from_slice(&(entity.payload_offset as u16).to_be_bytes());
+  Some(buf)
+}
+
 fn update_fields<F>(fields: &[UpdateField], id: &[u8], source_data: &[u8], entity: &Entity, schema: &Schema, on_change: F) -> Result<Option<Vec<u8>>,UpdateError>
   where F: Fn(&Field, Option<&[u8]>, Option<&[u8]>) -> Result<(),UpdateError> {
 
-  let mut cloned_data: Option<Vec<u8>> = None;
+  // A widened row is already a modified buffer, so it doubles as the copy-on-write seed: the row gets
+  // rewritten in the current format even if no field ends up changing.
+  let mut cloned_data: Option<Vec<u8>> = widen_row(source_data, entity);
 
   for update_field in fields.iter() {
     let data = cloned_data.as_deref().unwrap_or(source_data);

@@ -393,4 +393,36 @@ use crate::{json_parsers::{parse_where::parse_where, parsers::EncodeError}, num_
       Err(EncodeError::NotNumber(_))
     );
   }
+
+  /// A field takes exactly one operator, so the intuitive two-sided form is rejected outright —
+  /// this is the case `$between` exists to serve (the alternative being an explicit `$and`).
+  #[test]
+  fn two_sided_range_on_one_field_test() {
+    let schema = parse_schema("
+      model Event {
+          name        String
+          startsAt    DateTime
+      }
+    ");
+    let event_model = &schema.models[0];
+
+    assert_matches!(
+      parse_where(&schema, event_model, &json!({
+        "startsAt": { "$gte": "2026-01-01T00:00:00.0Z", "$lt": "2026-02-01T00:00:00.0Z" }
+      })),
+      Err(EncodeError::OnlyOneKeyExpected(_, _))
+    );
+
+    // The two supported spellings both parse
+    parse_where(&schema, event_model, &json!({
+      "startsAt": { "$between": ["2026-01-01T00:00:00.0Z", "2026-02-01T00:00:00.0Z"] }
+    })).unwrap();
+
+    parse_where(&schema, event_model, &json!({
+      "$and": [
+        { "startsAt": { "$gte": "2026-01-01T00:00:00.0Z" } },
+        { "startsAt": { "$lt": "2026-02-01T00:00:00.0Z" } }
+      ]
+    })).unwrap();
+  }
 }

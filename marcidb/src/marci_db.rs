@@ -254,6 +254,15 @@ impl MarciDB {
     Ok(())
   }
 
+  /// Applies `update_op` to every row matching `query`, atomically. Returns how many rows matched;
+  /// on any error nothing is committed. See [`MarciTransaction::update_many`].
+  pub fn update_many(&self, entity: &Entity, query: &QueryOp, update_op: &UpdateOp) -> Result<u64, UpdateError> {
+    let tx = self.begin_write()?;
+    let updated = tx.update_many(entity, query, update_op)?;
+    tx.commit()?;
+    Ok(updated)
+  }
+
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
     let tx = self.begin_write()?;
     let is_delete = tx.delete_item(entity, id)?;

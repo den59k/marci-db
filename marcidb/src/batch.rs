@@ -49,6 +49,7 @@ impl std::error::Error for BatchError {}
 /// Result format by operation type:
 /// * `insert` — id object (as for a single insert)
 /// * `update` — `null`
+/// * `updateMany` — number of matched rows
 /// * `delete` — `true`/`false`
 /// * `findFirst` — object or `null`
 /// * `findMany` — array of objects
@@ -88,6 +89,14 @@ fn apply_op(tx: &MarciTransaction, db: &MarciDB, op: &Value, prior: &[Value]) ->
       tx.update_item(entity, &id, &update_op).map_err(BatchErrorKind::Update)?;
       Ok(Value::Null)
     },
+    "updateMany" => {
+      let query_json = update_many_query(&resolve_refs(field(obj, "query")?, prior)?);
+      let query = parse_query(&db.schema, entity, &query_json).map_err(parse_err)?;
+      let data = resolve_refs(field(obj, "data")?, prior)?;
+      let update_op = parse_update(&db.schema, entity, &data).map_err(parse_err)?;
+      let updated = tx.update_many(entity, &query, &update_op).map_err(BatchErrorKind::Update)?;
+      Ok(Value::from(updated))
+    },
     "delete" => {
       let id = parse_id(&db.schema, entity, &resolve_refs(field(obj, "id")?, prior)?).map_err(parse_err)?;
       let deleted = tx.delete_item(entity, &id).map_err(BatchErrorKind::Delete)?;
@@ -120,6 +129,15 @@ fn apply_op(tx: &MarciTransaction, db: &MarciDB, op: &Value, prior: &[Value]) ->
 
 fn field<'a>(obj: &'a serde_json::Map<String, Value>, name: &'static str) -> Result<&'a Value, BatchErrorKind> {
   obj.get(name).ok_or(BatchErrorKind::MissingField(name))
+}
+
+/// Narrows an `updateMany` query to the part that selects rows. `$`-keys are kept — `$where` drives the
+/// scan, and the ones `update_many` rejects (`$limit`/`$skip`/`$cursor`) must survive so they still
+/// surface as an error rather than being silently ignored. Everything else is a field selection or a
+/// relation include, which would only decode rows that updateMany discards.
+pub fn update_many_query(query: &Value) -> Value {
+  let Some(obj) = query.as_object() else { return query.clone() };
+  Value::Object(obj.iter().filter(|(k, _)| k.starts_with('$')).map(|(k, v)| (k.clone(), v.clone())).collect())
 }
 
 /// Error from a single (non-transactional) operation dispatched by [`execute_op`].
@@ -208,6 +226,13 @@ pub fn execute_op(db: &MarciDB, op: &Value) -> Result<Value, OpError> {
       let update_op = parse_update(&db.schema, entity, op_field(obj, "data")?).map_err(op_parse_err)?;
       db.update_item(entity, &id, &update_op).map_err(OpError::Update)?;
       Ok(Value::Null)
+    },
+    "updateMany" => {
+      let query_json = update_many_query(op_field(obj, "query")?);
+      let query = parse_query(&db.schema, entity, &query_json).map_err(op_parse_err)?;
+      let update_op = parse_update(&db.schema, entity, op_field(obj, "data")?).map_err(op_parse_err)?;
+      let updated = db.update_many(entity, &query, &update_op).map_err(OpError::Update)?;
+      Ok(Value::from(updated))
     },
     "delete" => {
       let id = parse_id(&db.schema, entity, op_field(obj, "id")?).map_err(op_parse_err)?;

@@ -628,6 +628,8 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("    findFirst<T extends {}>(select: T): Op<GetResult<{}, T> | null>", get_model_query_name(model), get_model_name(model)));
     lines.push(format!("    insert(data: {}): Op<{}>", get_model_insert_name(model), get_model_id_name(model)));
     lines.push(format!("    update(id: {}, data: {}): Op<void>", get_model_id_name(model), get_model_update_name(model)));
+    // Applies `data` to every matching row in one transaction; resolves to the number of rows matched
+    lines.push(format!("    updateMany(query: {{ $where?: {} }}, data: {}): Op<number>", get_model_where_name(model), get_model_update_name(model)));
     lines.push(format!("    delete(id: {}): Op<void>", get_model_id_name(model)));
     lines.push(format!("    count(query?: {{ $where?: {} }}): Op<number>", get_model_where_name(model)));
     lines.push(format!("    aggregate<T extends {}>(query: T): Op<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
@@ -655,6 +657,7 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("  findFirst: (select) => op({{ model: \"{0}\", action: \"findFirst\", query: select }}),", model.name));
     lines.push(format!("  insert: (data) => op({{ model: \"{0}\", action: \"insert\", data }}),", model.name));
     lines.push(format!("  update: (id, data) => op({{ model: \"{0}\", action: \"update\", id, data }}),", model.name));
+    lines.push(format!("  updateMany: (query, data) => op({{ model: \"{0}\", action: \"updateMany\", query: query ?? {{}}, data }}),", model.name));
     lines.push(format!("  delete: (id) => op({{ model: \"{0}\", action: \"delete\", id }}),", model.name));
     lines.push(format!("  count: (query) => op({{ model: \"{0}\", action: \"count\", query: query ?? {{}} }}),", model.name));
     let has_custom = model_has_custom_index(model);

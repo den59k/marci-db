@@ -33,6 +33,47 @@ impl<'db> MarciTransaction<'db> {
     process_update(&self.tx, entity, id, update_op, self.db)
   }
 
+  /// Applies `update` to every row matching `query`'s filter; returns how many rows matched.
+  ///
+  /// The count is rows *matched*, not rows whose stored bytes actually changed — re-applying a value a
+  /// row already holds still counts, matching what SQL `UPDATE` reports.
+  ///
+  /// Matching ids are resolved up front and only then updated, so the filter observes the pre-update
+  /// state: a row that stops matching part-way through is still updated, and one that starts matching
+  /// is not. Everything happens in this transaction, so an error part-way leaves nothing committed.
+  pub fn update_many(&self, entity: &Entity, query: &QueryOp, update: &UpdateOp) -> Result<u64, UpdateError> {
+    // `find_many` on a transaction ignores `query.search` (unlike `MarciDB::find_many`), and
+    // `split_search` has already lifted the search clause out of `filter` — so a `$near`/`$search`
+    // here would silently degrade into an unfiltered scan and update every row in the model.
+    if query.search.is_some() {
+      return Err(UpdateError::Unsupported("$near/$search is not supported in updateMany"));
+    }
+    // Relation ops recurse into related rows, so the work is unbounded in the number of matches.
+    if !update.update_refs.is_empty() {
+      return Err(UpdateError::Unsupported("relation operations are not supported in updateMany"));
+    }
+    // A bounded update without a total order would hit an arbitrary subset of the matches.
+    if query.limit.is_some() || query.skip.is_some() || query.cursor.is_some() {
+      return Err(UpdateError::Unsupported("$limit/$skip/$cursor are not supported in updateMany"));
+    }
+
+    // The scope here is load-bearing: the context keeps every tree the scan touched open, canopydb
+    // permits only one live handle per tree per write transaction, and `process_update` reopens the
+    // model tree (plus the index trees of any field it changes). The context must drop first.
+    let ids: Vec<Vec<u8>> = {
+      let mut ctx = TransationContext::new(&self.tx, &self.db.schema, |c: DecodeCtx<Vec<u8>>| c.id.to_vec());
+      process_query_many(query, &mut ctx, None)?
+    };
+
+    let mut updated = 0;
+    for id in ids.iter() {
+      if process_update(&self.tx, entity, id, update, self.db)? {
+        updated += 1;
+      }
+    }
+    Ok(updated)
+  }
+
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
     let action = prepare_delete(&self.db.schema, entity, Some(id), None);
     process_delete(&self.tx, id, entity, &action, &self.db.schema, &self.db.providers, None)
