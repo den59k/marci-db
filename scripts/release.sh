@@ -4,13 +4,14 @@
 # (.github/workflows/release.yml), which builds every platform and publishes the npm packages + GitHub
 # Release. All building/testing/publishing happens in CI; this script only stamps and tags.
 #
-#   ./release.sh <version> [--push] [--no-verify]
+#   ./scripts/release.sh <version> [--push] [--no-verify]
 #
 #   --push        also push the commit + tag (triggers the release CI). Without it, you push manually.
 #   --no-verify   skip the local `cargo check` pre-flight.
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# This script lives in scripts/; everything below operates on repo-root-relative paths.
+cd "$(dirname "$0")/.."
 
 VERSION="${1:-}"
 PUSH=0

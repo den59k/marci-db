@@ -11,7 +11,7 @@ Two kinds of benchmarks live in this repo:
 
 ## Engine micro-benchmarks
 
-Core-engine benchmarks live in [`marcidb/benches/`](../marcidb/benches/); the `@custom` index modules each
+Core-engine benchmarks live in [`crates/marcidb/benches/`](../crates/marcidb/benches/); the `@custom` index modules each
 carry their own:
 
 ```bash
@@ -42,7 +42,7 @@ read and decoded once. The cache disables itself adaptively if the first 256 loo
 Both build the index in a single `$reindex` and then time a search operator. Deterministic synthetic
 corpora (fixed-seed LCG), 5 000 rows each.
 
-#### Vector search (`marci-vector-index/benches/vector_search.rs`)
+#### Vector search (`crates/marci-vector-index/benches/vector_search.rs`)
 
 5 000 random embeddings, dim 128, `@custom(vector, cosine)`.
 
@@ -51,7 +51,7 @@ corpora (fixed-seed LCG), 5 000 rows each.
 | `$reindex` (build cluster tree) | ~56 ms |
 | `$near` search, k=10 | ~0.94 ms / query |
 
-#### Full-text search (`marci-fulltext-index/benches/fulltext_search.rs`)
+#### Full-text search (`crates/marci-fulltext-index/benches/fulltext_search.rs`)
 
 5 000 documents, ~24 words each, mixed English/Russian vocabulary, `@custom(fulltext)`.
 
