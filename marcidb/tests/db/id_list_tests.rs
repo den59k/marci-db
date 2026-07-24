@@ -163,6 +163,20 @@ fn id_list_update_ops() {
         assert_eq!(images_of(&db), json!({ "images": [] }));
         assert_eq!(db.count_dev("Image.galleries->Gallery"), 0);
     }
+
+    // $connectUnique appends only absent ids (set-flavored $connect): re-connecting an existing
+    // id is a no-op, and the batch itself is deduped
+    {
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$connect": [ img_a, img_b ] } }));
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$connectUnique": [ img_b, img_c, img_c ] } }));
+        assert_eq!(images_of(&db), json!({ "images": [{ "url": "a.png" }, { "url": "b.png" }, { "url": "c.png" }] }));
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 3);
+
+        // Everything already present — pure no-op, order untouched
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$connectUnique": [ img_c, img_a ] } }));
+        assert_eq!(images_of(&db), json!({ "images": [{ "url": "a.png" }, { "url": "b.png" }, { "url": "c.png" }] }));
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 3);
+    }
 }
 
 #[test]

@@ -21,6 +21,7 @@ pub mod increment_tests;
 pub mod float_json_tests;
 pub mod update_many_tests;
 pub mod id_list_tests;
+pub mod array_ops_tests;
 
 use std::str::FromStr;
 
@@ -40,6 +41,22 @@ pub fn update_data(db: &MarciDB, model: &str, item_id: &Value, data: Value) {
   let id = parse_id(&db.schema, entity, item_id).unwrap();
   let to_update = parse_update(&db.schema, entity, &data).unwrap();
   db.update_item(entity, &id, &to_update).unwrap();
+}
+
+/// `update` without unwrapping the execution result, for the rejection / rollback cases.
+/// The update op itself must parse — parse-level rejections are asserted via `parse_update` directly.
+pub fn try_update(db: &MarciDB, model: &str, item_id: &Value, data: Value) -> Result<(), marcidb::UpdateError> {
+  let entity = db.get_model(model).unwrap();
+  let id = parse_id(&db.schema, entity, item_id).unwrap();
+  let to_update = parse_update(&db.schema, entity, &data).unwrap();
+  db.update_item(entity, &id, &to_update)
+}
+
+/// `insert` without unwrapping, for unique-violation and similar rejection cases.
+pub fn try_insert(db: &MarciDB, model: &str, data: Value) -> Result<Vec<u8>, marcidb::InsertError> {
+  let entity = db.get_model(model).unwrap();
+  let to_insert = parse_insert(&db.schema, entity, &data).unwrap();
+  db.insert_item(entity, &to_insert)
 }
 
 pub fn update_many_data(db: &MarciDB, model: &str, query: Value, data: Value) -> u64 {

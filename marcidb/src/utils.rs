@@ -150,6 +150,64 @@ pub fn encode_id_list(ids: &[Vec<u8>]) -> Vec<u8> {
   out
 }
 
+/// Splits a primitive-list body value into its encoded elements, preserving order.
+/// Fixed-size elements: `[u32 count][elem]*`; var-size elements (strings, json):
+/// `[u32 count][(count+1) u32 offsets][bytes]`, offsets relative to the slot start.
+/// `None` (absent field) decodes as an empty list.
+pub fn decode_primitive_list(data: Option<&[u8]>, elem_size: Option<usize>) -> Vec<Vec<u8>> {
+  let Some(data) = data else { return vec![] };
+  if data.len() < 4 { return vec![] }
+  let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+  let mut items = Vec::with_capacity(count);
+  match elem_size {
+    Some(size) => {
+      let mut offset = 4;
+      for _ in 0..count {
+        if offset + size > data.len() { break }
+        items.push(data[offset..offset + size].to_vec());
+        offset += size;
+      }
+    }
+    None => {
+      if data.len() < 4 + (count + 1) * 4 { return items }
+      let off = |i: usize| u32::from_be_bytes(data[4 + i * 4..8 + i * 4].try_into().unwrap()) as usize;
+      for i in 0..count {
+        let (start, end) = (off(i), off(i + 1));
+        if start > end || end > data.len() { break }
+        items.push(data[start..end].to_vec());
+      }
+    }
+  }
+  items
+}
+
+/// Encodes elements back into a primitive-list body value (inverse of [`decode_primitive_list`])
+pub fn encode_primitive_list(items: &[Vec<u8>], elem_size: Option<usize>) -> Vec<u8> {
+  let payload: usize = items.iter().map(|i| i.len()).sum();
+  let mut out;
+  match elem_size {
+    Some(_) => {
+      out = Vec::with_capacity(4 + payload);
+      out.extend_from_slice(&(items.len() as u32).to_be_bytes());
+    }
+    None => {
+      let table_end = 4 + (items.len() + 1) * 4;
+      out = Vec::with_capacity(table_end + payload);
+      out.extend_from_slice(&(items.len() as u32).to_be_bytes());
+      let mut offset = table_end;
+      for item in items {
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        offset += item.len();
+      }
+      out.extend_from_slice(&(offset as u32).to_be_bytes());
+    }
+  }
+  for item in items {
+    out.extend_from_slice(item);
+  }
+  out
+}
+
 pub fn check_exists_condition(entity: &Entity, condition: &FieldExistsCondition, id: &[u8], data: &[u8], schema: &Schema) -> bool {
   match condition {
       FieldExistsCondition::EnumValue { field_index, variants } => {

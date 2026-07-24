@@ -20,7 +20,21 @@ pub struct UpdateField<'a> {
 pub enum UpdateValue {
   Null,
   Value(Vec<u8>),
-  Increment(NumberDelta)
+  Increment(NumberDelta),
+  /// In-place edit of a variable-length primitive list; the elements are individually encoded
+  ListOp { op: ListOp, items: Vec<Vec<u8>>, elem_size: Option<usize> },
+}
+
+/// The edit a primitive-list operator applies. The array is a sequence — the same
+/// value may appear several times (mirrors the `@list` relation semantics)
+#[derive(Debug)]
+pub enum ListOp {
+  /// Append at the end — an already-present value gains another occurrence
+  Push,
+  /// Append only the values not already present
+  PushUnique,
+  /// Remove every occurrence of the given values
+  Remove,
 }
 
 #[derive(Debug,PartialEq)]
@@ -92,6 +106,12 @@ pub enum UpdateRelationOp<'a> {
   Connect(Vec<Vec<u8>>),
   /// Removes relations to existing objects
   Disconnect(Vec<Vec<u8>>),
+  /// Replaces link membership with exactly the given set: missing links are disconnected,
+  /// new ones connected. Never creates or deletes the rows themselves
+  SetLinks(Vec<Vec<u8>>),
+  /// Owned (struct) list: partial update of single children, addressed by the child's own key
+  /// fields (the parent prefix of the storage key is supplied by the update context)
+  UpdateItems(Vec<(Vec<u8>, UpdateOp<'a>)>),
 
   /// `@list` relation: replaces the whole inline id array (also the reorder operation —
   /// same members in a new order rewrite the body without touching the reverse tree).
@@ -100,6 +120,8 @@ pub enum UpdateRelationOp<'a> {
   /// `@list` relation: appends ids to the end of the array — an already-present id gains
   /// another occurrence
   ConnectList(Vec<Vec<u8>>),
+  /// `@list` relation: appends only the ids not already present in the array
+  ConnectUniqueList(Vec<Vec<u8>>),
   /// `@list` relation: removes every occurrence of the given ids
   DisconnectList(Vec<Vec<u8>>),
 }
