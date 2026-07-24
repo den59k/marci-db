@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_delta}}, parse_id, schema::{Entity, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
+use crate::{Field, delete_op::prepare_delete, json_parsers::{EncodeError, parse_write_op::parse_insert_nested, parsers::{encode_enum, encode_list, encode_primitive_value, parse_field_value_delta, rev_id_list_field}}, parse_id, schema::{Entity, FieldExistsCondition, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, Schema}, update_op::{UpdateField, UpdateOp, UpdateRelation, UpdateRelationOp, UpdateValue}};
 
 pub fn parse_update<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) -> Result<UpdateOp<'a>, EncodeError> {
     let obj = json_val
@@ -105,6 +105,34 @@ fn parse_update_op<'a>(
                         _ => None
                     }
                 });
+
+                // `@list` relation: membership ops work on the inline id array (order-preserving)
+                if matches!(ref_info.binding, RefBinding::IdList { .. }) {
+                    for (key, value) in obj {
+                        let op = match key.as_str() {
+                            "$set" => {
+                                let ids = parse_many(field, value, |v| parse_id(schema, ref_entity, v))?;
+                                for (i, id) in ids.iter().enumerate() {
+                                    if ids[..i].contains(id) {
+                                        return Err(EncodeError::DuplicateListId(field.full_name.clone()));
+                                    }
+                                }
+                                UpdateRelationOp::SetList(ids)
+                            },
+                            "$connect" => UpdateRelationOp::ConnectList(unfold_array(value, |v| parse_id(schema, ref_entity, v))?),
+                            "$remove" => UpdateRelationOp::DisconnectList(unfold_array(value, |v| parse_id(schema, ref_entity, v))?),
+                            _ => return Err(EncodeError::UnsupportedOperation(key.clone()))
+                        };
+                        update_refs.push(UpdateRelation { field, st: ref_entity, op, ref_info, rev_ref_info });
+                    }
+                    continue;
+                }
+
+                // The partner owns the relation as an inline @list id array — this (tree-backed) side
+                // stores nothing, so membership can only be changed through the @list field
+                if let Some(list_field) = rev_id_list_field(schema, ref_info) {
+                    return Err(EncodeError::MutateViaListSide(field.full_name.clone(), list_field));
+                }
 
                 for (key, value) in obj {
                     let op = match key.as_str() {

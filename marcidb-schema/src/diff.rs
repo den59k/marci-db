@@ -336,6 +336,7 @@ fn binding_kind(binding: &RefBinding) -> &'static str {
         RefBinding::CurrentId => "current_id",
         RefBinding::FieldValue => "field_value",
         RefBinding::IndexTree(_) => "index_tree",
+        RefBinding::IdList { .. } => "id_list",
     }
 }
 
@@ -484,6 +485,23 @@ mod tests {
     fn diff_unchanged_is_empty() {
         let s = "model User {\n  name String\n  email String @unique\n}";
         assert!(diff_text(s, s).unwrap().is_empty());
+    }
+
+    /// Adding a `@list` relation field is a plain AddField; converting an existing tree-backed
+    /// relation to `@list` (or back) moves the relation's physical home and is rejected.
+    #[test]
+    fn diff_id_list_add_and_conversion() {
+        let base = "model Gallery {\n  name String\n}\nmodel Image {\n  url String\n}";
+        let with_list = "model Gallery {\n  name String\n  images Image[] @list\n}\nmodel Image {\n  url String\n}";
+        let with_tree = "model Gallery {\n  name String\n  images Image[] @bind(Image.galleries)\n}\nmodel Image {\n  url String\n  galleries Gallery[]\n}";
+
+        assert_eq!(diff_text(base, with_list).unwrap(), vec![
+            MigrateOp::AddField { entity: "Gallery".into(), field: "images".into() },
+        ]);
+        assert!(diff_text(with_list, with_list).unwrap().is_empty());
+
+        // index_tree → id_list is a binding change, not an in-place migration
+        assert!(matches!(diff_text(with_tree, with_list), Err(MigrateError::UnsupportedBindingChange { .. })));
     }
 
     fn body_offset(schema: &Schema, entity: &str, field: &str) -> usize {

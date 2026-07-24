@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, encode_id_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -100,6 +100,15 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
         },
         UpdateRelationOp::Disconnect(item_ids) => {
           delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
+        },
+        UpdateRelationOp::SetList(item_ids) => {
+          apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::Set(item_ids))?;
+        },
+        UpdateRelationOp::ConnectList(item_ids) => {
+          apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::Connect(item_ids))?;
+        },
+        UpdateRelationOp::DisconnectList(item_ids) => {
+          apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::Disconnect(item_ids))?;
         },
     }
   }
@@ -234,6 +243,79 @@ fn update_data(dst: &mut Vec<u8>, item_data: &[u8], entity: &Entity, offset_pos:
   }
 }
 
+/// The membership change a `@list` update applies to the inline id array
+enum IdListChange<'a> {
+  /// Replace the whole array (also the reorder op)
+  Set(&'a [Vec<u8>]),
+  /// Append to the end, skipping ids already present
+  Connect(&'a [Vec<u8>]),
+  /// Remove the given ids
+  Disconnect(&'a [Vec<u8>]),
+}
+
+/// Applies a `@list` membership change: rewrites the inline id array in the row body and keeps the
+/// reverse index tree in sync (only actual membership changes touch the tree — a pure reorder is
+/// just a body rewrite)
+fn apply_id_list_update(tx: &WriteTransaction, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &[u8], db: &MarciDB, change: IdListChange) -> Result<(), UpdateError> {
+  let FieldLocation::Body { offset_pos } = field.location else {
+    panic!("@list field must be body-located: {}", field.full_name);
+  };
+  let id_size = crate::schema::fixed_id_size(&db.schema.models, &db.schema.models[ref_info.model_index])
+    .expect("@list target id must be fixed-size");
+
+  // Re-read the current row: the scalar-field pass above may have already rewritten it.
+  // Scoped so the read handle is released before the write below (see the note at the top of process_update)
+  let data = {
+    let tree = tx.require_tree(entity.name.as_bytes())?;
+    let Some(data) = tree.get(id)? else { return Ok(()) };
+    data.to_vec()
+  };
+  // Rows written before an add-field migration must first grow to the current layout
+  let mut data = widen_row(&data, entity).unwrap_or(data);
+
+  let old_ids = decode_id_list(get_body_data(field, &data, offset_pos), id_size);
+
+  let new_ids: Vec<Vec<u8>> = match change {
+    IdListChange::Set(ids) => ids.to_vec(),
+    IdListChange::Connect(ids) => {
+      let mut out = old_ids.clone();
+      for item in ids {
+        if !out.contains(item) { out.push(item.clone()); }
+      }
+      out
+    },
+    IdListChange::Disconnect(ids) => old_ids.iter().filter(|i| !ids.contains(i)).cloned().collect(),
+  };
+
+  let removed: Vec<Vec<u8>> = old_ids.iter().filter(|i| !new_ids.contains(i)).cloned().collect();
+  let added: Vec<Vec<u8>> = new_ids.iter().filter(|i| !old_ids.contains(i)).cloned().collect();
+  if !removed.is_empty() {
+    delete_ref_indexes(tx, ref_info, &db.schema, id, &removed).map_err(|e| UpdateError::WriteIndexesError(e))?;
+  }
+  if !added.is_empty() {
+    write_ref_indexes(tx, ref_info, &db.schema, id, &added).map_err(|e| UpdateError::WriteIndexesError(e))?;
+  }
+
+  let offset_start = get_offset(&data, offset_pos);
+  if new_ids.is_empty() {
+    if offset_start != 0 {
+      set_null(&mut data, entity, field, offset_pos, offset_start);
+    }
+  } else {
+    let encoded = encode_id_list(&new_ids);
+    if offset_start == 0 {
+      insert_data(&mut data, &encoded, entity, offset_pos);
+    } else {
+      let offset_end = get_end_optimized(&data, field, offset_start, offset_pos, entity.payload_offset);
+      update_data(&mut data, &encoded, entity, offset_pos, offset_start, offset_end);
+    }
+  }
+
+  let mut tree = tx.require_tree(entity.name.as_bytes())?;
+  tree.insert(id, &data)?;
+  Ok(())
+}
+
 fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, ref_info: &RefInfo, id: &'a [u8], body: &'a [u8], schema: &Schema) -> Result<Option<Vec<u8>>, StorageError> {
   match &ref_info.binding {
     RefBinding::CurrentId => {
@@ -250,6 +332,7 @@ fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, re
         None => Ok(None),
       }
     },
+    RefBinding::IdList { .. } => panic!("A to-one relation cannot use an IdList binding"),
   }
 }
 
@@ -265,6 +348,8 @@ fn get_ids_from_ref_info(tx: &Transaction, obj_tree: &Tree, ref_info: &RefInfo, 
       let index_tree = tx.require_tree(tree_name.as_bytes())?;
       index_tree.prefix_keys(&id)?.map(|e| Ok(e?[item_id_len..].to_vec())).collect()
     },
+    // Only autoinsert (owned) lists reach here, and those are never @list
+    RefBinding::IdList { .. } => panic!("An owned-list operation cannot target an IdList binding"),
   }
 }
 

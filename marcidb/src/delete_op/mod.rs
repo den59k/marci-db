@@ -16,8 +16,10 @@ pub struct DeleteOp<'a> {
 impl DeleteOp<'_> {
   pub fn is_body_need(&self) -> bool {
     // A `Custom` entry needs the old field value, which is read from the body — so force the body read too.
+    // A `@list` id array (own field or a dependency's forward binding) is likewise read from the body.
     return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. } | DeleteIndex::Custom { .. })) ||
-      self.dependencies.iter().any(|f| matches!(f.binding, Some((_, RefBinding::FieldValue))))
+      self.dependencies.iter().any(|f| matches!(f.binding, Some((_, RefBinding::FieldValue)) | Some((_, RefBinding::IdList { .. })))) ||
+      self.refs_to_delete.iter().any(|f| matches!(f, RefToDelete::IdListRev { .. }))
   }
   pub fn is_empty(&self) -> bool {
     return self.indexes_to_delete.is_empty() && self.dependencies.is_empty() && self.refs_to_delete.is_empty()
@@ -37,7 +39,10 @@ pub enum DeleteIndex<'a> {
 #[derive(Debug)]
 pub enum RefToDelete<'a> {
   Index { tree_name: String },
-  ChildEntity { entity: &'a Entity, delete_op: DeleteOp<'a> }
+  ChildEntity { entity: &'a Entity, delete_op: DeleteOp<'a> },
+  /// Owner of a `@list` relation with no declared back-reference is deleted: the hidden reverse tree
+  /// still holds `member_id ++ owner_id` entries for every member in the body array — tear them down
+  IdListRev { tree_name: String, field: &'a Field },
 }
 
 #[derive(Debug)]
@@ -55,7 +60,10 @@ pub enum DependencyActionType<'a> {
   Delete (DeleteOp<'a>),
   SetNull { offset_pos: usize },
   Restrict,
-  RemoveIndex { tree_name: String }
+  RemoveIndex { tree_name: String },
+  /// A row referenced by a `@list` id array is deleted: splice its id out of every owner's inline
+  /// array (owners are found via the reverse tree) and drop the reverse-tree entries
+  RemoveFromIdList { tree_name: String },
 }
 
 #[derive(Debug,PartialEq)]

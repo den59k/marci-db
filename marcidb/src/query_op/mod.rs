@@ -83,6 +83,9 @@ pub enum PrefixKey<'a> {
   ParentId,
   ParentField(&'a Field),
   ParentIndexTree(String),
+  /// `@list` relation: the ordered id array lives in the parent's body field; `id_size` is the
+  /// fixed byte size of one target id (the array is `[u32 count][id]*`)
+  ParentIdList { field: &'a Field, id_size: usize },
   IndexRange { start: Option<Vec<u8>>, end: Option<Vec<u8>>, tree_name: String, fixed_size: Option<usize> },
   Id(Vec<u8>),
   IdPrefix(Vec<u8>),

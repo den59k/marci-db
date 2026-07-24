@@ -87,7 +87,7 @@ pub fn try_parse_schema(input: &str) -> Result<Schema, SchemaError> {
     }
 
     resolve_bind_refs(&mut models)?;
-    resolve_ref_bindings(&mut models);
+    resolve_ref_bindings(&mut models)?;
 
     resolve_ref_constraints(&mut models)?;
 
@@ -355,7 +355,8 @@ fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
                                 continue;
                             },
                             RefBinding::FieldValue => DeleteConstraint::SetNull,
-                            RefBinding::IndexTree(_) => { continue; }
+                            RefBinding::IndexTree(_) => { continue; },
+                            RefBinding::IdList { .. } => unreachable!("IdList binding is only set on RefList fields"),
                        };
                     }
 
@@ -374,10 +375,12 @@ fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
                         RefBinding::FieldValue => {
                             return Err(SchemaError(format!("Cannot use @bind FieldValue for a list relation: {:?}", ref_info.binding)));
                         },
-                        RefBinding::IndexTree(_) => { 
-                            refs[ref_info.model_index].push(EntityDependency { 
-                                model_index: model_index, 
-                                field_index: field_index, 
+                        // Deleting a related row must remove it from the relation: index entries for the
+                        // tree-backed list, an inline splice-out for the @list id array
+                        RefBinding::IndexTree(_) | RefBinding::IdList { .. } => {
+                            refs[ref_info.model_index].push(EntityDependency {
+                                model_index: model_index,
+                                field_index: field_index,
                                 constraint: DeleteConstraint::RemoveItem
                             });
                         }

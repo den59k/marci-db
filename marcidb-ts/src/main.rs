@@ -1,6 +1,17 @@
 use std::{env, fs, path::Path};
 
-use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, PrimitiveFieldType, Schema, parse_schema};
+use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, RefInfo, Schema, parse_schema};
+
+/// Whether this relation field is a `@list` id array (the owning side)
+fn is_id_list(field: &Field) -> bool {
+  matches!(&field.ty, FieldType::Ref(ri) | FieldType::RefList(ri) if matches!(ri.binding, RefBinding::IdList { .. }))
+}
+
+/// Whether the relation's partner field is a `@list` id array. Such a back-reference is read-only:
+/// membership is changed through the `@list` side, so Insert/Update expose it as `never`.
+fn partner_is_id_list(schema: &Schema, ref_info: &RefInfo) -> bool {
+  ref_info.rev_field_idx.is_some_and(|i| is_id_list(&schema.models[ref_info.model_index].fields[i]))
+}
 
 fn get_model_id_name(model: &Entity) -> String {
   format!("{}ModelId", model.name.replace('.', "_"))
@@ -368,7 +379,11 @@ fn get_field_insert_str(field: &Field, schema: &Schema) -> String {
   let field_nullable = if field.nullable { " | null" } else { "" };
   match &field.ty {
     FieldType::RefList(ref_info) => {
-      let to_insert = if schema.models[ref_info.model_index].autoinsert { 
+      // The back-reference of a `@list` relation stores nothing — writes go through the @list side
+      if partner_is_id_list(schema, ref_info) {
+        return format!("  {}?: never", field.name);
+      }
+      let to_insert = if schema.models[ref_info.model_index].autoinsert {
         get_model_insert_name(&schema.models[ref_info.model_index])
       } else {
         get_model_id_name(&schema.models[ref_info.model_index])
@@ -392,9 +407,16 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
 
   match &field.ty {
     FieldType::RefList(ref_info) => {
+      // The back-reference of a `@list` relation is read-only — writes go through the @list side
+      if partner_is_id_list(schema, ref_info) {
+        return format!("  {}?: never", field.name);
+      }
       let ref_model = &schema.models[ref_info.model_index];
       let to_update = if ref_model.autoinsert {
         format!("RefListUpdateStruct<{},{}>", get_model_insert_name(ref_model), get_model_update_name(ref_model))
+      } else if is_id_list(field) {
+        // `@list`: $set replaces (and reorders) the whole array; $connect appends; $remove splices out
+        format!("RefListUpdateOrdered<{}>", get_model_id_name(ref_model))
       } else {
         format!("RefListUpdate<{}>", get_model_id_name(ref_model))
       };

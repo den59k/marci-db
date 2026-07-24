@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use memchr::memmem;
 use serde_json::Value;
 
-use crate::{StorageError, json_parsers::jsonb, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::get_data};
+use crate::{StorageError, json_parsers::jsonb, query_op::{FieldCompare, FieldCompareRef, JsonFilter, JsonOp, PrefixKey, TransationContext, Where, process_query::{get_ids_by_prefix, get_prefix}}, schema::{Entity}, utils::{decode_id_list, get_data}};
 
 pub fn process_where<'a, 'b, U, F>(id: &'b [u8], body: &'b [u8], ctx: &mut TransationContext<'a, U, F>, entity: &Entity, where_op: &Where<'a>) -> Result<bool, StorageError> {
 
@@ -115,6 +115,24 @@ pub fn has_items<'a, U, F>(
       let value = tree.get(&id)?.unwrap();
       let matched = process_where(&id, &value, ctx, entity, where_op)?;
       // Every: first one that fails → false; Some: first one that passes → true
+      if matched != check_all {
+        return Ok(matched);
+      }
+    }
+    return Ok(check_all);
+  }
+
+  // `@list` relation: the related ids come from the parent's inline array
+  if let PrefixKey::ParentIdList { field, id_size } = prefix_key {
+    let ids = decode_id_list(get_data(parent_entity, field, parent_id, parent_body, ctx.schema), *id_size);
+    if ids.is_empty() {
+      return Ok(check_all);
+    }
+    let tree = ctx.get_tree(&entity.name)?;
+    for id in ids {
+      // A dangling id is treated as not-a-row: it can't satisfy $some and doesn't fail $every
+      let Some(value) = tree.get(&id)? else { continue };
+      let matched = process_where(&id, &value, ctx, entity, where_op)?;
       if matched != check_all {
         return Ok(matched);
       }

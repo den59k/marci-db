@@ -205,7 +205,11 @@ impl RefInfo {
 pub enum RefBinding {
     CurrentId,
     FieldValue,
-    IndexTree(String)
+    IndexTree(String),
+    /// `@list` relation: the related ids live inline in the row body as an ordered array
+    /// (`[u32 count][fixed-size id]*`). `rev_tree` is the reverse index tree (`related_id ++ owner_id`),
+    /// always maintained — it backs the declared back-reference (if any) and delete integrity.
+    IdList { rev_tree: String },
 }
 
 #[derive(Debug,Clone)]
@@ -256,7 +260,10 @@ pub fn parse_field_raw(line: &str) -> Result<Field, SchemaError> {
     if is_id {
         location = FieldLocation::Key { index: 0 };
     } else if matches!(ty, FieldType::RefListUnresolved(_)) {
-        location = FieldLocation::Virtual;
+        // A `@list` relation list stays in the body (inline id array); a plain relation list is virtual
+        if !attributes.iter().any(|attr| matches!(attr, Attribute::List)) {
+            location = FieldLocation::Virtual;
+        }
     }
 
     let format = attributes.iter().find_map(|attr| if let Attribute::Format(fmt) = attr { Some(fmt.clone()) } else { None });

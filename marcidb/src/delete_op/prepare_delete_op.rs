@@ -53,7 +53,7 @@ pub fn collect_indexes_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, id:
   return indexes_to_delete;
 }
 
-pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity, ignore_ref: Option<&Field>) -> Vec<RefToDelete<'a>> {
+pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, ignore_ref: Option<&Field>) -> Vec<RefToDelete<'a>> {
   let mut resp = vec![];
 
   for field in entity.fields.iter() {
@@ -74,6 +74,13 @@ pub fn collect_refs_to_delete<'a>(schema: &'a Schema, entity: &Entity, ignore_re
       RefBinding::FieldValue => continue,
       RefBinding::IndexTree(tree_name) => {
         resp.push(RefToDelete::Index { tree_name: tree_name.clone() });
+      }
+      RefBinding::IdList { rev_tree } => {
+        // With a declared back-reference the partner's dependency (RemoveIndex) cleans the reverse
+        // tree; a hidden reverse tree has no partner, so the owner's delete must clean it itself
+        if ref_info.rev_field_idx.is_none() {
+          resp.push(RefToDelete::IdListRev { tree_name: rev_tree.clone(), field });
+        }
       }
     }
   }
@@ -111,10 +118,13 @@ pub fn collect_dependency_actions<'a>(schema: &'a Schema, entity: &'a Entity, ig
         DependencyActionType::Delete(prepare_delete(schema, rev_entity, None, ignore_item))
       },
       DeleteConstraint::RemoveItem => {
-        let RefBinding::IndexTree(tree_name) = &rev_ref_info.binding else {
-          panic!("DeleteConstraint::RemoveItem cannot use with not-IndexTree binding {:?}", rev_ref_info.binding);
-        };
-        DependencyActionType::RemoveIndex { tree_name: tree_name.clone() }
+        match &rev_ref_info.binding {
+          RefBinding::IndexTree(tree_name) => DependencyActionType::RemoveIndex { tree_name: tree_name.clone() },
+          // The deleted row sits inside `@list` id arrays — owners are found via the reverse tree,
+          // then the id is spliced out of each owner's body
+          RefBinding::IdList { rev_tree } => DependencyActionType::RemoveFromIdList { tree_name: rev_tree.clone() },
+          _ => panic!("DeleteConstraint::RemoveItem cannot use with binding {:?}", rev_ref_info.binding),
+        }
       }
     };
 

@@ -78,3 +78,19 @@ pub struct EntityDependency {
     pub field_index: usize,
     pub constraint: DeleteConstraint
 }
+
+/// Total byte size of an entity's storage key, if every key field has a fixed size
+/// (recursing through Ref-typed key fields). `None` when any key part is variable-length.
+/// `@list` relations require a fixed-size target id — the inline array is `[u32 count][id]*`
+/// and is split back into ids by this size.
+pub fn fixed_id_size(models: &[Entity], entity: &Entity) -> Option<usize> {
+    let mut size = 0;
+    for field in entity.fields.iter() {
+        if !matches!(field.location, FieldLocation::Key { .. }) { continue; }
+        size += match &field.ty {
+            FieldType::Ref(ref_info) => fixed_id_size(models, &models[ref_info.model_index])?,
+            _ => field.get_size()?,
+        };
+    }
+    Some(size)
+}

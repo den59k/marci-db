@@ -142,7 +142,18 @@ pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Sch
       insert_index(&mut tree, id, item_id)?;
     }
   }
-  
+
+  // `@list`: the forward direction lives in the row body (already written); only the reverse tree is
+  // maintained here. That tree doubles as the declared back-reference's index, so the rev-field pass
+  // below must not run — it would write the same entries again.
+  if let RefBinding::IdList { rev_tree } = &ref_info.binding {
+    let mut tree = tx.require_tree(rev_tree.as_bytes())?;
+    for item_id in ids {
+      insert_index(&mut tree, item_id, id)?;
+    }
+    return Ok(());
+  }
+
   let is_unique = ref_info.is_unique;
   if let Some(ref_field_idx) = ref_info.rev_field_idx {
     match &schema.models[ref_info.model_index].fields[ref_field_idx].ty {
@@ -168,6 +179,16 @@ pub fn delete_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Sc
     for item_id in ids {
       tree.delete(&[ id, item_id.as_slice() ].concat())?;
     }
+  }
+
+  // `@list`: mirror of write_ref_indexes — tear down the reverse-tree entries and skip the rev-field
+  // pass (the reverse tree IS the declared back-reference's index)
+  if let RefBinding::IdList { rev_tree } = &ref_info.binding {
+    let mut tree = tx.require_tree(rev_tree.as_bytes())?;
+    for item_id in ids {
+      tree.delete(&[ item_id.as_slice(), id ].concat())?;
+    }
+    return Ok(());
   }
 
   if let Some(ref_field_idx) = ref_info.rev_field_idx {

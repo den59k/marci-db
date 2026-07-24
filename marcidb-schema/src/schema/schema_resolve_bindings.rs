@@ -114,12 +114,74 @@ fn update_rev_index(field: &mut Field, field_ref: &FieldRef, rev_field_ref: &Fie
     }
 }
 
+/// Cross-model field facts, snapshotted before the mutable binding pass below
+struct FieldMeta {
+    full_name: String,
+    is_key: bool,
+    virtual_reflist: bool,
+}
+
 /// Sets RefBinding for Ref and RefList
-pub fn resolve_ref_bindings(models: &mut [Entity]) {
+pub fn resolve_ref_bindings(models: &mut [Entity]) -> Result<(), SchemaError> {
     let model_names: Vec<String> = models.iter().map(|f| f.name.clone()).collect();
-    for model in models.iter_mut() {
+    let metas: Vec<Vec<FieldMeta>> = models.iter().map(|m| m.fields.iter().map(|f| FieldMeta {
+        full_name: f.full_name.clone(),
+        is_key: matches!(f.location, FieldLocation::Key { .. }),
+        virtual_reflist: matches!(f.ty, FieldType::RefList(_)) && matches!(f.location, FieldLocation::Virtual),
+    }).collect()).collect();
+    let id_sizes: Vec<Option<usize>> = models.iter().map(|m| super::fixed_id_size(models, m)).collect();
+
+    // (expected reverse tree, target model, rev field index, owner field name) — checked in the post-pass
+    let mut id_list_revs: Vec<(String, usize, usize, String)> = vec![];
+
+    for (model_index, model) in models.iter_mut().enumerate() {
+        let model_name = model_names[model_index].clone();
         let key_fields_count = model.fields.iter().filter(|f| matches!(f.location, FieldLocation::Key { .. })).count();
         for (field_index, field) in model.fields.iter_mut().enumerate() {
+            let has_list_attr = field.attributes.iter().any(|a| matches!(a, Attribute::List));
+            let is_virtual = matches!(field.location, FieldLocation::Virtual);
+            let is_body = matches!(field.location, FieldLocation::Body { .. });
+
+            // `@list`: the relation is stored inline as an ordered id array in the row body,
+            // plus a reverse index tree (`related_id ++ owner_id`) for back-references and delete integrity
+            if has_list_attr {
+                let FieldType::RefList(ref_info) = &mut field.ty else {
+                    return Err(SchemaError(format!("@list is only allowed on relation lists (Model[]): {}", field.full_name)));
+                };
+                // A struct target flips the field to Virtual during desugaring — an owned collection has no id array
+                if !is_body {
+                    return Err(SchemaError(format!("@list relation {} must target a model, not a struct (owned collections cannot be stored as an id array)", field.full_name)));
+                }
+                if ref_info.parent_index.is_some() {
+                    return Err(SchemaError(format!("@list relation {} cannot bind into a struct field", field.full_name)));
+                }
+                if id_sizes[ref_info.model_index].is_none() {
+                    return Err(SchemaError(format!(
+                        "@list relation {}: target {} must have a fixed-size id (variable-length keys are not supported in an inline id array)",
+                        field.full_name, model_names[ref_info.model_index]
+                    )));
+                }
+                let rev_tree = match ref_info.rev_field_idx {
+                    Some(rev_idx) => {
+                        let rev = &metas[ref_info.model_index][rev_idx];
+                        if !rev.virtual_reflist {
+                            return Err(SchemaError(format!(
+                                "@list relation {}: the bound field {} must be a plain relation list (the id array lives on the @list side; the back-reference stores nothing)",
+                                field.full_name, rev.full_name
+                            )));
+                        }
+                        // Must match the IndexTree name the reverse side derives for itself below
+                        let tree = format!("{}->{}", rev.full_name, model_name);
+                        id_list_revs.push((tree.clone(), ref_info.model_index, rev_idx, field.full_name.clone()));
+                        tree
+                    }
+                    // No back-reference declared — a hidden reverse tree, still required for delete integrity
+                    None => format!("{}<-{}", field.full_name, model_names[ref_info.model_index]),
+                };
+                ref_info.binding = RefBinding::IdList { rev_tree };
+                continue;
+            }
+
             let (FieldType::Ref(ref_info) | FieldType::RefList(ref_info)) = &mut field.ty else {
                 continue;
             };
@@ -129,13 +191,16 @@ pub fn resolve_ref_bindings(models: &mut [Entity]) {
                 ref_info.binding = RefBinding::CurrentId;
                 continue;
             }
-            // The same applies to the table we reference - if its field comes first, then that element is located directly in the table
-            if let Some(ref_field_idx) = ref_info.rev_field_idx && ref_field_idx == 0 { 
+            // The same applies to the table we reference - if its key field comes first, then that element
+            // is located directly in the table. (A non-key partner at index 0 — e.g. a @list id array —
+            // does not make the related rows reachable by key prefix.)
+            if let Some(ref_field_idx) = ref_info.rev_field_idx && ref_field_idx == 0
+                && metas[ref_info.model_index][ref_field_idx].is_key {
                 ref_info.binding = RefBinding::CurrentId;
                 continue;
             }
             // Also there's no point setting indexes on non-virtual fields if there is no back-reference
-            if !matches!(field.location, FieldLocation::Virtual) {
+            if !is_virtual {
                 ref_info.binding = RefBinding::FieldValue;
                 continue;
             }
@@ -144,6 +209,21 @@ pub fn resolve_ref_bindings(models: &mut [Entity]) {
             ref_info.binding = RefBinding::IndexTree(tree_name);
         }
     }
+
+    // Post-pass: the declared reverse of every @list relation must have resolved to the expected IndexTree
+    // (a partner caught by the CurrentId shortcuts above would silently break the reverse reads)
+    for (expected_tree, target_model, rev_idx, owner_full_name) in id_list_revs {
+        let rev_field = &models[target_model].fields[rev_idx];
+        let (FieldType::Ref(ri) | FieldType::RefList(ri)) = &rev_field.ty else { continue };
+        if !matches!(&ri.binding, RefBinding::IndexTree(tree) if tree == &expected_tree) {
+            return Err(SchemaError(format!(
+                "@list relation {}: the bound field {} did not resolve to an index-tree back-reference (move it after the model's @id field)",
+                owner_full_name, rev_field.full_name
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 

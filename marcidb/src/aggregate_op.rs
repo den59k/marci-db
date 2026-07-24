@@ -60,6 +60,14 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
         let index_tree = ctx.get_tree(tree_name)?;
         index_tree.prefix_keys(&parent.unwrap().1)?.try_fold(0u64, |n, k| k.map(|_| n + 1))?
       },
+      // `@list` relation: the count is the array header in the parent's body — no reads at all
+      Some(PrefixKey::ParentIdList { field, .. }) => {
+        let (parent_entity, parent_id, parent_body) = parent.unwrap();
+        match get_data(parent_entity, field, parent_id, parent_body, ctx.schema) {
+          Some(data) if data.len() >= 4 => u32::from_be_bytes(data[0..4].try_into().unwrap()) as u64,
+          _ => 0,
+        }
+      },
       Some(prefix_key) => {
         let Some(prefix) = get_prefix(prefix_key, parent, ctx.schema) else {
           return Ok(result);
@@ -121,6 +129,20 @@ pub fn process_aggregate<'a, U, F>(op: &'a AggregateOp, ctx: &mut TransationCont
           let value = tree.get(&id)?.unwrap();
           Ok((id, value))
         });
+      aggregate_rows(iter, ctx, op, &mut acc)?;
+    },
+    Some(PrefixKey::ParentIdList { field, id_size }) => {
+      let (parent_entity, parent_id, parent_body) = parent.unwrap();
+      let ids = crate::utils::decode_id_list(get_data(parent_entity, field, parent_id, parent_body, ctx.schema), *id_size);
+      let tree = ctx.get_tree(&op.entity.name)?;
+      // A dangling id is skipped defensively, like in the query path
+      let iter = ids.into_iter().filter_map(|id| {
+        match tree.get(&id) {
+          Ok(Some(value)) => Some(Ok((id, value))),
+          Ok(None) => None,
+          Err(e) => Some(Err(e)),
+        }
+      });
       aggregate_rows(iter, ctx, op, &mut acc)?;
     },
     Some(prefix_key) => {
