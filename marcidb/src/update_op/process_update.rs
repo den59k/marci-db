@@ -243,13 +243,14 @@ fn update_data(dst: &mut Vec<u8>, item_data: &[u8], entity: &Entity, offset_pos:
   }
 }
 
-/// The membership change a `@list` update applies to the inline id array
+/// The membership change a `@list` update applies to the inline id array.
+/// The array is a sequence — the same id may appear several times.
 enum IdListChange<'a> {
   /// Replace the whole array (also the reorder op)
   Set(&'a [Vec<u8>]),
-  /// Append to the end, skipping ids already present
+  /// Append to the end — an already-present id gains another occurrence
   Connect(&'a [Vec<u8>]),
-  /// Remove the given ids
+  /// Remove every occurrence of the given ids
   Disconnect(&'a [Vec<u8>]),
 }
 
@@ -279,14 +280,15 @@ fn apply_id_list_update(tx: &WriteTransaction, entity: &Entity, field: &Field, r
     IdListChange::Set(ids) => ids.to_vec(),
     IdListChange::Connect(ids) => {
       let mut out = old_ids.clone();
-      for item in ids {
-        if !out.contains(item) { out.push(item.clone()); }
-      }
+      out.extend(ids.iter().cloned());
       out
     },
     IdListChange::Disconnect(ids) => old_ids.iter().filter(|i| !ids.contains(i)).cloned().collect(),
   };
 
+  // The reverse tree is a membership index (one entry per distinct pair), so the diff is on
+  // membership, not occurrences: an id still present after the change keeps its entry, and
+  // duplicate inserts/deletes of the same key are idempotent in the tree
   let removed: Vec<Vec<u8>> = old_ids.iter().filter(|i| !new_ids.contains(i)).cloned().collect();
   let added: Vec<Vec<u8>> = new_ids.iter().filter(|i| !old_ids.contains(i)).cloned().collect();
   if !removed.is_empty() {

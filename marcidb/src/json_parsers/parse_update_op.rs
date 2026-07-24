@@ -110,15 +110,8 @@ fn parse_update_op<'a>(
                 if matches!(ref_info.binding, RefBinding::IdList { .. }) {
                     for (key, value) in obj {
                         let op = match key.as_str() {
-                            "$set" => {
-                                let ids = parse_many(field, value, |v| parse_id(schema, ref_entity, v))?;
-                                for (i, id) in ids.iter().enumerate() {
-                                    if ids[..i].contains(id) {
-                                        return Err(EncodeError::DuplicateListId(field.full_name.clone()));
-                                    }
-                                }
-                                UpdateRelationOp::SetList(ids)
-                            },
+                            // The array is a sequence — duplicates are allowed, order is kept as given
+                            "$set" => UpdateRelationOp::SetList(parse_many(field, value, |v| parse_id(schema, ref_entity, v))?),
                             "$connect" => UpdateRelationOp::ConnectList(unfold_array(value, |v| parse_id(schema, ref_entity, v))?),
                             "$remove" => UpdateRelationOp::DisconnectList(unfold_array(value, |v| parse_id(schema, ref_entity, v))?),
                             _ => return Err(EncodeError::UnsupportedOperation(key.clone()))

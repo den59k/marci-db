@@ -154,7 +154,9 @@ fn parse_write_op<'a>(
                         let ref_id = parse_id(schema, ref_entity, value)?;
                         refs.push(WriteRelation::Connect { field, ref_info, ids: vec![ ref_id ], st: &schema.models[ref_info.model_index] });
                     },
-                    // `@list` relation: the ids are stored inline as an ordered array [u32 count][id]*
+                    // `@list` relation: the ids are stored inline as an ordered array [u32 count][id]*.
+                    // The array is a sequence, not a set — the same id may appear several times; the
+                    // reverse tree keeps one entry per distinct pair (duplicate inserts are idempotent)
                     FieldType::RefList(ref_info) => {
                         let ref_entity = &schema.models[ref_info.model_index];
                         let Some(arr) = value.as_array() else {
@@ -166,11 +168,7 @@ fn parse_write_op<'a>(
                         }
                         let mut ids: Vec<Vec<u8>> = Vec::with_capacity(arr.len());
                         for obj in arr.iter() {
-                            let ref_id = parse_id(schema, ref_entity, obj)?;
-                            if ids.contains(&ref_id) {
-                                return Err(EncodeError::DuplicateListId(field.full_name.clone()));
-                            }
-                            ids.push(ref_id);
+                            ids.push(parse_id(schema, ref_entity, obj)?);
                         }
                         write_header(&mut data, offset_pos);
                         data.extend_from_slice(&crate::utils::encode_id_list(&ids));

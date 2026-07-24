@@ -86,14 +86,14 @@ model Image {
 }
 ```
 
-A plain many-to-many keeps its links in index trees, so related rows always come back ordered by id. `@list` stores the related **ids inline in the row body as an ordered array** — the insert/`$set` order is the result order. That makes it the right tool wherever the user arranges the collection by hand: image galleries, playlists, kanban columns, pinned items.
+A plain many-to-many keeps its links in index trees, so related rows always come back ordered by id — and each pair can exist only once. `@list` stores the related **ids inline in the row body as an ordered array** — the insert/`$set` order is the result order, and the array is a *sequence*, so the same item may appear several times. That makes it the right tool wherever the user arranges the collection by hand: image galleries, playlists, kanban columns, pinned items.
 
 ```ts
-await db.gallery.create({ name: "Trip", images: [img3, img1, img2] })   // order is meaningful
+await db.gallery.create({ name: "Trip", images: [img3, img1, img2, img3] })  // order is meaningful, repeats allowed
 
 await db.gallery.update(id, { images: { $set: [img1, img3] } })   // replace — also the reorder op
 await db.gallery.update(id, { images: { $connect: img4 } })       // append at the end
-await db.gallery.update(id, { images: { $remove: img3 } })        // splice out
+await db.gallery.update(id, { images: { $remove: img3 } })        // remove every occurrence
 ```
 
 Everything else reads the same as a tree-backed relation: nested selects (`images: { url: true }`, in array order), `$some`/`$every`/`$none` filters, and `$count` (which is O(1) — the stored array length). Deletes stay consistent in both directions: deleting an `Image` splices it out of every gallery, deleting a `Gallery` cleans up its links.
@@ -101,8 +101,8 @@ Everything else reads the same as a tree-backed relation: nested selects (`image
 Rules and trade-offs:
 
 - The target model must have a **fixed-size id** (autoincrement `UInt`, `Byte[16] @format(uuid)`, composite fixed keys) — not `String @id`.
-- Duplicate ids in one array are rejected.
-- The back-reference (`Image.galleries`) is optional and **read-only**: it answers "which galleries contain this image" (backed by a reverse index tree, ordered by owner id), but `$connect`/`$remove`/insert on it are rejected — membership is changed through the `@list` side. Without a declared back-reference the reverse tree is still maintained internally for delete integrity.
+- **Duplicates are first-class**: the same id may appear several times (something a tree-backed relation physically cannot represent). `$count` counts occurrences; `$connect` always appends (it is *not* idempotent); `$remove` severs the relation — every occurrence goes. For positional edits (remove one of several occurrences, insert in the middle) use `$set` with the exact new array.
+- The back-reference (`Image.galleries`) is optional and **read-only**: it answers "which galleries contain this image" (backed by a reverse index tree, ordered by owner id — each owner listed once, however many times the item repeats in it), but `$connect`/`$remove`/insert on it are rejected — membership is changed through the `@list` side. Without a declared back-reference the reverse tree is still maintained internally for delete integrity.
 - The array lives in the row: every membership change rewrites the row, and every row read carries the array. Use `@list` for hand-ordered collections of up to roughly a thousand members; for unbounded sets (chat members, followers) keep the plain index-tree relation.
 - `@list` cannot target a `struct` (owned children have no standalone ids), and converting an existing relation between `@list` and the tree-backed form is rejected by migrations — add a new field and backfill instead.
 - Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
