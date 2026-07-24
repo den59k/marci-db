@@ -1,4 +1,4 @@
-use crate::{StorageError, index_utils::{make_index_cursor_key, make_sort_key}, query_op::{DecodeCtx, PrefixKey, QueryOp, TransationContext, process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, maybe_rev, range_keys_iter}, process_where::process_where}, utils::get_data};
+use crate::{StorageError, index_utils::{make_index_cursor_key, make_sort_key}, query_op::{DecodeCtx, PrefixKey, QueryOp, TransationContext, process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, maybe_rev, range_keys_iter}, process_where::process_where}, utils::{decode_id_list, get_data}};
 
 pub fn process_query_many<'a, U, F>
   (query: &'a QueryOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> Result<Vec<U>, StorageError>
@@ -41,6 +41,32 @@ pub fn process_query_many_limited<'a, U, F>
           Ok((id, value))
         });
       collect_rows(iter, ctx, query, hard_limit, cursor_gate)
+    },
+    Some(PrefixKey::ParentIdList { field, id_size }) => {
+      // `@list` relation: iterate the parent's inline id array — its order IS the result order
+      let (parent_entity, parent_id, parent_body) = parent.unwrap();
+      let mut ids = decode_id_list(get_data(parent_entity, field, parent_id, parent_body, ctx.schema), *id_size);
+
+      // The scan has no key order, so the cursor is positional: results start strictly after the
+      // cursor id's position in the array (a cursor id no longer in the array yields nothing)
+      if !query.post_sort && let Some(gate) = &cursor_gate {
+        match ids.iter().position(|i| i == gate) {
+          Some(pos) => { ids.drain(..=pos); },
+          None => return Ok(vec![]),
+        }
+      }
+
+      let tree = ctx.get_tree(&query.entity.name)?;
+      // A dangling id (target row gone) is skipped defensively rather than failing the query
+      let iter = maybe_rev(ids.into_iter(), query.reverse).filter_map(|id| {
+        match tree.get(&id) {
+          Ok(Some(value)) => Some(Ok((id, value))),
+          Ok(None) => None,
+          Err(e) => Some(Err(e)),
+        }
+      });
+      let gate = if query.post_sort { cursor_gate } else { None };
+      collect_rows(iter, ctx, query, hard_limit, gate)
     },
     Some(PrefixKey::IndexRange { start, end, tree_name, fixed_size }) => {
       let index_tree = ctx.get_tree(tree_name)?;

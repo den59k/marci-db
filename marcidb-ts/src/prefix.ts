@@ -39,6 +39,14 @@ type RefListUpdate<I> = {
   "$remove"?: I | I[],
 }
 
+/** `@list` relation: an ordered inline id array. `$set` replaces the whole array (also the reorder
+ * operation); `$connect` appends at the end; `$remove` splices out. */
+type RefListUpdateOrdered<I> = {
+  "$set"?: I[],
+  "$connect"?: I | I[],
+  "$remove"?: I | I[],
+}
+
 type RefListUpdateStruct<I,U> = {
   "$push"?: I | I[],
   "$remove"?: I | I[],

@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use bitvec::prelude::*;
 
-use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_aggregate_op::parse_aggregate, parse_where::parse_where, parsers::parse_id}, query_op::{FieldCompare, IncludeQuery, PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, Schema}};
+use crate::{Field, index_utils::generate_prefix_from_where, json_parsers::{EncodeError, parse_aggregate_op::parse_aggregate, parse_where::parse_where, parsers::parse_id}, query_op::{FieldCompare, IncludeQuery, PrefixKey, QueryInclude, QueryOp, QueryType, Sort, Where}, schema::{Entity, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, RefBinding, RefInfo, Schema}};
 
 const AGGREGATE_KEYS: [&str; 5] = ["$count", "$sum", "$avg", "$min", "$max"];
 
@@ -60,18 +60,18 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
           return Err(ParseError::TypeMismatch { field: field.full_name.clone(), expected: "list relation for aggregate".to_string() });
         }
         let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
-        op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
+        op.prefix_key = Some(get_prefix_key(schema, ref_info, field));
         resolve_sort_plan(&mut op);
         includes.push(QueryInclude { query_type: QueryType::One, field, query: IncludeQuery::Query(op) });
       }
       FieldType::RefList (ref_info) => {
         if has_aggregate_keys(val) {
-          let op = parse_aggregate_include(val, &schema.models[ref_info.model_index], field, schema, &ref_info.binding)?;
+          let op = parse_aggregate_include(val, &schema.models[ref_info.model_index], field, schema, ref_info)?;
           includes.push(QueryInclude { query_type: QueryType::Many, field, query: IncludeQuery::Aggregate(op) });
           continue;
         }
         let mut op = parse_query_ref(val, &schema.models[ref_info.model_index], field, schema)?;
-        op.prefix_key = Some(get_prefix_key(&ref_info.binding, field));
+        op.prefix_key = Some(get_prefix_key(schema, ref_info, field));
         resolve_sort_plan(&mut op);
         includes.push(QueryInclude { query_type: QueryType::Many, field, query: IncludeQuery::Query(op) });
       }
@@ -142,7 +142,7 @@ fn has_aggregate_keys(val: &Value) -> bool {
 }
 
 /// Aggregation over related records: select fields and order/limits inside it are not allowed
-fn parse_aggregate_include<'a>(val: &Value, ref_entity: &'a Entity, field: &'a Field, schema: &'a Schema, binding: &'a RefBinding) -> Result<crate::aggregate_op::AggregateOp<'a>, ParseError> {
+fn parse_aggregate_include<'a>(val: &Value, ref_entity: &'a Entity, field: &'a Field, schema: &'a Schema, ref_info: &'a RefInfo) -> Result<crate::aggregate_op::AggregateOp<'a>, ParseError> {
   let Some(obj) = val.as_object() else {
     return Err(ParseError::NotAnObject);
   };
@@ -159,7 +159,7 @@ fn parse_aggregate_include<'a>(val: &Value, ref_entity: &'a Entity, field: &'a F
   let mut op = parse_aggregate(schema, ref_entity, val)?;
   // The scan goes by the parent binding; its own prefix from $where is replaced,
   // the filter remains a residual condition
-  op.prefix_key = Some(get_prefix_key(binding, field));
+  op.prefix_key = Some(get_prefix_key(schema, ref_info, field));
   op.fully_covered = false;
   Ok(op)
 }
@@ -211,6 +211,15 @@ fn parse_order<'a>(entity: &'a Entity, order_value: &Value) -> Result<Sort<'a>, 
 pub fn resolve_sort_plan(query: &mut QueryOp) {
   query.reverse = false;
   query.post_sort = false;
+
+  // `@list` include: the scan follows the parent's id array, which is its own order — no tree order
+  // to reuse (even for `id`), so any explicit $order sorts in memory. Without $order the array
+  // order IS the result order ($cursor is resolved positionally during execution).
+  if matches!(query.prefix_key, Some(PrefixKey::ParentIdList { .. })) {
+    query.post_sort = query.sort.is_some();
+    return;
+  }
+
   let Some(sort) = &query.sort else {
     // $cursor without $order means ordering by id: the $where index scan goes
     // in value order, so it has to be abandoned
@@ -284,8 +293,8 @@ fn parse_query_ref<'a>(val: &Value, ref_entity: &'a Entity, field: &'a Field, sc
   return parse_query_internal(schema, &ref_entity, obj);
 }
 
-pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKey<'a> {
-  match &binding {
+pub fn get_prefix_key<'a>(schema: &'a Schema, ref_info: &'a RefInfo, field: &'a Field) -> PrefixKey<'a> {
+  match &ref_info.binding {
     RefBinding::CurrentId => {
       return PrefixKey::ParentId;
     }
@@ -294,6 +303,12 @@ pub fn get_prefix_key<'a>(binding: &'a RefBinding, field: &'a Field) -> PrefixKe
     },
     RefBinding::IndexTree(tree_name) => {
       return PrefixKey::ParentIndexTree(tree_name.clone())
+    },
+    RefBinding::IdList { .. } => {
+      // Guaranteed fixed-size by schema validation (@list requires a fixed-size target id)
+      let id_size = crate::schema::fixed_id_size(&schema.models, &schema.models[ref_info.model_index])
+        .expect("@list target id must be fixed-size");
+      return PrefixKey::ParentIdList { field, id_size }
     },
   }
 }

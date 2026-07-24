@@ -65,8 +65,16 @@ impl From<MigrateError> for MigrateApplyError { fn from(e: MigrateError) -> Self
 pub fn apply(tx: &WriteTransaction, old: &Schema, new: &Schema, ops: &[MigrateOp]) -> Result<(), MigrateApplyError> {
   for op in ops {
     match op {
-      // Metadata: the new slot is already in `new`, old rows are read by the forward-compatible reader
-      MigrateOp::AddField { .. } | MigrateOp::AlterField { .. } => {}
+      // Metadata: the new slot is already in `new`, old rows are read by the forward-compatible reader.
+      // A `@list` relation field additionally needs its reverse tree to exist before the first write
+      // (existing rows simply have an empty array).
+      MigrateOp::AddField { entity, field } => {
+        let f = find_field(find_entity(new, entity), field);
+        if let FieldType::RefList(ref_info) = &f.ty && let RefBinding::IdList { rev_tree } = &ref_info.binding {
+          tx.get_or_create_tree(rev_tree.as_bytes())?;
+        }
+      }
+      MigrateOp::AlterField { .. } => {}
       MigrateOp::AddIndex { entity, field, .. } => build_index(tx, new, entity, field)?,
       MigrateOp::DropIndex { entity, field, .. } => drop_index(tx, old, entity, field)?,
       MigrateOp::CreateEntity { name } => create_entity_trees(tx, find_entity(new, name))?,
@@ -95,8 +103,12 @@ pub fn create_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(),
   tx.get_or_create_tree(entity.name.as_bytes())?;
   for field in entity.fields.iter() {
     if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
-      if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
-        tx.get_or_create_tree(tree_name.as_bytes())?;
+      match &ref_info.binding {
+        RefBinding::IndexTree(tree_name) => { tx.get_or_create_tree(tree_name.as_bytes())?; }
+        // Idempotent with the declared back-reference's IndexTree (same name), and the only
+        // creation point for a hidden reverse tree
+        RefBinding::IdList { rev_tree } => { tx.get_or_create_tree(rev_tree.as_bytes())?; }
+        _ => {}
       }
     }
     for index in field.indexes.iter() {
@@ -109,8 +121,14 @@ pub fn create_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(),
 fn drop_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(), canopydb::Error> {
   for field in entity.fields.iter() {
     if let FieldType::Ref(ref_info) | FieldType::RefList(ref_info) = &field.ty {
-      if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
-        tx.delete_tree(tree_name.as_bytes())?;
+      match &ref_info.binding {
+        RefBinding::IndexTree(tree_name) => { tx.delete_tree(tree_name.as_bytes())?; }
+        // A declared back-reference owns the same tree and drops it with ITS entity — only the
+        // hidden reverse tree is this entity's to drop
+        RefBinding::IdList { rev_tree } if ref_info.rev_field_idx.is_none() => {
+          tx.delete_tree(rev_tree.as_bytes())?;
+        }
+        _ => {}
       }
     }
     for index in field.indexes.iter() {

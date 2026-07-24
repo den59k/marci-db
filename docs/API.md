@@ -60,6 +60,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `@index` — secondary index on a scalar/enum/list (used by `$where`, `$order` and aggregations). **Not** valid on a relation field — index a relation through its reverse collection (`@bind`) instead
 - `@default(value)` — also `autoincrement()`, `now()`
 - `@bind(Model.field)` — declares the reverse side of a relation
+- `@list` — on a relation list (`Model[]`): stores the related ids **inline in the row as an ordered array** instead of a virtual index-tree relation — see [Ordered relation lists](#ordered-relation-lists-list)
 - `@format(uuid | hex)` — JSON representation of byte fields
 - `@onDelete(...)` — delete constraint for relations (`Cascade`, `SetNull`, `Restrict`)
 - `@vector(cosine | euclidean)` / `@fulltext(multi | english | russian)` — module-provided indexes: nearest-neighbour on a `Float[N]` field, ranked text search on a `String` field. Any attribute that matches no built-in is parsed as a module index named after the keyword (`@<provider>(args)`); `@custom(<provider>, args)` is the explicit equivalent. Queried with `$near` / `$search`; full-text is maintained live on writes, vector is built by `reindex()` (also used to backfill) — see [Vector & full-text search](#vector--full-text-search)
@@ -70,6 +71,40 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `Model` / `Model[]` fields — relations by id; lists require a `@bind` on the opposite side.
 - **Composite-key relations** — a join table (`model ChatUser { chat Chat @id  user User @id }`) or a child keyed by `parent + autoincrement` (`model Message { chat Chat @id  id UInt @id @default(autoincrement()) }`) is fully supported, including `@onDelete(Cascade)`: deleting the parent removes the owned children (and their children), while merely-referenced rows are left untouched. The composite-key ref must carry `@onDelete(Cascade)` (a key cannot be set null).
 - `enum` variants may carry **payload fields** which are injected into the model itself. In TS this is a discriminated union: `{ role: "viewer" } | { role: "admin", level: number, sign: string } | { role: "moderator", sign: string }`. Switching the variant on update requires the full payload of the new variant and clears fields of the old one.
+
+### Ordered relation lists (`@list`)
+
+```
+model Gallery {
+    name      String
+    images    Image[]    @list
+}
+
+model Image {
+    url        String
+    galleries  Gallery[]  @bind(Gallery.images)   // optional back-reference (read-only)
+}
+```
+
+A plain many-to-many keeps its links in index trees, so related rows always come back ordered by id. `@list` stores the related **ids inline in the row body as an ordered array** — the insert/`$set` order is the result order. That makes it the right tool wherever the user arranges the collection by hand: image galleries, playlists, kanban columns, pinned items.
+
+```ts
+await db.gallery.create({ name: "Trip", images: [img3, img1, img2] })   // order is meaningful
+
+await db.gallery.update(id, { images: { $set: [img1, img3] } })   // replace — also the reorder op
+await db.gallery.update(id, { images: { $connect: img4 } })       // append at the end
+await db.gallery.update(id, { images: { $remove: img3 } })        // splice out
+```
+
+Everything else reads the same as a tree-backed relation: nested selects (`images: { url: true }`, in array order), `$some`/`$every`/`$none` filters, and `$count` (which is O(1) — the stored array length). Deletes stay consistent in both directions: deleting an `Image` splices it out of every gallery, deleting a `Gallery` cleans up its links.
+
+Rules and trade-offs:
+
+- The target model must have a **fixed-size id** (autoincrement `UInt`, `Byte[16] @format(uuid)`, composite fixed keys) — not `String @id`.
+- Duplicate ids in one array are rejected.
+- The back-reference (`Image.galleries`) is optional and **read-only**: it answers "which galleries contain this image" (backed by a reverse index tree, ordered by owner id), but `$connect`/`$remove`/insert on it are rejected — membership is changed through the `@list` side. Without a declared back-reference the reverse tree is still maintained internally for delete integrity.
+- The array lives in the row: every membership change rewrites the row, and every row read carries the array. Use `@list` for hand-ordered collections of up to roughly a thousand members; for unbounded sets (chat members, followers) keep the plain index-tree relation.
+- `@list` cannot target a `struct` (owned children have no standalone ids), and converting an existing relation between `@list` and the tree-backed form is rejected by migrations — add a new field and backfill instead.
 - Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
 
 ## Queries

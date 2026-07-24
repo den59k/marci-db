@@ -79,7 +79,7 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
   match &field.ty {
     FieldType::Ref(ref_info) => {
       let entity = &schema.models[ref_info.model_index];
-      let prefix = get_prefix_key(&ref_info.binding, field);
+      let prefix = get_prefix_key(schema, ref_info, field);
 
       if value.is_null() {
         return Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::NotExists)])
@@ -112,7 +112,7 @@ fn parse_field_compare<'a>(schema: &'a Schema, field: &'a Field, value: &Value) 
       }
       let (key, value) = obj.iter().next().unwrap();
       let entity = &schema.models[ref_info.model_index];
-      let prefix = get_prefix_key(&ref_info.binding, field);
+      let prefix = get_prefix_key(schema, ref_info, field);
       let filter = Box::new(parse_where(schema, entity, value)?);
       return match key.as_str() {
         "$every" => Ok(vec![FieldCompare::Ref(entity, prefix, FieldCompareRef::Every(filter))]),

@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde_json::{Map, Value};
 
-use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, index_utils::encode_index, json_parsers::parsers::{EncodeError, encode_enum, encode_id_value, encode_list, encode_primitive_value, parse_id, rev_id_list_field}, schema::{Entity, FieldDefault, FieldIndex, FieldLocation, FieldType, RefInfo, Schema}, utils::check_exists_condition, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 const VERSION: u8 = 1;
 
@@ -150,9 +150,31 @@ fn parse_write_op<'a>(
                         let connect_id = parse_id(schema, ref_entity, value)?;
                         write_header(&mut data, offset_pos);
                         data.extend(connect_id);
-                        
+
                         let ref_id = parse_id(schema, ref_entity, value)?;
                         refs.push(WriteRelation::Connect { field, ref_info, ids: vec![ ref_id ], st: &schema.models[ref_info.model_index] });
+                    },
+                    // `@list` relation: the ids are stored inline as an ordered array [u32 count][id]*
+                    FieldType::RefList(ref_info) => {
+                        let ref_entity = &schema.models[ref_info.model_index];
+                        let Some(arr) = value.as_array() else {
+                            return Err(EncodeError::type_mismatch(field, "Array"))
+                        };
+                        if arr.is_empty() {
+                            // Absent field (offset 0) already reads as an empty list
+                            continue;
+                        }
+                        let mut ids: Vec<Vec<u8>> = Vec::with_capacity(arr.len());
+                        for obj in arr.iter() {
+                            let ref_id = parse_id(schema, ref_entity, obj)?;
+                            if ids.contains(&ref_id) {
+                                return Err(EncodeError::DuplicateListId(field.full_name.clone()));
+                            }
+                            ids.push(ref_id);
+                        }
+                        write_header(&mut data, offset_pos);
+                        data.extend_from_slice(&crate::utils::encode_id_list(&ids));
+                        refs.push(WriteRelation::Connect { field, ref_info, ids, st: ref_entity });
                     },
                     FieldType::Enum(enum_def) => {
                         write_header(&mut data, offset_pos);
@@ -179,6 +201,11 @@ fn parse_write_op<'a>(
                         }
                     },
                     FieldType::RefList (ref_info) => {
+                        // The partner owns the relation as an inline @list id array — connecting from
+                        // this side would leave that array unchanged, so it is rejected
+                        if let Some(list_field) = rev_id_list_field(schema, ref_info) {
+                            return Err(EncodeError::MutateViaListSide(field.full_name.clone(), list_field));
+                        }
                         let ref_entity = &schema.models[ref_info.model_index];
                         let Some(value) = value.as_array() else {
                             return Err(EncodeError::type_mismatch(field, "Array"))

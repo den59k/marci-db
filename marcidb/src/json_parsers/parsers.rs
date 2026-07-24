@@ -302,8 +302,26 @@ pub enum EncodeError {
     MissingRequiredField(String),
     /// `null` was passed to the field, but it is non-nullable
     NullNotAllowed(String),
+    /// The same id appears twice in a `@list` relation array
+    DuplicateListId(String),
+    /// The relation is owned by a `@list` id array on the other side — membership (connect/remove/set)
+    /// can only be changed through the `@list` field itself
+    MutateViaListSide(String, String),
 }
 
+
+/// If the relation's partner field is a `@list` id array, returns its full name — membership of such a
+/// relation can only be changed through the `@list` side (the tree-backed side stores nothing itself)
+pub fn rev_id_list_field(schema: &Schema, ref_info: &crate::schema::RefInfo) -> Option<String> {
+    let rev_idx = ref_info.rev_field_idx?;
+    let rev_field = &schema.models[ref_info.model_index].fields[rev_idx];
+    match &rev_field.ty {
+        FieldType::Ref(ri) | FieldType::RefList(ri) if matches!(ri.binding, crate::schema::RefBinding::IdList { .. }) => {
+            Some(rev_field.full_name.clone())
+        }
+        _ => None,
+    }
+}
 
 impl EncodeError {
     pub fn type_mismatch(field: &Field, expected: impl Into<String>) -> Self {

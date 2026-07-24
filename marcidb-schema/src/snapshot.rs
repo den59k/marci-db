@@ -132,14 +132,16 @@ fn serialize_binding(binding: &RefBinding) -> String {
     RefBinding::CurrentId => "@current_id".to_string(),
     RefBinding::FieldValue => "@field_value".to_string(),
     RefBinding::IndexTree(name) => format!("@index_tree({})", name),
+    RefBinding::IdList { rev_tree } => format!("@id_list({})", rev_tree),
   }
 }
 
 /// Structural attributes needed to rebuild caches on load.
-/// `Id` → provided by location; `BindUnresolved` → replaced by the pinned binding; both → None.
+/// `Id` → provided by location; `BindUnresolved` → replaced by the pinned binding; `List` → pinned as the
+/// `@id_list` binding (the `@slot` location already marks the field as body-stored); all → None.
 fn serialize_attr(attr: &Attribute) -> Option<String> {
   Some(match attr {
-    Attribute::Id | Attribute::BindUnresolved(_) => return None,
+    Attribute::Id | Attribute::BindUnresolved(_) | Attribute::List => return None,
     Attribute::Unique => "@unique".to_string(),
     Attribute::Index => "@index".to_string(),
     Attribute::Default(s) => format!("@default({})", s),
@@ -452,6 +454,8 @@ fn apply_attr_token(sf: &mut SnapField, token: &str) -> Result<(), SchemaError> 
         sf.location = FieldLocation::Body { offset_pos: n.parse().map_err(|_| SchemaError(format!("snapshot: bad slot: {}", token)))? };
       } else if let Some(t) = inside(token, "index_tree") {
         sf.binding = Some(RefBinding::IndexTree(t));
+      } else if let Some(t) = inside(token, "id_list") {
+        sf.binding = Some(RefBinding::IdList { rev_tree: t });
       } else if let Some(r) = inside(token, "rev") {
         sf.rev = Some(r);
       } else if let Some(p) = inside(token, "parent") {
@@ -639,6 +643,45 @@ struct UserRole {
 
     // 16 hex chars (u64).
     assert_eq!(h1.len(), 16, "fingerprint should be 16 hex chars, got {:?}", h1);
+  }
+
+  /// A `@list` relation round-trips: the pinned `@id_list(rev_tree)` binding and the body slot survive
+  /// serialize → parse → serialize, for both the declared-reverse and hidden-reverse forms.
+  #[test]
+  fn snapshot_round_trips_id_list() {
+    let schema = parse_schema("
+model Gallery {
+    name      String
+    images    Image[]    @list
+}
+
+model Image {
+    url        String
+    galleries  Gallery[]  @bind(Gallery.images)
+}
+
+model Playlist {
+    name    String
+    tracks  Track[]  @list
+}
+
+model Track {
+    title   String
+}
+");
+    let s1 = serialize_snapshot(&schema);
+    assert!(s1.contains("@id_list(Image.galleries->Gallery)"), "declared reverse tree not pinned:\n{}", s1);
+    assert!(s1.contains("@id_list(Playlist.tracks<-Track)"), "hidden reverse tree not pinned:\n{}", s1);
+
+    let reparsed = parse_snapshot(&s1).unwrap();
+    assert_eq!(s1, serialize_snapshot(&reparsed), "id_list round-trip diverged:\n{}", s1);
+
+    // The binding (not just the text) is restored — and the field stayed body-located
+    let gallery = reparsed.models.iter().find(|m| m.name == "Gallery").unwrap();
+    let images = gallery.fields.iter().find(|f| f.name == "images").unwrap();
+    assert!(matches!(images.location, FieldLocation::Body { .. }));
+    assert!(matches!(&images.ty, FieldType::RefList(ri)
+      if matches!(&ri.binding, RefBinding::IdList { rev_tree } if rev_tree == "Image.galleries->Gallery")));
   }
 
   /// Targeted check that parse_snapshot restored the resolved state (not just the text)

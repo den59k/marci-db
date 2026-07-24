@@ -13,7 +13,7 @@ mod march;
 pub use crate::schema::{
     parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field, Entity, FieldLocation, FieldType,
     PrimitiveFieldType, FieldExistsCondition, EnumInfo, RefInfo, RefBinding, Attribute, DeleteConstraint,
-    FieldCustomFormat, FieldDefault, FieldIndex, FieldIndexNum, EntityDependency,
+    FieldCustomFormat, FieldDefault, FieldIndex, FieldIndexNum, EntityDependency, fixed_id_size,
 };
 // Materialized-snapshot codec (the engine's schema persistence format)
 pub use crate::snapshot::{serialize_snapshot, parse_snapshot, serialize_type, serialize_field, schema_fingerprint};

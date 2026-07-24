@@ -86,6 +86,23 @@ pub fn process_delete<'a>(
           tree.delete(&[ item_id, id ].concat())?;
         }
       },
+      DependencyActionType::RemoveFromIdList { tree_name } => {
+        // item_ids are the owners whose `@list` array contains the deleted id (from the reverse tree):
+        // splice the id out of each owner's body and drop the reverse-tree entry (`deleted ++ owner`)
+        let mut owner_tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
+        let mut index_tree = tx.require_tree(tree_name.as_bytes())?;
+        for item_id in item_ids.iter() {
+          // The Bytes view must be dropped (copied out) before writing through the same handle —
+          // a live refcounted view of the page trips canopydb's dirty-page uniqueness assertion
+          let row = owner_tree.get(item_id)?.map(|row| row.to_vec());
+          if let Some(mut body) = row {
+            if remove_from_id_list_row(dep.rev_field, &mut body, id) {
+              owner_tree.insert(item_id, &body)?;
+            }
+          }
+          index_tree.delete(&[ id, item_id.as_slice() ].concat())?;
+        }
+      },
       DependencyActionType::Restrict => {
         return Err(DeleteError::RestrictConstraints(dep.rev_field.full_name.clone(), item_ids))
       },
@@ -93,6 +110,21 @@ pub fn process_delete<'a>(
   }
 
   for ref_to_delete in &action.refs_to_delete {
+    // A `@list` owner with a hidden reverse tree: its members are in the (already-read) body —
+    // drop the `member ++ owner` reverse entries for each
+    if let RefToDelete::IdListRev { tree_name, field } = ref_to_delete {
+      let body = body_value.as_deref().expect("an IdListRev ref forces is_body_need");
+      let crate::schema::FieldType::RefList(ref_info) = &field.ty else { panic!("IdListRev on a non-list field") };
+      let crate::schema::FieldLocation::Body { offset_pos } = field.location else { panic!("IdListRev on a non-body field") };
+      let id_size = crate::schema::fixed_id_size(&schema.models, &schema.models[ref_info.model_index])
+        .expect("@list target id must be fixed-size");
+      let members = crate::utils::decode_id_list(crate::utils::get_body_data(field, body, offset_pos), id_size);
+      let mut tree = tx.require_tree(tree_name.as_bytes())?;
+      for member in members {
+        tree.delete(&[ member.as_slice(), id ].concat())?;
+      }
+      continue;
+    }
     // An owned (CurrentId) collection whose children carry their OWN dependencies/indexes can't be
     // bulk-removed by prefix — each child must be deleted individually so its cleanup runs. Children
     // are stored under this row's key prefix. (When a Cascade dependency already deleted them above,
@@ -128,6 +160,7 @@ pub fn delete_ref_data(tx: &Transaction, ref_to_delete: &RefToDelete, parent_id:
         return Err(DeleteError::Unsupported("cascade delete of a nested owned collection with its own dependencies is not supported yet"));
       }
     }
+    RefToDelete::IdListRev { .. } => unreachable!("IdListRev is handled inline in process_delete (needs the body)"),
   }
   Ok(())
 }
@@ -145,6 +178,13 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
         return Ok(vec![]);
       };
       vec![value.to_vec()]
+    },
+    Some((field, RefBinding::IdList { .. })) => {
+      // The deleted row's own `@list` array holds the related ids directly
+      let crate::schema::FieldType::RefList(ref_info) = &field.ty else { panic!("IdList binding on a non-list field") };
+      let id_size = crate::schema::fixed_id_size(&schema.models, &schema.models[ref_info.model_index])
+        .expect("@list target id must be fixed-size");
+      crate::utils::decode_id_list(get_data(entity, field, &id, body.as_ref().unwrap(), &schema), id_size)
     },
     Some((_, RefBinding::IndexTree(tree_name))) => {
       let item_id_len = id.len();
@@ -185,10 +225,51 @@ fn get_dep_ids(tx: &Transaction, dep: &DependencyAction, entity: &Entity, schema
           }
           item_ids
         },
+        RefBinding::IdList { rev_tree } => {
+          // `@list` with no declared back-reference: the hidden reverse tree maps
+          // `member_id ++ owner_id`, so the owners are a prefix scan by the deleted id
+          let id_len = id.len();
+          let index_tree = tx.require_tree(rev_tree.as_bytes())?;
+          index_tree.prefix_keys(&id)?
+            .map(|e| Ok(e?[id_len..].to_vec()))
+            .collect::<Result<Vec<_>, canopydb::Error>>()?
+        },
       }
     },
   };
   Ok(item_ids)
+}
+
+/// Splices `target_id` out of the row's inline `@list` array, shifting later offsets left.
+/// Returns whether the row changed. Tolerates short (pre-migration) rows — nothing stored, nothing removed.
+fn remove_from_id_list_row(field: &Field, body: &mut Vec<u8>, target_id: &[u8]) -> bool {
+  let crate::schema::FieldLocation::Body { offset_pos } = field.location else {
+    panic!("@list field must be body-located: {}", field.full_name);
+  };
+  let Some(old_value) = crate::utils::get_body_data(field, body, offset_pos) else { return false };
+  let ids = crate::utils::decode_id_list(Some(old_value), target_id.len());
+  let new_ids: Vec<Vec<u8>> = ids.into_iter().filter(|i| i != target_id).collect();
+
+  // Offsets are bounded by the row's own header — the row may be shorter than the current schema
+  let header_len = crate::utils::row_header_len(body);
+  let offset_start = get_offset(body, offset_pos);
+  let offset_end = crate::utils::get_end(body, offset_pos, header_len);
+  let old_len = offset_end - offset_start;
+
+  if new_ids.is_empty() {
+    body[offset_pos..offset_pos + 4].copy_from_slice(&0u32.to_be_bytes());
+    body.drain(offset_start..offset_end);
+    crate::utils::move_offsets_left(body, offset_pos + 4, header_len, old_len as u32);
+  } else {
+    let encoded = crate::utils::encode_id_list(&new_ids);
+    if encoded.len() == old_len {
+      return false; // the id was not in the array (already removed) — nothing changed
+    }
+    let shrink = (old_len - encoded.len()) as u32;
+    body.splice(offset_start..offset_end, encoded.into_iter());
+    crate::utils::move_offsets_left(body, offset_pos + 4, header_len, shrink);
+  }
+  true
 }
 
 fn set_null(entity: &Entity, field: &Field, body: &mut Vec<u8>, offset_pos: usize) {

@@ -124,6 +124,32 @@ pub fn get_data<'a>(entity: &Entity, field: &Field, id: &'a[u8], body: &'a[u8], 
   }
 }
 
+/// Splits an inline `@list` body value (`[u32 count][fixed-size id]*`) into ids, preserving order.
+/// `None` (absent field) decodes as an empty list.
+pub fn decode_id_list(data: Option<&[u8]>, id_size: usize) -> Vec<Vec<u8>> {
+  let Some(data) = data else { return vec![] };
+  if data.len() < 4 { return vec![] }
+  let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+  let mut ids = Vec::with_capacity(count);
+  let mut offset = 4;
+  for _ in 0..count {
+    if offset + id_size > data.len() { break }
+    ids.push(data[offset..offset + id_size].to_vec());
+    offset += id_size;
+  }
+  ids
+}
+
+/// Encodes ids into the inline `@list` body value (`[u32 count][id]*`)
+pub fn encode_id_list(ids: &[Vec<u8>]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(4 + ids.iter().map(|i| i.len()).sum::<usize>());
+  out.extend_from_slice(&(ids.len() as u32).to_be_bytes());
+  for id in ids {
+    out.extend_from_slice(id);
+  }
+  out
+}
+
 pub fn check_exists_condition(entity: &Entity, condition: &FieldExistsCondition, id: &[u8], data: &[u8], schema: &Schema) -> bool {
   match condition {
       FieldExistsCondition::EnumValue { field_index, variants } => {

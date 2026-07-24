@@ -12,6 +12,10 @@ pub enum Attribute {
     /// `name` selects the index provider; `args` is the raw remainder, parsed by the provider itself
     /// (the schema layer stays provider-agnostic). Materialized into [`super::FieldIndex::Custom`].
     Custom { name: String, args: String },
+    /// `@list` on a relation list: the related ids are stored inline in the row body as an ordered
+    /// array (insertion order is preserved) instead of a virtual index-tree relation.
+    /// Materialized into [`super::RefBinding::IdList`].
+    List,
     InjectUnresolved(Vec<(String,String)>),
     OnDelete(DeleteConstraint),
     Format(FieldCustomFormat)
@@ -42,6 +46,10 @@ pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
 
     if s.starts_with("id") {
         return Ok(Attribute::Id)
+    }
+
+    if s == "list" || s.starts_with("list ") {
+        return Ok(Attribute::List)
     }
 
     if let Some(inside) = s.strip_prefix("default(").and_then(|x| x.strip_suffix(')')) {
