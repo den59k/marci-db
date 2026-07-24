@@ -3,5 +3,6 @@ target/
 data/
 **/node_modules/
 packages/
+playground/
 docs/
 *.md

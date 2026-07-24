@@ -107,7 +107,7 @@ let registry = std::sync::Arc::new(registry);
 let db = marcidb::MarciDB::open(path).with_providers(registry.clone());
 ```
 
-In the server, wire it behind a cargo feature in `build_providers()` (see `marcidb-server/src/main.rs`) so
+In the server, wire it behind a cargo feature in `build_providers()` (see `crates/marcidb-server/src/main.rs`) so
 the default build stays dependency-light. The HTTP surface is generic — no new route is needed:
 
 - `POST /:db/:model/$reindex` — rebuild that model's custom indexes (`{ "ok": true, "indexed": N }`).

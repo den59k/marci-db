@@ -16,11 +16,11 @@ The server ships in two flavours:
 From a clean working tree on `main`:
 
 ```bash
-./release.sh 0.6.2            # stage locally (commit + tag, no push)
-./release.sh 0.6.2 --push     # …and push, which triggers the release CI
+./scripts/release.sh 0.6.2            # stage locally (commit + tag, no push)
+./scripts/release.sh 0.6.2 --push     # …and push, which triggers the release CI
 ```
 
-`release.sh` only stamps and tags — all building, testing and publishing happens in CI. It:
+`scripts/release.sh` only stamps and tags — all building, testing and publishing happens in CI. It:
 
 1. stamps `0.6.2` into `[workspace.package].version` (every crate inherits it via `version.workspace = true`)
    and into both `package.json`s (and `marcidb-embedded`'s `marcidb-client` peerDep),

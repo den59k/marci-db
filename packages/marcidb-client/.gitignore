@@ -2,4 +2,7 @@
 
 /dist
 
+# bunup build output (npm `build` script → out-dir runtime); rebuilt in CI before publish.
+/runtime
+
 /generated
