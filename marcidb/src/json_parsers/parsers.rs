@@ -302,8 +302,6 @@ pub enum EncodeError {
     MissingRequiredField(String),
     /// `null` was passed to the field, but it is non-nullable
     NullNotAllowed(String),
-    /// The same id appears twice in a `@list` relation array
-    DuplicateListId(String),
     /// The relation is owned by a `@list` id array on the other side — membership (connect/remove/set)
     /// can only be changed through the `@list` field itself
     MutateViaListSide(String, String),

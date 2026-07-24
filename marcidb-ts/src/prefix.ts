@@ -39,8 +39,9 @@ type RefListUpdate<I> = {
   "$remove"?: I | I[],
 }
 
-/** `@list` relation: an ordered inline id array. `$set` replaces the whole array (also the reorder
- * operation); `$connect` appends at the end; `$remove` splices out. */
+/** `@list` relation: an ordered inline id array — a sequence, so the same id may appear several
+ * times. `$set` replaces the whole array (also the reorder operation); `$connect` appends at the
+ * end (an already-present id gains another occurrence); `$remove` removes every occurrence. */
 type RefListUpdateOrdered<I> = {
   "$set"?: I[],
   "$connect"?: I | I[],

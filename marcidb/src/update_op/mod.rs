@@ -94,10 +94,12 @@ pub enum UpdateRelationOp<'a> {
   Disconnect(Vec<Vec<u8>>),
 
   /// `@list` relation: replaces the whole inline id array (also the reorder operation —
-  /// same members in a new order rewrite the body without touching the reverse tree)
+  /// same members in a new order rewrite the body without touching the reverse tree).
+  /// The array is a sequence: the same id may appear several times
   SetList(Vec<Vec<u8>>),
-  /// `@list` relation: appends ids to the end of the array (already-present ids are skipped)
+  /// `@list` relation: appends ids to the end of the array — an already-present id gains
+  /// another occurrence
   ConnectList(Vec<Vec<u8>>),
-  /// `@list` relation: removes ids from the array
+  /// `@list` relation: removes every occurrence of the given ids
   DisconnectList(Vec<Vec<u8>>),
 }

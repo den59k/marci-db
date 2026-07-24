@@ -124,22 +124,23 @@ fn id_list_update_ops() {
         assert_eq!(db.count_dev("Image.galleries->Gallery"), 2);
     }
 
-    // $connect appends at the end; connecting an already-present id is a no-op
+    // $connect appends at the end — a second $connect of the same id appends another occurrence
+    // (the array is a sequence); the reverse tree stays at one entry per distinct pair
     {
         update_data(&db, "Gallery", &gallery, json!({ "images": { "$connect": img_c } }));
         assert_eq!(images_of(&db), json!({ "images": [{ "url": "b.png" }, { "url": "a.png" }, { "url": "c.png" }] }));
         assert_eq!(db.count_dev("Image.galleries->Gallery"), 3);
 
         update_data(&db, "Gallery", &gallery, json!({ "images": { "$connect": img_c } }));
-        assert_eq!(images_of(&db), json!({ "images": [{ "url": "b.png" }, { "url": "a.png" }, { "url": "c.png" }] }));
+        assert_eq!(images_of(&db), json!({ "images": [{ "url": "b.png" }, { "url": "a.png" }, { "url": "c.png" }, { "url": "c.png" }] }));
         assert_eq!(db.count_dev("Image.galleries->Gallery"), 3);
     }
 
-    // $remove splices out and cleans the reverse tree
+    // $remove severs the relation — every occurrence goes, and the reverse tree is cleaned
     {
-        update_data(&db, "Gallery", &gallery, json!({ "images": { "$remove": img_a } }));
-        assert_eq!(images_of(&db), json!({ "images": [{ "url": "b.png" }, { "url": "c.png" }] }));
-        assert_eq!(db.count_dev("Image.galleries->Gallery"), 2);
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$remove": [ img_a, img_c ] } }));
+        assert_eq!(images_of(&db), json!({ "images": [{ "url": "b.png" }] }));
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 1);
     }
 
     // $set with different membership syncs the reverse tree both ways
@@ -261,16 +262,7 @@ fn id_list_rejects_invalid_input() {
     let dir = tempdir().unwrap();
     let db: MarciDB = MarciDB::new(GALLERY_SCHEMA, dir.path().to_str().unwrap());
 
-    let img_a = insert_data(&db, "Image", json!({ "url": "a.png" }));
-    let gallery_model = db.get_model("Gallery").unwrap();
     let image_model = db.get_model("Image").unwrap();
-
-    // The same id twice in one array
-    let dup = parse_insert(&db.schema, gallery_model, &json!({ "name": "Dup", "images": [ img_a, img_a ] }));
-    assert!(matches!(dup, Err(EncodeError::DuplicateListId(_))), "got {:?}", dup);
-
-    let dup = parse_update(&db.schema, gallery_model, &json!({ "images": { "$set": [ img_a, img_a ] } }));
-    assert!(matches!(dup, Err(EncodeError::DuplicateListId(_))), "got {:?}", dup);
 
     // Membership can only be changed through the @list side — not from the back-reference
     let ins = parse_insert(&db.schema, image_model, &json!({ "url": "x.png", "galleries": [ { "id": 0 } ] }));
@@ -278,6 +270,65 @@ fn id_list_rejects_invalid_input() {
 
     let upd = parse_update(&db.schema, image_model, &json!({ "galleries": { "$connect": { "id": 0 } } }));
     assert!(matches!(upd, Err(EncodeError::MutateViaListSide(_, _))), "got {:?}", upd);
+}
+
+/// The array is a sequence: the same item may repeat — something the tree-backed relation can't
+/// represent. Occurrences count in `$count` and includes; the reverse side stays set-like.
+#[test]
+fn id_list_duplicates() {
+    let dir = tempdir().unwrap();
+    let db: MarciDB = MarciDB::new(GALLERY_SCHEMA, dir.path().to_str().unwrap());
+
+    let img_a = insert_data(&db, "Image", json!({ "url": "a.png" }));
+    let img_b = insert_data(&db, "Image", json!({ "url": "b.png" }));
+
+    let gallery = insert_data(&db, "Gallery", json!({ "name": "Loop", "images": [ img_a, img_b, img_a ] }));
+
+    // Every occurrence decodes, in order; $count counts occurrences; the reverse tree holds
+    // one entry per distinct pair
+    {
+        let resp = get_data_one(&db, "Gallery", json!({ "images": { "url": true } }));
+        assert_eq!(resp, json!({ "images": [{ "url": "a.png" }, { "url": "b.png" }, { "url": "a.png" }] }));
+
+        let resp = get_data_one(&db, "Gallery", json!({ "images": { "$count": true } }));
+        assert_eq!(resp, json!({ "images": { "count": 3 } }));
+
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 2);
+    }
+
+    // The back-reference lists the owner once, however many times the item repeats in it
+    {
+        let resp = get_data(&db, "Image", json!({
+            "url": true, "galleries": { "name": true }, "$where": { "url": "a.png" }
+        }));
+        assert_eq!(resp, json!([ { "url": "a.png", "galleries": [{ "name": "Loop" }] } ]));
+    }
+
+    // $set may repeat ids too — reorder with duplicates is a pure body rewrite
+    {
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$set": [ img_a, img_a, img_b ] } }));
+        let resp = get_data_one(&db, "Gallery", json!({ "images": { "url": true } }));
+        assert_eq!(resp, json!({ "images": [{ "url": "a.png" }, { "url": "a.png" }, { "url": "b.png" }] }));
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 2);
+    }
+
+    // $remove severs the relation: every occurrence goes at once
+    {
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$remove": img_a } }));
+        let resp = get_data_one(&db, "Gallery", json!({ "images": { "url": true } }));
+        assert_eq!(resp, json!({ "images": [{ "url": "b.png" }] }));
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 1);
+    }
+
+    // Deleting a row that repeats in an array splices out every occurrence
+    {
+        update_data(&db, "Gallery", &gallery, json!({ "images": { "$set": [ img_b, img_a, img_b ] } }));
+        delete_data(&db, "Image", img_b);
+
+        let resp = get_data_one(&db, "Gallery", json!({ "images": { "url": true }, "name": true }));
+        assert_eq!(resp, json!({ "name": "Loop", "images": [{ "url": "a.png" }] }));
+        assert_eq!(db.count_dev("Image.galleries->Gallery"), 1);
+    }
 }
 
 #[test]
