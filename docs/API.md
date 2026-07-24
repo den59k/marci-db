@@ -71,6 +71,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `Model` / `Model[]` fields — relations by id; lists require a `@bind` on the opposite side.
 - **Composite-key relations** — a join table (`model ChatUser { chat Chat @id  user User @id }`) or a child keyed by `parent + autoincrement` (`model Message { chat Chat @id  id UInt @id @default(autoincrement()) }`) is fully supported, including `@onDelete(Cascade)`: deleting the parent removes the owned children (and their children), while merely-referenced rows are left untouched. The composite-key ref must carry `@onDelete(Cascade)` (a key cannot be set null).
 - `enum` variants may carry **payload fields** which are injected into the model itself. In TS this is a discriminated union: `{ role: "viewer" } | { role: "admin", level: number, sign: string } | { role: "moderator", sign: string }`. Switching the variant on update requires the full payload of the new variant and clears fields of the old one.
+- Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
 
 ### Ordered relation lists (`@list`)
 
@@ -91,9 +92,10 @@ A plain many-to-many keeps its links in index trees, so related rows always come
 ```ts
 await db.gallery.create({ name: "Trip", images: [img3, img1, img2, img3] })  // order is meaningful, repeats allowed
 
-await db.gallery.update(id, { images: { $set: [img1, img3] } })   // replace — also the reorder op
-await db.gallery.update(id, { images: { $connect: img4 } })       // append at the end
-await db.gallery.update(id, { images: { $remove: img3 } })        // remove every occurrence
+await db.gallery.update(id, { images: { $set: [img1, img3] } })       // replace — also the reorder op
+await db.gallery.update(id, { images: { $connect: img4 } })           // append at the end
+await db.gallery.update(id, { images: { $connectUnique: img4 } })     // append only if absent
+await db.gallery.update(id, { images: { $remove: img3 } })            // remove every occurrence
 ```
 
 Everything else reads the same as a tree-backed relation: nested selects (`images: { url: true }`, in array order), `$some`/`$every`/`$none` filters, and `$count` (which is O(1) — the stored array length). Deletes stay consistent in both directions: deleting an `Image` splices it out of every gallery, deleting a `Gallery` cleans up its links.
@@ -101,11 +103,10 @@ Everything else reads the same as a tree-backed relation: nested selects (`image
 Rules and trade-offs:
 
 - The target model must have a **fixed-size id** (autoincrement `UInt`, `Byte[16] @format(uuid)`, composite fixed keys) — not `String @id`.
-- **Duplicates are first-class**: the same id may appear several times (something a tree-backed relation physically cannot represent). `$count` counts occurrences; `$connect` always appends (it is *not* idempotent); `$remove` severs the relation — every occurrence goes. For positional edits (remove one of several occurrences, insert in the middle) use `$set` with the exact new array.
+- **Duplicates are first-class**: the same id may appear several times (something a tree-backed relation physically cannot represent). `$count` counts occurrences; `$connect` always appends (it is *not* idempotent — `$connectUnique` is the set-flavored variant that appends only absent ids); `$remove` severs the relation — every occurrence goes. For positional edits (remove one of several occurrences, insert in the middle) use `$set` with the exact new array.
 - The back-reference (`Image.galleries`) is optional and **read-only**: it answers "which galleries contain this image" (backed by a reverse index tree, ordered by owner id — each owner listed once, however many times the item repeats in it), but `$connect`/`$remove`/insert on it are rejected — membership is changed through the `@list` side. Without a declared back-reference the reverse tree is still maintained internally for delete integrity.
 - The array lives in the row: every membership change rewrites the row, and every row read carries the array. Use `@list` for hand-ordered collections of up to roughly a thousand members; for unbounded sets (chat members, followers) keep the plain index-tree relation.
 - `@list` cannot target a `struct` (owned children have no standalone ids), and converting an existing relation between `@list` and the tree-backed form is rejected by migrations — add a new field and backfill instead.
-- Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
 
 ## Queries
 
@@ -275,8 +276,9 @@ const { id } = await db.user.insert({
 await db.user.update({ id }, {
   name: "Alicia",
   age: { $increment: 1 },
-  info: { $update: { bio: "hello" } },   // $update | $ensure | $set
-  posts: { $connect: { id: 2 }, $remove: { id: 1 } },  // also $push, $set for struct lists
+  tags: { $push: "vip" },                // primitive arrays take in-place operators too
+  info: { $update: { bio: "hello" } },   // struct — content ops: $update | $ensure | $set | null
+  posts: { $connect: { id: 2 }, $remove: { id: 1 } },  // model relation — link ops
 })
 
 await db.user.delete({ id })
@@ -284,7 +286,51 @@ await db.user.delete({ id })
 
 **Key fields cannot be updated** — `@id` fields (and each part of a composite key) are absent from the update type. Write the new row and delete the old one if you need to move a record's identity.
 
-A relation-list field takes **one object**, not a list of them: `{ $connect: …, $remove: … }` applies every operator it contains in a single update.
+A relation-list field takes **one object**, not a list of them: `{ $connect: …, $remove: … }` applies every operator it contains in a single update. A primitive-array field takes one operator per update (or a bare array, which replaces the value).
+
+### Relation & array operators
+
+Every operator belongs to one of two families, and a field's kind decides which family it speaks. **Content ops** treat the elements as data the parent owns: primitive values, or `struct` children that live and die with the parent. **Link ops** treat the elements as references to independent rows: they change the relation, never the rows themselves. An operator from the wrong family is rejected — by the TypeScript types and by the engine.
+
+| operator | primitive array (`String[]`) | struct list (owned) | model list (m2m tree) | model list (`@list`, ordered) |
+|---|---|---|---|---|
+| `$set: [...]` | replace the array | replace the children (delete + create) | replace link **membership** (diff — rows untouched) | replace / reorder the id array |
+| `$push` | append value(s), duplicates kept | create child(ren) | — | — (use `$connect`) |
+| `$pushUnique` | append only absent values | — | — | — |
+| `$connect` | — | — | link (idempotent) | append an occurrence |
+| `$connectUnique` | — | — | — (plain `$connect` is already idempotent) | append only if absent |
+| `$remove` | remove a value, every occurrence | **delete** children by id | unlink | unlink, every occurrence |
+| `$update` | — (positional edit → `$set`) | edit one child: `{ ...childId, data }` | — (update via its own collection) | — |
+
+The same word can appear in both families — ownership decides the consequence, exactly as `field: null` on a to-one relation already does (struct → the child is deleted, model → disconnected). For a `struct` there is no second meaning to confuse: an owned child cannot exist outside its parent, so "remove from the collection" can only mean delete.
+
+```ts
+// Owned (struct) list — children are addressed by their own id fields,
+// the same shape query results return them in:
+const board = await db.board.findFirst({ tasks: { id: true, title: true } })
+await db.board.update(id, {
+  tasks: {
+    $update: { id: board.tasks[0].id, data: { title: "Renamed" } },  // single or an array of these
+    $push: { title: "New task" },
+    $remove: { id: board.tasks[1].id },                              // deletes the child
+  }
+})
+
+// Model m2m — $set replaces which rows are linked, never the rows themselves:
+await db.post.update(id, { viewers: { $set: [userA, userB] } })
+
+// Primitive array — same sequence semantics as @list:
+await db.post.update(id, { tags: { $pushUnique: "featured" } })
+await db.post.update(id, { tags: { $remove: "draft" } })
+```
+
+Deliberately **not** supported:
+
+- **Positional ops** (`$insertAt` / `$removeAt`): an index is only meaningful against the array version the client last read — racy by construction. Positional edits send the full array via `$set`; these are hand-ordered collections, the client has it.
+- **Nested creation of independent models** (`$push`/`$ensure` on a non-struct relation): an independent row is created through its own collection. To create-then-connect atomically, use a [transaction](#transactions) with `ref("0.id")`. This keeps the line crisp: `struct` = created through the parent, model = referenced by id.
+- **Fixed-size lists** (`Byte[8]`): length cannot change, so no in-place operators — assign a whole new value.
+
+A missing child id in a struct-list `$update` is an error and rolls the update back; `$remove` of an absent child is a no-op (the requested end state already holds). Children are addressed relative to their parent, so another parent's children are unreachable by construction.
 
 A `Byte` field with `@format(uuid | hex)` accepts either the formatted string or the raw byte array anywhere it is written — insert, `$where`, or update. Reads always return the formatted string.
 

@@ -305,6 +305,14 @@ pub enum EncodeError {
     /// The relation is owned by a `@list` id array on the other side — membership (connect/remove/set)
     /// can only be changed through the `@list` field itself
     MutateViaListSide(String, String),
+    /// The operation creates or edits owned children, which only a struct (owned) relation has.
+    /// An independent model is updated through its own collection and linked with `$connect`
+    OwnedRelationOnly { field: String, op: String },
+    /// The operation links/unlinks independent rows — a struct child is exclusively owned by its
+    /// parent: create it through the parent (`$push`/`$ensure`/`$set`) instead of connecting
+    LinkedRelationOnly { field: String, op: String },
+    /// A fixed-size list (`Byte[16]`) cannot change length — assign a whole new value instead
+    FixedSizeList(String),
 }
 
 

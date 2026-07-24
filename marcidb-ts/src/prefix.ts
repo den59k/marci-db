@@ -34,24 +34,46 @@ type RefUpdateStruct<I,U> = {
   "$set"?: I
 }
 
+/** Relation to independent rows — link operations only, the rows themselves are never created
+ * or deleted. `$set` replaces link membership with exactly the given set (missing links are
+ * disconnected, new ones connected); `$connect` links (idempotent); `$remove` unlinks. */
 type RefListUpdate<I> = {
+  "$set"?: I[],
   "$connect"?: I | I[],
   "$remove"?: I | I[],
 }
 
 /** `@list` relation: an ordered inline id array — a sequence, so the same id may appear several
  * times. `$set` replaces the whole array (also the reorder operation); `$connect` appends at the
- * end (an already-present id gains another occurrence); `$remove` removes every occurrence. */
+ * end (an already-present id gains another occurrence); `$connectUnique` appends only ids not
+ * already present; `$remove` removes every occurrence. */
 type RefListUpdateOrdered<I> = {
   "$set"?: I[],
   "$connect"?: I | I[],
+  "$connectUnique"?: I | I[],
   "$remove"?: I | I[],
 }
 
-type RefListUpdateStruct<I,U> = {
+/** Owned (struct) list: the children live and die with the parent. `$push` creates children,
+ * `$update` edits single children in place (each item is the child's id fields — the shape
+ * query results return — plus the changes under `data`), `$remove` deletes children by id,
+ * `$set` replaces all children (deletes the current ones, creates the new). */
+type RefListUpdateStruct<I,U,Id> = {
   "$push"?: I | I[],
-  "$remove"?: I | I[],
+  "$update"?: (Id & { data: U }) | (Id & { data: U })[],
+  "$remove"?: Id | Id[],
   "$set"?: I[]
+}
+
+/** Variable-length primitive array — a sequence, so the same value may appear several times.
+ * `$push` appends at the end (duplicates kept); `$pushUnique` appends only values not already
+ * present; `$remove` removes every occurrence; `$set` replaces the whole array (also the
+ * positional-edit path — send the full new array). One operator per update. */
+type PrimitiveListUpdate<T> = {
+  "$set"?: T[],
+  "$push"?: T | T[],
+  "$pushUnique"?: T | T[],
+  "$remove"?: T | T[],
 }
 
 // Marks a set of keys as forbidden. Needed because TypeScript's excess-property check against a *union*

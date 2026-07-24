@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, encode_id_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{ListOp, UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, decode_primitive_list, encode_id_list, encode_primitive_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -88,11 +88,14 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           }
         },
         UpdateRelationOp::RemoveItems(item_ids, delete_op) => {
-          // $remove on an owned (autoinsert) list: delete the named children. The ids are full storage
-          // keys (same form Connect/Disconnect use); a missing id makes `process_delete` a no-op.
+          // $remove on an owned (autoinsert) list: delete the named children. The client addresses
+          // a child by its own key fields; the storage key adds the parent prefix, so another
+          // parent's children are unreachable by construction. A missing id makes `process_delete`
+          // a no-op (removing an absent child already is the requested end state).
           let mut tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
           for item_id in item_ids {
-            process_delete(tx, item_id, update_ref.st, delete_op, &db.schema, &db.providers, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
+            let full_id = [id, item_id.as_slice()].concat();
+            process_delete(tx, &full_id, update_ref.st, delete_op, &db.schema, &db.providers, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::Connect(item_ids) => {
@@ -101,11 +104,43 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
         UpdateRelationOp::Disconnect(item_ids) => {
           delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
         },
+        UpdateRelationOp::SetLinks(item_ids) => {
+          // Replace link membership: diff against the currently-linked ids, then disconnect/connect
+          // the difference. The rows themselves are never created or deleted. The read is scoped so
+          // the tree handle is released before the writes (see the note at the top of this function)
+          let current = {
+            let tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
+            get_ids_from_ref_info(tx, &tree, update_ref.ref_info, id)?
+          };
+          let removed: Vec<Vec<u8>> = current.iter().filter(|i| !item_ids.contains(i)).cloned().collect();
+          let added: Vec<Vec<u8>> = item_ids.iter().filter(|i| !current.contains(i)).cloned().collect();
+          if !removed.is_empty() {
+            delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &removed).map_err(|e| UpdateError::WriteIndexesError(e))?;
+          }
+          if !added.is_empty() {
+            write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &added).map_err(|e| UpdateError::WriteIndexesError(e))?;
+          }
+        },
+        UpdateRelationOp::UpdateItems(items) => {
+          // $update on an owned (autoinsert) list: partial update of single children. The client
+          // addresses a child by its own key fields; the storage key adds the parent prefix, so
+          // another parent's children are unreachable by construction. Unlike $remove, a missing
+          // child is an error — editing something that isn't there is a mistake, not an end state
+          for (item_id, update_op) in items {
+            let full_id = [id, item_id.as_slice()].concat();
+            if !process_update(tx, update_ref.st, &full_id, update_op, db)? {
+              return Err(UpdateError::ItemNotFound);
+            }
+          }
+        },
         UpdateRelationOp::SetList(item_ids) => {
           apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::Set(item_ids))?;
         },
         UpdateRelationOp::ConnectList(item_ids) => {
           apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::Connect(item_ids))?;
+        },
+        UpdateRelationOp::ConnectUniqueList(item_ids) => {
+          apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::ConnectUnique(item_ids))?;
         },
         UpdateRelationOp::DisconnectList(item_ids) => {
           apply_id_list_update(tx, entity, update_ref.field, update_ref.ref_info, id, db, IdListChange::Disconnect(item_ids))?;
@@ -200,6 +235,41 @@ fn update_fields<F>(fields: &[UpdateField], id: &[u8], source_data: &[u8], entit
         let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
         update_data(buf, &new_value, entity, update_field.offset_pos, offset_start, offset_end);
       },
+      UpdateValue::ListOp { op, items, elem_size } => {
+        // In-place primitive-list edit: decode the current elements, apply the sequence op,
+        // re-encode. An absent field (offset 0) reads as an empty list
+        let (old_items, offset_end) = if offset_start == 0 {
+          (vec![], 0)
+        } else {
+          let offset_end = get_end_optimized(data, update_field.field, offset_start, update_field.offset_pos, entity.payload_offset);
+          (decode_primitive_list(Some(&data[offset_start..offset_end]), *elem_size), offset_end)
+        };
+
+        let mut new_items = old_items.clone();
+        match op {
+          ListOp::Push => new_items.extend(items.iter().cloned()),
+          ListOp::PushUnique => {
+            for item in items {
+              if !new_items.contains(item) { new_items.push(item.clone()); }
+            }
+          }
+          ListOp::Remove => new_items.retain(|i| !items.contains(i)),
+        }
+        if new_items == old_items { continue; }
+
+        let encoded = encode_primitive_list(&new_items, *elem_size);
+        if offset_start == 0 {
+          on_change(update_field.field, None, Some(&encoded))?; // <-- insert
+
+          let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
+          insert_data(buf, &encoded, entity, update_field.offset_pos);
+        } else {
+          on_change(update_field.field, Some(&data[offset_start..offset_end]), Some(&encoded))?; // <-- update
+
+          let buf = cloned_data.get_or_insert_with(|| source_data.to_vec());
+          update_data(buf, &encoded, entity, update_field.offset_pos, offset_start, offset_end);
+        }
+      },
     }
   }
 
@@ -250,6 +320,8 @@ enum IdListChange<'a> {
   Set(&'a [Vec<u8>]),
   /// Append to the end — an already-present id gains another occurrence
   Connect(&'a [Vec<u8>]),
+  /// Append only the ids not already present (also dedupes within the batch)
+  ConnectUnique(&'a [Vec<u8>]),
   /// Remove every occurrence of the given ids
   Disconnect(&'a [Vec<u8>]),
 }
@@ -281,6 +353,13 @@ fn apply_id_list_update(tx: &WriteTransaction, entity: &Entity, field: &Field, r
     IdListChange::Connect(ids) => {
       let mut out = old_ids.clone();
       out.extend(ids.iter().cloned());
+      out
+    },
+    IdListChange::ConnectUnique(ids) => {
+      let mut out = old_ids.clone();
+      for item in ids {
+        if !out.contains(item) { out.push(item.clone()); }
+      }
       out
     },
     IdListChange::Disconnect(ids) => old_ids.iter().filter(|i| !ids.contains(i)).cloned().collect(),

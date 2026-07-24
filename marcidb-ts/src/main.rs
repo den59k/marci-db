@@ -413,7 +413,7 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
       }
       let ref_model = &schema.models[ref_info.model_index];
       let to_update = if ref_model.autoinsert {
-        format!("RefListUpdateStruct<{},{}>", get_model_insert_name(ref_model), get_model_update_name(ref_model))
+        format!("RefListUpdateStruct<{},{},{}>", get_model_insert_name(ref_model), get_model_update_name(ref_model), get_model_id_name(ref_model))
       } else if is_id_list(field) {
         // `@list`: $set replaces (and reorders) the whole array; $connect appends; $remove splices out
         format!("RefListUpdateOrdered<{}>", get_model_id_name(ref_model))
@@ -436,6 +436,11 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
     // Numeric fields also take an atomic in-place `$increment` (see `UpdateNumValue`).
     FieldType::Primitive(ty) if ty.get_num_type().is_some() => {
       format!("  {}?: {} | UpdateNumValue{}", field.name, get_field_ty(&field.ty, schema), field_nullable)
+    },
+    // Variable-length lists also take in-place operators; fixed-size lists ([Byte;16]) cannot
+    // change length and fall through to whole-value assignment only
+    FieldType::PrimitiveList(ty, None) => {
+      format!("  {}?: {} | PrimitiveListUpdate<{}>{}", field.name, get_field_write_ty(field, schema), get_primitive_str(ty), field_nullable)
     },
     _ => format!("  {}?: {}{}", field.name, get_field_write_ty(field, schema), field_nullable)
   }
