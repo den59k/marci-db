@@ -99,8 +99,12 @@ fn diff_fields(
             });
         }
 
-        // Metadata: nullable / default / format
-        if old_f.nullable != f.nullable || default_attr(old_f) != default_attr(f) || format_attr(old_f) != format_attr(f) {
+        // Metadata: nullable / default / format / onDelete. `@onDelete` is metadata like the rest — it
+        // changes no bytes on disk — but it MUST produce an op: the policy only reaches a `$migrate`d
+        // database through the `.march` history, so a diff blind to it means dev/CI run with referential
+        // constraints that production silently doesn't have.
+        if old_f.nullable != f.nullable || default_attr(old_f) != default_attr(f)
+            || format_attr(old_f) != format_attr(f) || on_delete_attr(old_f) != on_delete_attr(f) {
             needs_alter = true;
         }
         if needs_alter {
@@ -378,6 +382,12 @@ fn format_attr(field: &Field) -> Option<String> {
     field.attributes.iter().find_map(|a| if let Attribute::Format(fmt) = a { Some(format!("{:?}", fmt)) } else { None })
 }
 
+/// The field's explicit `@onDelete(...)` policy, if any. An absent attribute is a distinct state from any
+/// explicit one — removing `@onDelete` falls back to the derived default and is a real change.
+fn on_delete_attr(field: &Field) -> Option<String> {
+    field.attributes.iter().find_map(|a| if let Attribute::OnDelete(c) = a { Some(format!("{:?}", c)) } else { None })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{diff, reconcile};
@@ -485,6 +495,22 @@ mod tests {
     fn diff_unchanged_is_empty() {
         let s = "model User {\n  name String\n  email String @unique\n}";
         assert!(diff_text(s, s).unwrap().is_empty());
+    }
+
+    /// `@onDelete` changes nothing physically, but it MUST still produce an op. The policy only reaches a
+    /// `$migrate`d database through the `.march` history, so a diff blind to it meant dev/CI enforced
+    /// referential constraints that production silently did not have.
+    #[test]
+    fn diff_sees_on_delete_policy() {
+        let none = "model Class {\n  title String\n}\nmodel Enrollment {\n  class Class?\n  status String\n}";
+        let restrict = "model Class {\n  title String\n}\nmodel Enrollment {\n  class Class? @onDelete(Restrict)\n  status String\n}";
+        let cascade = "model Class {\n  title String\n}\nmodel Enrollment {\n  class Class? @onDelete(Cascade)\n  status String\n}";
+
+        let alter = vec![MigrateOp::AlterField { entity: "Enrollment".into(), field: "class".into() }];
+        assert_eq!(diff_text(none, restrict).unwrap(), alter, "adding @onDelete must be a change");
+        assert_eq!(diff_text(restrict, cascade).unwrap(), alter, "swapping the policy must be a change");
+        assert_eq!(diff_text(restrict, none).unwrap(), alter, "removing @onDelete falls back to the default — also a change");
+        assert!(diff_text(restrict, restrict).unwrap().is_empty(), "an unchanged policy must stay quiet");
     }
 
     /// Adding a `@list` relation field is a plain AddField; converting an existing tree-backed

@@ -9,7 +9,7 @@ pub enum MigrateOp {
     DropEntity { name: String },
     AddField { entity: String, field: String },
     DropField { entity: String, field: String },
-    /// Field metadata: nullable / default / format / added enum variants
+    /// Field metadata: nullable / default / format / onDelete / added enum variants
     AlterField { entity: String, field: String },
     AddIndex { entity: String, field: String, unique: bool },
     DropIndex { entity: String, field: String, unique: bool },

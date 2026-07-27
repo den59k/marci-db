@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, ProviderRegistry, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset}};
+use crate::{Field, ProviderRegistry, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete, on_field_update}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, FieldIndex, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset, move_offsets_left, row_header_len}};
 
 pub fn process_delete<'a>(
   tx: &'a WriteTransaction,
@@ -73,11 +73,33 @@ pub fn process_delete<'a>(
         }
       },
       DependencyActionType::SetNull { offset_pos } => {
-        let mut tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
         for item_id in item_ids.iter() {
-          let mut body = tree.get(item_id)?.unwrap().to_vec();
-          set_null(dep.rev_entity, dep.rev_field, &mut body, *offset_pos);
-          tree.insert(item_id, &body)?;
+          // The read is scoped so the tree handle is released before the write below: a handle that has
+          // served a `get` still references the looked-up page, and writing through it trips canopydb's
+          // dirty-page uniqueness assertion. The body is copied out for the same reason.
+          let Some(old_body) = ({
+            let tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
+            tree.get(item_id)?.map(|body| body.to_vec())
+          }) else { continue };
+
+          let mut body = old_body.clone();
+          let Some(old_value) = set_null(dep.rev_field, &mut body, *offset_pos) else { continue };
+
+          {
+            let mut tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
+            tree.insert(item_id, &body)?;
+          }
+
+          // The foreign key is gone, so its index entries must go with it — otherwise a lookup by the
+          // now-dangling old value still finds this row.
+          for index in dep.rev_field.indexes.iter() {
+            if matches!(index, FieldIndex::Custom { .. }) { continue; }
+            let mut index_tree = tx.require_tree(index.tree_name())?;
+            index_tree.delete(&encode_full_index(dep.rev_field, index, item_id, &old_value))?;
+          }
+          // Live `@custom` (module) indexes see the same transition as a `$update` to null.
+          on_field_update(providers, tx, dep.rev_field,
+            RowRef { id: item_id, body: &old_body, entity: dep.rev_entity, schema }, Some(&old_value), None)?;
         }
       },
       DependencyActionType::RemoveIndex { tree_name } => {
@@ -272,16 +294,36 @@ fn remove_from_id_list_row(field: &Field, body: &mut Vec<u8>, target_id: &[u8]) 
   true
 }
 
-fn set_null(entity: &Entity, field: &Field, body: &mut Vec<u8>, offset_pos: usize) {
-  let offset_start = get_offset(body, offset_pos);
-  if offset_start == 0 {
-    return
+/// Clears a body field in place: zeroes its offset slot, removes its bytes, and shifts every LATER
+/// offset left by the removed length. Returns the removed value (the caller needs it to tear down the
+/// field's index entries), or `None` when the field is already absent.
+///
+/// Two invariants this must not break, both of which produced silently corrupt rows before:
+///  * every offset after the hole has to move — dropping bytes without `move_offsets_left` leaves each
+///    following field pointing `len` bytes too far right, so neighbouring scalars decode as garbage;
+///  * bounds come from the row's OWN header (`row_header_len`), not the current schema's
+///    `payload_offset` — a row written before an add-field migration has a shorter offset table, and
+///    walking past it would rewrite payload bytes as if they were offsets.
+fn set_null(field: &Field, body: &mut Vec<u8>, offset_pos: usize) -> Option<Vec<u8>> {
+  let header_len = row_header_len(body);
+  // The slot is beyond this row's header — the field was added after the row was written
+  if offset_pos + 4 > header_len {
+    return None
   }
 
-  let offset_end = get_end_optimized(body, field, offset_start, offset_pos, entity.payload_offset);
+  let offset_start = get_offset(body, offset_pos);
+  if offset_start == 0 {
+    return None
+  }
+  let offset_end = get_end_optimized(body, field, offset_start, offset_pos, header_len);
 
+  let old_value = body[offset_start..offset_end].to_vec();
   body[offset_pos..offset_pos + 4].copy_from_slice(&0u32.to_be_bytes());
-  body.drain(offset_start..offset_end);
+  if offset_end > offset_start {
+    body.drain(offset_start..offset_end);
+    move_offsets_left(body, offset_pos + 4, header_len, (offset_end - offset_start) as u32);
+  }
+  Some(old_value)
 }
 
 #[inline(always)]

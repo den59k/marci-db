@@ -62,7 +62,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `@bind(Model.field)` — declares the reverse side of a relation
 - `@list` — on a relation list (`Model[]`): stores the related ids **inline in the row as an ordered array** instead of a virtual index-tree relation — see [Ordered relation lists](#ordered-relation-lists-list)
 - `@format(uuid | hex)` — JSON representation of byte fields
-- `@onDelete(...)` — delete constraint for relations (`Cascade`, `SetNull`, `Restrict`)
+- `@onDelete(...)` — delete constraint for relations (`Cascade`, `SetNull`, `Restrict`) — see [Referential integrity](#referential-integrity)
 - `@vector(cosine | euclidean)` / `@fulltext(multi | english | russian)` — module-provided indexes: nearest-neighbour on a `Float[N]` field, ranked text search on a `String` field. Any attribute that matches no built-in is parsed as a module index named after the keyword (`@<provider>(args)`); `@custom(<provider>, args)` is the explicit equivalent. Queried with `$near` / `$search`; full-text is maintained live on writes, vector is built by `reindex()` (also used to backfill) — see [Vector & full-text search](#vector--full-text-search)
 
 ### Structs, relations, enums
@@ -72,6 +72,36 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - **Composite-key relations** — a join table (`model ChatUser { chat Chat @id  user User @id }`) or a child keyed by `parent + autoincrement` (`model Message { chat Chat @id  id UInt @id @default(autoincrement()) }`) is fully supported, including `@onDelete(Cascade)`: deleting the parent removes the owned children (and their children), while merely-referenced rows are left untouched. The composite-key ref must carry `@onDelete(Cascade)` (a key cannot be set null).
 - `enum` variants may carry **payload fields** which are injected into the model itself. In TS this is a discriminated union: `{ role: "viewer" } | { role: "admin", level: number, sign: string } | { role: "moderator", sign: string }`. Switching the variant on update requires the full payload of the new variant and clears fields of the old one.
 - Every enum line is `name1 | name2 [{ fields }]`: a variant is declared on first mention, and a block attaches its fields to all listed variants. `admin | moderator { sign String }` makes `sign` a single physical field shared by both variants — switching between them keeps it (the required payload overwrites it anyway), while switching outside the group clears it. Blocks mentioning the same variant merge; declaring the same field name twice is a schema error.
+
+### Referential integrity
+
+`@onDelete(...)` says what happens to the rows that reference a row being deleted. **Every relation has a
+policy** — writing the attribute only overrides the default:
+
+| relation | default | on delete of the referenced row |
+|---|---|---|
+| required (`class Class`) | `Restrict` | the delete is **rejected**; nothing changes |
+| optional (`class Class?`) | `SetNull` | the reference is cleared, the referencing row stays |
+| relation list (`Model[]`, `@list`) | `RemoveItem` | the id is removed from the list |
+| owned child (`struct`, composite key) | — | the child is deleted with its parent |
+
+`Cascade` deletes the referencing rows; `Restrict` rejects the delete. `SetNull` is only valid on an
+optional relation — on a required one it is a schema error, since nulling the field would leave the row
+violating its own schema.
+
+`@onDelete` belongs on the side that **holds** the reference. On a back-reference list (`Model[]`) it is a
+schema error — a list's members are governed by their own foreign key.
+
+The policy travels with the schema: it is part of the stored snapshot, so `$sync`, `$migrate` and a plain
+`open()` all enforce the same constraints. Changing an `@onDelete` produces an `alter field` migration
+like any other metadata change — dev, CI and production stay in step.
+
+> **Upgrading from ≤ 0.10.0:** a relation stored *in the primary key* (a join table such as
+> `model ChatUser { chat Chat @id  user User @id }`) did not write its back-reference index entry on
+> insert, so no delete policy could see those rows from the referenced side. Rows inserted after the
+> upgrade are indexed correctly, but rows written **before** it are not — deleting the referenced row will
+> still leave them behind. Rewrite those rows (re-insert them) or rebuild the database from the schema to
+> backfill the index.
 
 ### Ordered relation lists (`@list`)
 

@@ -90,8 +90,46 @@ pub fn try_parse_schema(input: &str) -> Result<Schema, SchemaError> {
     resolve_ref_bindings(&mut models)?;
 
     resolve_ref_constraints(&mut models)?;
+    validate_delete_constraints(&models)?;
 
     Ok(Schema { models })
+}
+
+/// Authoring-time check on explicit `@onDelete` policies: a declared policy must be one the engine can
+/// actually carry out, so a schema that asks for the impossible fails here rather than silently doing
+/// nothing (or writing a row that contradicts its own declaration) at delete time.
+///
+/// Deliberately NOT part of [`rebuild_caches`]: a snapshot stored by an older version may hold a policy we
+/// now reject, and such a database must still open — only *writing* the schema (`$sync`, codegen,
+/// `marci-migrate generate`) is gated.
+fn validate_delete_constraints(models: &[Entity]) -> Result<(), SchemaError> {
+    for model in models.iter() {
+        for field in model.fields.iter() {
+            let Some(constraint) = get_delete_constraint(&field.attributes) else { continue };
+
+            match &field.ty {
+                // The policy belongs to the side that HOLDS the reference. A list is the back-reference:
+                // its members' lifetime is decided by their own foreign key.
+                FieldType::RefList(ref_info) => return Err(SchemaError(format!(
+                    "@onDelete on relation list {} has no effect — declare the policy on the owning side \
+                     (the {} field that references {})",
+                    field.full_name, models[ref_info.model_index].name, model.name,
+                ))),
+                FieldType::Ref(ref_info) => {
+                    if matches!(constraint, DeleteConstraint::SetNull) && !field.nullable {
+                        return Err(SchemaError(format!(
+                            "@onDelete(SetNull) on required relation {} — nulling it would leave the row \
+                             violating its own schema. Make the relation optional ({}?) or use \
+                             @onDelete(Restrict) / @onDelete(Cascade)",
+                            field.full_name, models[ref_info.model_index].name,
+                        )));
+                    }
+                }
+                _ => return Err(SchemaError(format!("@onDelete is only valid on a relation field: {}", field.full_name))),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Infrastructural schema parsing: panics on an invalid schema. For internal/trusted input
@@ -342,6 +380,8 @@ fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
 
     for (model_index, entity) in models.iter_mut().enumerate() {
         for (field_index, field) in entity.fields.iter_mut().enumerate() {
+            // Read before `field.ty` is borrowed mutably below
+            let nullable = field.nullable;
             match &mut field.ty {
                 FieldType::Ref(ref_info) => {
                     let constraint: DeleteConstraint;
@@ -354,7 +394,12 @@ fn resolve_ref_constraints(models: &mut [Entity]) -> Result<(), SchemaError> {
                                 // If this is a child object, it cannot affect the parent in any way, so we skip it
                                 continue;
                             },
-                            RefBinding::FieldValue => DeleteConstraint::SetNull,
+                            // Prisma parity: an OPTIONAL relation clears itself when its target goes away;
+                            // a REQUIRED one refuses the delete. Defaulting a required FK to SetNull would
+                            // have the engine write a row that violates its own schema — a dangling
+                            // reference dressed up as a successful delete.
+                            RefBinding::FieldValue if nullable => DeleteConstraint::SetNull,
+                            RefBinding::FieldValue => DeleteConstraint::Restrict,
                             RefBinding::IndexTree(_) => { continue; },
                             RefBinding::IdList { .. } => unreachable!("IdList binding is only set on RefList fields"),
                        };
@@ -472,6 +517,83 @@ mod tests {
         let schema = parse_schema("\u{feff}model User {\n  name String\n}");
         assert_eq!(schema.models.len(), 1, "BOM-prefixed schema must still parse its model");
         assert_eq!(schema.models[0].name, "User");
+    }
+
+    /// Referential defaults follow Prisma: a required relation refuses the delete, an optional one clears
+    /// itself. Defaulting a required foreign key to SetNull would let a delete report success while leaving
+    /// a row whose own schema says the field cannot be null.
+    #[test]
+    fn delete_constraint_defaults_follow_nullability() {
+        use crate::schema::DeleteConstraint;
+
+        let schema = parse_schema("
+            model Class {
+                title   String
+            }
+            model Required {
+                class   Class
+                status  String
+            }
+            model Optional {
+                class   Class?
+                status  String
+            }
+        ");
+        let class = schema.models.iter().find(|m| m.name == "Class").unwrap();
+
+        let constraint_from = |model: &str| {
+            let mi = schema.models.iter().position(|m| m.name == model).unwrap();
+            class.rev_dependencies.iter().find(|d| d.model_index == mi)
+                .unwrap_or_else(|| panic!("no dependency registered for {}", model))
+                .constraint.clone()
+        };
+        assert_eq!(constraint_from("Required"), DeleteConstraint::Restrict);
+        assert_eq!(constraint_from("Optional"), DeleteConstraint::SetNull);
+    }
+
+    /// An explicit `@onDelete(SetNull)` on a required relation is a contradiction — reject it while the
+    /// schema is being authored rather than writing a null into a non-null column at delete time.
+    #[test]
+    fn explicit_set_null_on_required_relation_is_rejected() {
+        let err = try_parse_schema("
+            model Class {
+                title   String
+            }
+            model Enrollment {
+                class   Class    @onDelete(SetNull)
+                status  String
+            }
+        ").unwrap_err();
+        assert!(err.0.contains("Enrollment.class"), "unhelpful error: {}", err.0);
+
+        // The same policy on an optional relation is fine
+        assert!(try_parse_schema("
+            model Class {
+                title   String
+            }
+            model Enrollment {
+                class   Class?   @onDelete(SetNull)
+                status  String
+            }
+        ").is_ok());
+    }
+
+    /// A policy on the back-reference LIST is silently unreachable — the engine derives a list's behaviour
+    /// from the binding, never from `@onDelete`. Say so instead of ignoring it.
+    #[test]
+    fn on_delete_on_a_relation_list_is_rejected() {
+        let err = try_parse_schema("
+            model User {
+                name    String
+                posts   Post[]   @bind(Post.author)  @onDelete(Cascade)
+            }
+            model Post {
+                title   String
+                author  User?
+            }
+        ").unwrap_err();
+        assert!(err.0.contains("User.posts"), "unhelpful error: {}", err.0);
+        assert!(err.0.contains("owning side"), "error should point at the fix: {}", err.0);
     }
 
     /// Invalid schema → SchemaError (not a panic). One case per resolver

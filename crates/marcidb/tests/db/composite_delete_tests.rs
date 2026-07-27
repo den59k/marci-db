@@ -8,7 +8,7 @@ use marcidb_schema::{diff, reconcile};
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::db::{delete_data, get_data, insert_data};
+use crate::db::{delete_data, get_data, insert_data, try_delete};
 
 fn count(db: &MarciDB, model: &str) -> u64 {
     db.count(db.get_model(model).unwrap()).unwrap()
@@ -221,4 +221,73 @@ fn relation_binding_change_is_rejected() {
         }
         other => panic!("expected UnsupportedBindingChange, got {:?}", other),
     }
+}
+
+/// A composite-key relation without `@onDelete(Cascade)` used to reach `SetNull` (the old blanket default
+/// for a `field_value` relation) and panic with "Cannot set null on non-body values" — a key cannot be
+/// nulled. A required relation now defaults to `Restrict`, so the same schema reports what is holding the
+/// row instead of aborting the process.
+#[test]
+fn composite_key_without_cascade_restricts_instead_of_panicking() {
+    const SCHEMA: &str = "
+model User {
+    login String @unique
+    chats ChatUser[] @bind(ChatUser.user)
+}
+model Chat {
+    name String?
+    users ChatUser[] @bind(ChatUser.chat)
+}
+model ChatUser {
+    chat Chat @id
+    user User @id
+}
+";
+
+    let dir = tempdir().unwrap();
+    let db = MarciDB::new(SCHEMA, dir.path().to_str().unwrap());
+
+    let alice = insert_data(&db, "User", json!({ "login": "alice" }));
+    let chat = insert_data(&db, "Chat", json!({ "name": "full" }));
+    insert_data(&db, "ChatUser", json!({ "chat": chat, "user": alice.clone() }));
+
+    match try_delete(&db, "User", alice) {
+        Err(marcidb::DeleteError::RestrictConstraints(field, _)) => assert_eq!(field, "ChatUser.user"),
+        other => panic!("expected a Restrict rejection, got {:?}", other),
+    }
+    assert_eq!(count(&db, "User"), 1);
+    assert_eq!(count(&db, "ChatUser"), 1);
+}
+
+
+
+
+/// The declared `@onDelete(Cascade)` on a key-located relation must actually fire from the referenced
+/// side. It never did: a relation stored in the key wrote no reverse-index entry on insert, so
+/// `User.chats->ChatUser` stayed empty and every policy that reads it found nothing to do. Deleting the
+/// User reported success and left the membership row behind with a key pointing at a row that is gone.
+#[test]
+fn key_located_relation_cascades_from_the_referenced_side() {
+    let dir = tempdir().unwrap();
+    let db = MarciDB::new(JOIN_SCHEMA, dir.path().to_str().unwrap());
+
+    let alice = insert_data(&db, "User", json!({ "login": "alice" }));
+    let bob = insert_data(&db, "User", json!({ "login": "bob" }));
+    let chat = insert_data(&db, "Chat", json!({ "name": "A" }));
+    insert_data(&db, "ChatUser", json!({ "chat": chat.clone(), "user": alice.clone() }));
+    insert_data(&db, "ChatUser", json!({ "chat": chat, "user": bob }));
+
+    // The reverse index of a key-located relation is maintained like any other back-reference
+    assert_eq!(db.count_dev("User.chats->ChatUser"), 2);
+    assert_eq!(count(&db, "ChatUser"), 2);
+
+    delete_data(&db, "User", alice);
+
+    // Alice's membership is gone — not orphaned — and Bob's is untouched
+    assert_eq!(count(&db, "ChatUser"), 1, "the cascade must remove the membership, not orphan it");
+    assert_eq!(db.count_dev("User.chats->ChatUser"), 1);
+    assert_eq!(
+        get_data(&db, "ChatUser", json!({ "user": { "login": true }, "chat": { "name": true } })),
+        json!([{ "user": { "login": "bob" }, "chat": { "name": "A" } }])
+    );
 }
