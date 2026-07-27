@@ -278,6 +278,16 @@ fn canonicalize_field_order(schema: &mut Schema) {
                 _ => {}
             }
         }
+
+        // A reverse-dependency entry addresses a field in ANOTHER entity by index, so it has to move with
+        // that entity's permutation too. Missing this left the delete planner reading whatever field had
+        // landed on the old index — in the best case a panic ("rev dependency has wrong type"), otherwise
+        // a cascade or SetNull aimed at the wrong column. It only showed after a `$sync`/`generate` that
+        // changed field order, and only until the next reopen (a fresh load rebuilds the cache), which is
+        // exactly the kind of window that never reproduces on demand.
+        for dep in entity.rev_dependencies.iter_mut() {
+            dep.field_index = perms[dep.model_index][dep.field_index];
+        }
     }
 }
 

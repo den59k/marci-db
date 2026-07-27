@@ -284,16 +284,33 @@ fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut
     }
 }
 
+/// What an ABSENT body field renders as.
+///
+/// A non-nullable list is the exception: its declared type is `string[]`, never null (the generated
+/// client types it exactly that way), and the rest of the engine already reads a missing slot as empty —
+/// `decode_primitive_list(None, ..)` is `[]`, and the insert path documents lists as "absence = empty".
+/// Rendering `null` here contradicted all of that, and the realistic way to hit it is unavoidable: a
+/// migration that adds a list field leaves every pre-existing row without one, so the typed client got
+/// `null` back for a `string[]` and any `row.items.map(...)` threw.
+#[inline(always)]
+fn insert_absent(obj: &mut String, field: &Field) {
+    if matches!(field.ty, FieldType::PrimitiveList(_, _)) && !field.nullable {
+        insert_value(obj, field, &"[]".to_string());
+    } else {
+        insert_null(obj, field);
+    }
+}
+
 // Decodes a value from the Body into JSON
 fn decode_body_field<'a>(data: &'a [u8], offset_pos: usize, field: &Field, obj: &mut String, payload_offset: usize) -> Result<(), DecodeError> {
     // Slot beyond the row header — the field was added by a later migration → absent
     if offset_pos + 4 > payload_offset {
-        insert_null(obj, field);
+        insert_absent(obj, field);
         return Ok(())
     }
     let offset_start = get_offset_checked(data, offset_pos)?;
     if offset_start == 0 {
-        insert_null(obj, field);
+        insert_absent(obj, field);
         return Ok(())
     }
 
@@ -460,10 +477,16 @@ fn decode_primitive_value(ty: &PrimitiveFieldType, data: &[u8]) -> Result<String
     }
 }
 
+/// Validates a slot's offset before the caller slices `data[offset..]`.
+///
+/// The bound is `>`, not `>=`: a zero-length value (an empty string, an empty list) written as the row's
+/// LAST present field has `offset == data.len()` — its payload starts exactly where the row ends and is
+/// empty, which slices to `&[]` and is perfectly valid. Rejecting that made every such row unreadable
+/// through both the JSON and the binary path, as `OffsetOutOfRange` on a row that was never corrupt.
 #[inline(always)]
-pub fn get_offset_checked<'a>(data: &'a [u8], offset_pos: usize) -> Result<usize,DecodeError> {
+pub fn get_offset_checked(data: &[u8], offset_pos: usize) -> Result<usize, DecodeError> {
   let offset = get_offset(data, offset_pos);
-  if offset >= data.len() {
+  if offset > data.len() {
     return Err(DecodeError::OffsetOutOfRange);
   }
   return Ok(offset);
