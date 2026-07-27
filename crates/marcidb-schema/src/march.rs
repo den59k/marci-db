@@ -107,12 +107,24 @@ fn apply_file_op(blocks: &mut Vec<(String, Vec<String>)>, op: FileOp) -> Result<
             if blocks[i].1.iter().any(|l| field_name_of(l) == field) {
                 return Err(SchemaError(format!("evolve: field {}.{} already exists", entity, field)));
             }
+            let path = format!("{}.{}", entity, field);
+            layout_of(&path, &line)?;
+            // A slot is claimed once and never re-claimed: two fields sharing one offset slot would have
+            // each rewrite the other's bytes, and a retired slot still holds dead bytes in existing rows.
+            if let Some(slot) = slot_of(&line)
+                && let Some(clash) = blocks[i].1.iter().find(|l| slot_of(l) == Some(slot) || retired_slot_of(l) == Some(slot)) {
+                return Err(SchemaError(format!(
+                    "evolve: add field {} claims @slot({}), which is already taken by \"{}\"", path, slot, clash.trim()
+                )));
+            }
             blocks[i].1.push(line);
         }
         FileOp::AlterField { entity, field, line } => {
             let i = find(blocks, &entity).ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
             let f = blocks[i].1.iter_mut().find(|l| field_name_of(l) == field)
                 .ok_or_else(|| SchemaError(format!("evolve: unknown field {}.{}", entity, field)))?;
+            let path = format!("{}.{}", entity, field);
+            check_layout_preserved(&path, f, &line)?;
             *f = line;
         }
         FileOp::DropField { entity, field } => {
@@ -157,6 +169,75 @@ fn field_name_of(line: &str) -> &str {
 fn slot_of(line: &str) -> Option<usize> {
     line.split_whitespace()
         .find_map(|tok| tok.strip_prefix("@slot(").and_then(|x| x.strip_suffix(")")).and_then(|n| n.parse().ok()))
+}
+
+/// Extracts the slot from a `@retired(N)` tombstone line.
+fn retired_slot_of(line: &str) -> Option<usize> {
+    line.trim().strip_prefix("@retired(").and_then(|x| x.strip_suffix(")")).and_then(|n| n.trim().parse().ok())
+}
+
+/// The part of a field line that pins where the field's bytes physically live: storage location, declared
+/// type, and (for relations) the storage binding.
+struct Layout {
+    location: String,
+    ty: String,
+    binding: Option<String>,
+}
+
+/// Parses [`Layout`] out of a field line, requiring the location token to be present.
+///
+/// Actions in a `.march` file are self-contained — `alter field` REPLACES the whole line — so a
+/// hand-written action that merely forgets `@slot(N)` used to be accepted and silently moved the field to
+/// slot 0. From then on every stored row decoded garbage from the wrong offsets. Requiring the location
+/// turns that into an error before anything is written.
+fn layout_of(path: &str, line: &str) -> Result<Layout, SchemaError> {
+    let ty = line.split_whitespace().nth(1)
+        .ok_or_else(|| SchemaError(format!("evolve: {} — expected \"<name> <type> <attributes>\", got \"{}\"", path, line.trim())))?
+        .to_string();
+
+    let (mut location, mut binding) = (None, None);
+    for tok in line.split_whitespace().skip(2) {
+        match tok.split_once('(').map(|(kw, _)| kw).unwrap_or(tok) {
+            "@id" | "@virtual" | "@slot" => {
+                if let Some(first) = &location {
+                    return Err(SchemaError(format!("evolve: {} declares two storage locations ({} and {})", path, first, tok)));
+                }
+                location = Some(tok.to_string());
+            }
+            "@current_id" | "@field_value" | "@index_tree" | "@id_list" => binding = Some(tok.to_string()),
+            _ => {}
+        }
+    }
+
+    let location = location.ok_or_else(|| SchemaError(format!(
+        "evolve: {} — the action carries no storage location (@slot(N), @id or @virtual): \"{}\". \
+         Migration actions are self-contained and must repeat the field's full definition; \
+         generate them with `marci-migrate generate` rather than hand-editing",
+        path, line.trim()
+    )))?;
+    Ok(Layout { location, ty, binding })
+}
+
+/// Rejects an `alter field` that would move the field's bytes. `alter field` exists for METADATA only
+/// (nullable / default / format / onDelete / added enum variants) — the physical layout of an existing
+/// field is history, and rewriting it in place would invalidate every row already on disk.
+fn check_layout_preserved(path: &str, old_line: &str, new_line: &str) -> Result<(), SchemaError> {
+    let old = layout_of(path, old_line)?;
+    let new = layout_of(path, new_line)?;
+
+    let mismatch = |what: &str, a: &str, b: &str| SchemaError(format!(
+        "evolve: alter field {} would change the field's {} ({} -> {}) — alter field carries metadata only, \
+         and the stored rows are laid out for the old definition. Current definition: \"{}\"",
+        path, what, a, b, old_line.trim()
+    ));
+
+    if old.location != new.location { return Err(mismatch("storage location", &old.location, &new.location)); }
+    if old.ty != new.ty { return Err(mismatch("type", &old.ty, &new.ty)); }
+    if old.binding != new.binding {
+        return Err(mismatch("relation binding",
+            old.binding.as_deref().unwrap_or("none"), new.binding.as_deref().unwrap_or("none")));
+    }
+    Ok(())
 }
 
 /// Splits snapshot text into blocks `(entity name, field lines)`, preserving order.
@@ -301,5 +382,76 @@ mod tests {
 
         let snap1 = evolve(&snap0, &m1).unwrap();
         assert_eq!(canon(&snap1), serialize_snapshot(&v1));
+    }
+
+    /// End-to-end: adding `@onDelete` to a live schema produces a migration, and replaying that migration
+    /// lands the policy in the snapshot the engine loads. This is the path production takes (`$migrate` over
+    /// committed `.march` files) — before, the generator emitted nothing and prod ran without the constraint.
+    #[test]
+    fn on_delete_survives_generate_then_migrate() {
+        let v0 = parse_schema("model Class {\n  title String\n}\nmodel Enrollment {\n  class Class?\n  status String\n}");
+        let snap0 = evolve("", &serialize_migration(&diff(&parse_schema(""), &v0).unwrap(), &v0)).unwrap();
+        assert!(!snap0.contains("@onDelete"), "baseline should have no policy:\n{}", snap0);
+
+        let mut v1 = parse_schema("model Class {\n  title String\n}\nmodel Enrollment {\n  class Class? @onDelete(Restrict)\n  status String\n}");
+        let prev: Schema = parse_snapshot(&snap0).unwrap();
+        reconcile(&mut v1, &prev);
+
+        let m1 = serialize_migration(&diff(&prev, &v1).unwrap(), &v1);
+        assert!(m1.contains("alter field Enrollment.class"), "no migration action generated:\n{}", m1);
+        assert!(m1.contains("@onDelete(Restrict)"), "action lost the policy:\n{}", m1);
+        // The action stays self-contained — the pinned layout travels with it
+        assert!(m1.contains("@slot(") && m1.contains("@field_value"), "action dropped the pinned layout:\n{}", m1);
+
+        let snap1 = evolve(&snap0, &m1).unwrap();
+        assert_eq!(canon(&snap1), serialize_snapshot(&v1));
+
+        // ...and the loaded schema really enforces it (the cache is rebuilt from the snapshot)
+        let loaded = parse_snapshot(&snap1).unwrap();
+        let class_idx = loaded.models.iter().position(|m| m.name == "Class").unwrap();
+        assert!(loaded.models[class_idx].rev_dependencies.iter()
+            .any(|d| matches!(d.constraint, crate::DeleteConstraint::Restrict)),
+            "policy did not reach the loaded schema: {:?}", loaded.models[class_idx].rev_dependencies);
+    }
+
+    /// `alter field` replaces the WHOLE line, so an action that forgets `@slot(N)` used to move the field to
+    /// slot 0 — accepted silently, after which every stored row decoded from the wrong offsets. Layout is
+    /// history: an alter that changes it must be refused before anything is written.
+    #[test]
+    fn evolve_rejects_alter_that_moves_the_field() {
+        let v0 = parse_schema("model Class {\n  title String\n}\nmodel Enrollment {\n  class Class?\n  status String\n}");
+        let snap = evolve("", &serialize_migration(&diff(&parse_schema(""), &v0).unwrap(), &v0)).unwrap();
+
+        // No location token at all — the form that used to destroy the database
+        let err = evolve(&snap, "alter field Enrollment.class Class @onDelete(Restrict)").unwrap_err();
+        assert!(err.0.contains("storage location"), "unhelpful error: {}", err.0);
+
+        // A location that disagrees with history
+        let err = evolve(&snap, "alter field Enrollment.class Class @slot(99) @field_value @onDelete(Restrict)").unwrap_err();
+        assert!(err.0.contains("storage location"), "unhelpful error: {}", err.0);
+
+        // A type change smuggled in through alter
+        let err = evolve(&snap, "alter field Enrollment.status Int @slot(8)").unwrap_err();
+        assert!(err.0.contains("type"), "unhelpful error: {}", err.0);
+
+        // The correct, generator-shaped action is still accepted
+        let ok = evolve(&snap, "alter field Enrollment.class Class @nullable @slot(4) @field_value @onDelete(Restrict)").unwrap();
+        assert!(ok.contains("@onDelete(Restrict)"), "valid alter did not apply:\n{}", ok);
+    }
+
+    /// Two fields must never share an offset slot — they would each overwrite the other's bytes — and a
+    /// retired slot still holds dead bytes in existing rows.
+    #[test]
+    fn evolve_rejects_add_field_on_a_taken_slot() {
+        let v0 = parse_schema("model M {\n  a String\n  b String\n}");
+        let snap = evolve("", &serialize_migration(&diff(&parse_schema(""), &v0).unwrap(), &v0)).unwrap();
+
+        let err = evolve(&snap, "add field M.c String @slot(8)").unwrap_err();
+        assert!(err.0.contains("already taken"), "unhelpful error: {}", err.0);
+
+        let err = evolve(&snap, "add field M.c String").unwrap_err();
+        assert!(err.0.contains("storage location"), "unhelpful error: {}", err.0);
+
+        assert!(evolve(&snap, "add field M.c String @slot(12)").is_ok());
     }
 }

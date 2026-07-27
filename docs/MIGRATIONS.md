@@ -120,6 +120,13 @@ add unique User.email
 Because each action carries its definition, the server can apply a migration without seeing the whole
 schema — it just lays the actions onto its current state. An accidental `drop field` is visible in review.
 
+**Actions are not hand-authoring material.** `alter field` *replaces the whole line*, so an action that
+omits `@slot(N)` would move the field's bytes and every stored row would then decode from the wrong
+offsets. `evolve` therefore refuses any action that changes a field's pinned physical identity — storage
+location, declared type, or relation binding — and refuses an `add field` claiming a slot that is already
+taken (live or `@retired`). `alter field` is for **metadata only**: nullable, `@default`, `@format`,
+`@onDelete`, added enum variants. Generate migrations with `marci-migrate generate`.
+
 ## Artifacts
 
 ```
@@ -217,7 +224,7 @@ rebuilds the computed caches (default bytes, index trees, counters, reverse-depe
 | `CreateEntity` | create the entity tree + its index/relation trees | no (empty) | no |
 | `DropEntity` | delete the entity tree + its index/relation trees | no | **yes** |
 | `AddField` | nothing (slot is in `new`; default-on-read) | **no** | no |
-| `AlterField` | nothing (nullable/default/format/added enum variants — metadata) | no | no |
+| `AlterField` | nothing (nullable/default/format/`@onDelete`/added enum variants — metadata) | no | no |
 | `DropField` | nothing — the slot is **retired** (`@retired(N)` in the snapshot); old rows keep dead bytes, new rows skip it. Relation/key drops are rejected. | no | **yes** |
 | `AddIndex` / `DropIndex` | build the index tree from existing rows / delete it | scan / no | no |
 

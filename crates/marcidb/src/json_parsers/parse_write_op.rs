@@ -126,6 +126,17 @@ fn parse_write_op<'a>(
                 let start_offset = id.len();
                 encode_id_value(&mut id, field, schema, value)?;
 
+                // A relation that lives IN the key still links two rows, so it needs the same reverse-index
+                // entry a body-stored FK gets. Without it the back-reference tree of a composite-key join
+                // (`ChatUser.user` ↔ `User.chats`) stays empty, and every delete policy that reads it —
+                // Cascade, Restrict, RemoveItem — silently finds nothing to act on: deleting the User left
+                // the ChatUser row behind with a key pointing at nothing.
+                if let FieldType::Ref(ref_info) = &field.ty {
+                    let ref_entity = &schema.models[ref_info.model_index];
+                    let ref_id = parse_id(schema, ref_entity, value)?;
+                    refs.push(WriteRelation::Connect { field, ref_info, ids: vec![ ref_id ], st: ref_entity });
+                }
+
                 // Add a null terminator to id if the size is unknown (for separation)
                 if !matches!(field.ty, FieldType::Ref(_)) && field.get_size().is_none() {
                     id.push(b'\0');

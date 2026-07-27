@@ -105,6 +105,13 @@ pub fn delete_data(db: &MarciDB, model: &str, data: Value) {
   db.delete_item(entity, &id).unwrap();
 }
 
+/// `delete` without unwrapping the execution result, for the referential-integrity rejection cases.
+pub fn try_delete(db: &MarciDB, model: &str, data: Value) -> Result<bool, marcidb::DeleteError> {
+  let entity = db.get_model(model).unwrap();
+  let id = parse_id(&db.schema, entity, &data).unwrap();
+  db.delete_item(entity, &id)
+}
+
 pub fn get_aggregate(db: &MarciDB, model: &str, json_query: Value) -> Value {
   let entity = db.get_model(model).unwrap();
   let op = parse_aggregate(&db.schema, entity, &json_query).unwrap();
