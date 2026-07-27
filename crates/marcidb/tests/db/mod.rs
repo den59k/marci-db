@@ -22,6 +22,7 @@ pub mod float_json_tests;
 pub mod update_many_tests;
 pub mod id_list_tests;
 pub mod array_ops_tests;
+pub mod row_codec_fuzz_tests;
 
 use std::str::FromStr;
 
