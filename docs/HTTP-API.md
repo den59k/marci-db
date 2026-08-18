@@ -18,8 +18,12 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-serv
 | `--host <HOST>` | `MARCI_HOST` | `0.0.0.0` | bind address (`localhost` is accepted) |
 | `--port <PORT>` | `PORT` | `3000` | listen port |
 | `--data <DIR>` | `MARCI_DATA` | `./data` | data directory (`/app/data` in the image) |
+| `--token <TOKEN>` | `MARCI_TOKEN` | *(unset)* | when set, every request must carry `Authorization: Bearer <TOKEN>` (else `401`); `GET /$health` stays open |
 
 `--help` / `--version` print and exit. Each database is stored under `<data>/<db>`.
+
+`GET /$health` → `{"ok":true}` — liveness probe (docker healthcheck), never authenticated.
+`DELETE /:db` → drops a database: closes the handle and removes its directory (`404` if absent). Meant for hosts that own many databases (per-tenant / per-environment DBs); there is no undo.
 
 ## Endpoints
 

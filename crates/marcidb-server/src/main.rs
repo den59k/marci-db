@@ -1,7 +1,7 @@
 use std::{collections::HashMap, convert::Infallible, net::{IpAddr, SocketAddr}, path::PathBuf, sync::{Arc, Mutex, RwLock}};
 
 use http_body_util::Full;
-use hyper::{Method, Request, Response, StatusCode, body::Bytes, server::conn::http1, service::service_fn};
+use hyper::{Method, Request, Response, StatusCode, body::Bytes, header, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use marcidb::{MarciDB, ProviderRegistry};
 use tokio::{fs, net::TcpListener};
@@ -19,11 +19,35 @@ pub struct ServerContext {
     dbs: Mutex<HashMap<String, Arc<RwLock<MarciDB>>>>,
     /// `@custom` index providers, shared into every DB this server opens. Built once at startup.
     providers: Arc<ProviderRegistry>,
+    /// Bearer token every request must carry (`MARCI_TOKEN` / `--token`); `None` = open server (local dev).
+    token: Option<String>,
 }
 
 impl ServerContext {
-    fn new(root: PathBuf) -> Self {
-        ServerContext { root, dbs: Mutex::new(HashMap::new()), providers: build_providers() }
+    fn new(root: PathBuf, token: Option<String>) -> Self {
+        ServerContext { root, dbs: Mutex::new(HashMap::new()), providers: build_providers(), token }
+    }
+
+    /// Drops a database: closes the open handle (if any) and removes its directory. A missing DB → NotFound.
+    /// Used by hosts that own many databases (a draft DB is recreated when its schema can't be migrated).
+    pub fn drop_db(&self, name: &str) -> Result<(), ApiError> {
+        if !is_valid_db_name(name) {
+            return Err(ApiError::BadRequest(format!("invalid database name '{}'", name)));
+        }
+        let path = self.root.join(name);
+        {
+            let mut dbs = self.dbs.lock().unwrap_or_else(|e| e.into_inner());
+            let existed = dbs.remove(name).is_some();
+            if !existed && !path.exists() {
+                return Err(ApiError::NotFound(format!("database '{}' not found", name)));
+            }
+        }
+        // The Arc handed out to in-flight requests keeps the engine alive until they finish; new requests
+        // no longer find the entry and would reopen from disk — which is gone after this.
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(|e| ApiError::Internal(format!("failed to remove database '{}': {}", name, e)))?;
+        }
+        Ok(())
     }
 
     /// DB by name. `allow_create` (for `$migrate`) creates an empty DB; otherwise a nonexistent one → NotFound
@@ -98,6 +122,27 @@ async fn handle_inner(
     let method = req.method().clone();
     let path = req.uri().path().trim_matches('/').to_string();
 
+    // Liveness probe (docker healthcheck / a host waiting for the container) — before auth on purpose
+    if method == Method::GET && path == "$health" {
+        return Ok(Response::new(Full::new(Bytes::from("{\"ok\":true}"))));
+    }
+
+    if let Some(expected) = &ctx.token {
+        let given = req.headers().get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::trim);
+        if given != Some(expected.as_str()) {
+            return Err(ApiError::Unauthorized("missing or invalid bearer token".to_string()));
+        }
+    }
+
+    // Drop a whole database (closes it and removes its directory)
+    if method == Method::DELETE && !path.contains('/') && !path.is_empty() {
+        ctx.drop_db(&path)?;
+        return Ok(Response::new(Full::new(Bytes::new())));
+    }
+
     let (db_name, rest) = path.split_once('/')
         .ok_or_else(|| ApiError::BadRequest("expected path /<db>/...".to_string()))?;
     let db_name = db_name.to_string();
@@ -151,6 +196,7 @@ struct Config {
     host: IpAddr,
     port: u16,
     data_dir: String,
+    token: Option<String>,
 }
 
 /// Parses CLI flags layered over environment variables over defaults. Accepts `--flag value` and
@@ -160,6 +206,7 @@ fn parse_config() -> Config {
     let mut host = std::env::var("MARCI_HOST").ok();
     let mut port = std::env::var("PORT").ok();
     let mut data = std::env::var("MARCI_DATA").ok();
+    let mut token = std::env::var("MARCI_TOKEN").ok().filter(|t| !t.is_empty());
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -173,6 +220,7 @@ fn parse_config() -> Config {
             "--host" => host = Some(take_value(&flag, inline, &mut args)),
             "--port" => port = Some(take_value(&flag, inline, &mut args)),
             "--data" | "--data-dir" => data = Some(take_value(&flag, inline, &mut args)),
+            "--token" => token = Some(take_value(&flag, inline, &mut args)).filter(|t| !t.is_empty()),
             other => {
                 eprintln!("marcidb-server: unknown argument '{}'. Try '--help'.", other);
                 std::process::exit(2);
@@ -190,7 +238,7 @@ fn parse_config() -> Config {
     };
     let data_dir = data.unwrap_or_else(|| "./data".to_string());
 
-    Config { host, port, data_dir }
+    Config { host, port, data_dir, token }
 }
 
 /// Pulls a flag's value from the inline `=value` or the next argument; exits 2 if absent.
@@ -222,6 +270,7 @@ fn print_help() {
     println!("  --host <HOST>   Address to bind     [default: 0.0.0.0]  [env: MARCI_HOST]");
     println!("  --port <PORT>   Port to listen on   [default: 3000]     [env: PORT]");
     println!("  --data <DIR>    Data directory      [default: ./data]   [env: MARCI_DATA]");
+    println!("  --token <TOKEN> Require 'Authorization: Bearer <TOKEN>' on every request  [env: MARCI_TOKEN]");
     println!("  -h, --help      Print help and exit");
     println!("  -v, --version   Print version and exit");
     println!();
@@ -237,7 +286,7 @@ async fn main() {
         std::process::exit(1);
     }
     let root = PathBuf::from(&cfg.data_dir);
-    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(root.clone()));
+    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(root.clone(), cfg.token.clone()));
 
     let addr = SocketAddr::new(cfg.host, cfg.port);
     let listener = match TcpListener::bind(addr).await {
@@ -248,7 +297,7 @@ async fn main() {
         }
     };
 
-    print_banner(&addr, &root, &list_databases(&root));
+    print_banner(&addr, &root, &list_databases(&root), cfg.token.is_some());
 
     loop {
         tokio::select! {
@@ -279,7 +328,7 @@ async fn main() {
 }
 
 /// Startup banner: version, where to reach it, and what's already on disk
-fn print_banner(addr: &SocketAddr, data_dir: &std::path::Path, dbs: &[String]) {
+fn print_banner(addr: &SocketAddr, data_dir: &std::path::Path, dbs: &[String], auth: bool) {
     println!();
     println!("  MarciDB Server v{}", env!("CARGO_PKG_VERSION"));
     println!("  ----------------------------------------");
@@ -291,6 +340,7 @@ fn print_banner(addr: &SocketAddr, data_dir: &std::path::Path, dbs: &[String]) {
         println!("  Listening  http://{}", addr);
     }
     println!("  Data dir   {}", display_path(data_dir));
+    println!("  Auth       {}", if auth { "bearer token required" } else { "open (set MARCI_TOKEN to require a token)" });
     if dbs.is_empty() {
         println!("  Databases  none yet (created on first migration)");
     } else {

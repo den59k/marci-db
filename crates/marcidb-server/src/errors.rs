@@ -5,6 +5,7 @@ use marcidb::{DeleteError, EncodeError, InsertError, UpdateError};
 // errors.rs
 #[derive(Debug)]
 pub enum ApiError {
+    Unauthorized(String),
     NotFound(String),
     BadRequest(String),
     Internal(String),
@@ -14,6 +15,7 @@ pub enum ApiError {
 impl ApiError {
     pub fn into_response(self) -> Response<Full<Bytes>> {
         let (status, msg) = match self {
+            ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
             ApiError::NotFound(m)  => (StatusCode::NOT_FOUND, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m)  => (StatusCode::INTERNAL_SERVER_ERROR, m),
