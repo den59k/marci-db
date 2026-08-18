@@ -88,6 +88,89 @@ export function marcidb(transport) {
   // Atomic batch transaction: array of operation descriptors → one batch call to the transport
   const $transaction = (ops) => transport.batch(ops.map((o) => o.__op));
 
+  // ── query builder ──
+  // A field key is anything that isn't a `$`-clause. A shape without field keys selects id + every scalar
+  // (the engine's rule too — the client applies it so the binary decoder and older servers see explicit fields).
+  const AGGREGATE_KEYS = ["$count", "$sum", "$avg", "$min", "$max"];
+  const scalarSelect = (model) => {
+    const out = {};
+    for (const f of MODELS[model] ?? []) if (f.k === "key" || f.k === "body") out[f.n] = true;
+    return out;
+  };
+  const keyField = (model) => ((MODELS[model] ?? []).find((f) => f.k === "key") || {}).n ?? "id";
+  // Resolves sub-queries (values carrying `__select`) and fills empty projections, recursively along relations.
+  const resolveShape = (model, shape) => {
+    const out = {};
+    let fields = 0;
+    for (const k in shape) {
+      const v = shape[k];
+      if (k.charCodeAt(0) === 36 /* $ */) { out[k] = v; continue; }
+      if (v !== undefined && v !== false) fields++;
+      if (v !== null && typeof v === "object") {
+        if ("__select" in v) { out[k] = v.__select; continue; }
+        const desc = (MODELS[model] ?? []).find((f) => f.n === k);
+        out[k] = desc && desc.m && !AGGREGATE_KEYS.some((a) => a in v) ? resolveShape(desc.m, v) : v;
+        continue;
+      }
+      out[k] = v;
+    }
+    if (fields === 0) Object.assign(out, scalarSelect(model));
+    return out;
+  };
+  const and = (a, b) => (a ? (b ? { $and: [a, b] } : a) : b);
+
+  // `db.<model>` — an immutable builder; each clause returns a new one over the same transport.
+  const collection = (model) => {
+    const make = (st) => {
+      // The wire query: the (object-form) `query` merged over the chain's state.
+      const build = (query) => {
+        const q = resolveShape(model, { ...(st.shape ?? {}), ...(query ?? {}) });
+        const where = and(st.where, q.$where);
+        if (where) q.$where = where; else delete q.$where;
+        if (st.order && !q.$order) q.$order = st.order;
+        if (st.limit !== undefined && q.$limit === undefined) q.$limit = st.limit;
+        if (st.skip !== undefined && q.$skip === undefined) q.$skip = st.skip;
+        if (st.cursor !== undefined && q.$cursor === undefined) q.$cursor = st.cursor;
+        return q;
+      };
+      const whereOnly = (query) => { const w = and(st.where, query && query.$where); return w ? { $where: w } : {}; };
+      const findMany = () => ({ model, action: "findMany", query: build() });
+      return {
+        get __op() { return findMany(); },
+        get __select() { return build(); },
+        then: (onFulfilled, onRejected) => run(findMany()).then(onFulfilled, onRejected),
+        catch: (onRejected) => run(findMany()).catch(onRejected),
+        finally: (onFinally) => run(findMany()).finally(onFinally),
+
+        where: (where) => make({ ...st, where: and(st.where, where) }),
+        order: (field, direction) => make({ ...st, order: typeof field === "string" ? { [field]: direction ?? "asc" } : field }),
+        limit: (n) => make({ ...st, limit: n }),
+        skip: (n) => make({ ...st, skip: n }),
+        after: (id) => make({ ...st, cursor: id !== null && typeof id === "object" ? id : { [keyField(model)]: id } }),
+        select: (shape) => make({ ...st, shape: shape ?? {} }),
+        first: () => op({ model, action: "findFirst", query: build() }),
+        count: (query) => {
+          const q = whereOnly(query);
+          return Object.assign(op({ model, action: "count", query: q }), { __select: { $count: true, ...q } });
+        },
+        aggregate: (query) => {
+          const q = { ...(query ?? {}), ...whereOnly(query) };
+          if (!q.$where) delete q.$where;
+          return Object.assign(op({ model, action: "aggregate", query: q }), { __select: q });
+        },
+
+        findMany: (query) => op({ model, action: "findMany", query: build(query) }),
+        findFirst: (query) => op({ model, action: "findFirst", query: build(query) }),
+        insert: (data) => op({ model, action: "insert", data }),
+        update: (id, data) => op({ model, action: "update", id, data }),
+        updateMany: (query, data) => op({ model, action: "updateMany", query: whereOnly(query), data }),
+        delete: (id) => op({ model, action: "delete", id }),
+        reindex: () => op({ model, action: "$reindex" }),
+      };
+    };
+    return make({});
+  };
+
   return {
     $transaction,
     /* generated_data */

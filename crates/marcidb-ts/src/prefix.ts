@@ -173,4 +173,87 @@ export type MarciTransport = {
   batch(ops: MarciOp[]): Promise<any[]>
 }
 
+// ───────────────────────────── query builder ─────────────────────────────
+
+// The per-model type bag the codegen emits (`UserTypes`) and `Query<T>` below is parametrised by.
+export type ModelTypes = {
+  name: string
+  model: any
+  id: Record<string, any>
+  /** What an empty select returns: id + every scalar field, as a `{ field: true }` shape. */
+  scalars: Record<string, true>
+  select: Record<string, any>
+  query: Record<string, any>
+  where: any
+  order: Record<string, any>
+  insert: any
+  update: any
+  aggregate: Record<string, any>
+  reindex: boolean
+}
+
+// A sub-query placed as a value in a select shape — a builder, `count()` or `aggregate()` of the relation's
+// model (`posts: db.post.order("id", "desc").limit(5)`). Branded by model name so a builder of the wrong model
+// is a type error; `[__sel]` is the shape it resolves to (see `Resolve`).
+declare const __sub: unique symbol
+declare const __sel: unique symbol
+export type Sub<Name extends string, Shape = any> = { readonly [__sub]: Name, readonly [__sel]: Shape }
+
+// A shape without field keys (only `$`-clauses, or nothing) selects id + every scalar — same rule as the engine.
+type Effective<T extends ModelTypes, S> = [Exclude<keyof S, ServiceKeys>] extends [never] ? T["scalars"] : S
+// Sub-queries inside a shape resolve to the shape they carry, recursively; `$`-clauses are left alone.
+type Resolve<S> =
+  S extends { readonly [__sel]: infer X } ? Resolve<X>
+  : S extends object ? { [K in keyof S]: K extends `$${string}` ? S[K] : Resolve<S[K]> }
+  : S
+type Rows<T extends ModelTypes, Sel> = GetResult<T["model"], Resolve<Effective<T, Sel>>>
+// The bare key value, accepted wherever an id object is (`after(42)` = `after({ id: 42 })`).
+type BareId<I> = I extends { id: infer V } ? V : never
+
+/**
+ * A lazy, immutable query over one model — `db.user` itself is one. Every clause returns a new query, so
+ * queries compose (`const active = db.user.where({ active: true })`). `await` runs it as `findMany`; passing
+ * it to `$transaction` batches it; placing it in another query's select makes it a sub-select. `Sel` is the
+ * projection: id + scalars until `select(...)` sets a shape.
+ */
+export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends PromiseLike<Rows<T, Sel>[]> {
+  readonly [__op]: Rows<T, Sel>[]
+  readonly [__sub]: T["name"]
+  readonly [__sel]: Effective<T, Sel>
+  /** Filter (marcidb `$where`). Repeated calls are ANDed. */
+  where(where: T["where"]): Query<T, Sel>
+  /** Sort by one field: `order("age", "desc")` or `order({ age: "desc" })`. */
+  order(field: keyof T["order"] & string, direction?: "asc" | "desc"): Query<T, Sel>
+  order(order: T["order"]): Query<T, Sel>
+  limit(n: number): Query<T, Sel>
+  skip(n: number): Query<T, Sel>
+  /** Keyset cursor: rows strictly after this id in the current order (`$cursor`). */
+  after(id: T["id"] | BareId<T["id"]>): Query<T, Sel>
+  /**
+   * The projection. Values are `true`, a nested shape, or a sub-query of the relation's model
+   * (`posts: db.post.limit(5)`, `posts: db.post.where({ published: true }).count()`). No argument, or no
+   * field keys, selects id + every scalar. `$`-clauses are accepted here too (the object form).
+   */
+  select<S extends T["query"] = T["scalars"]>(shape?: S): Query<T, S>
+  /** The first matching row (`findFirst`) or `null`. */
+  first(): Op<Rows<T, Sel> | null>
+  /** Row count; inside a select it becomes `{ count }` for the relation. */
+  count(query?: { $where?: T["where"] }): Op<number> & Sub<T["name"], { $count: true }>
+  // `NoInfer`: as a select value the contextual type is `Sub<Name, any>`, which would otherwise win the inference of `A`
+  aggregate<A extends T["aggregate"]>(query: A): Op<AggregateResult<T["model"], A>> & Sub<T["name"], NoInfer<A>>
+
+  // ── object form: one query object (select shape + $where/$order/$limit/$skip/$cursor), merged with the chain
+  findMany<Q extends T["query"] = {}>(query?: Q): Op<Rows<T, Q>[]>
+  findFirst<Q extends T["query"] = {}>(query?: Q): Op<Rows<T, Q> | null>
+
+  insert(data: T["insert"]): Op<T["id"]>
+  update(id: T["id"], data: T["update"]): Op<void>
+  /** Applies `data` to every matching row (the chain's `where` counts too); resolves to the number of rows. */
+  updateMany(query: { $where?: T["where"] }, data: T["update"]): Op<number>
+  delete(id: T["id"]): Op<void>
+}
+
+/** `db.<model>`: the root query, plus `reindex()` for models with a `@custom` (vector / full-text) index. */
+export type Collection<T extends ModelTypes> = Query<T> & (T["reindex"] extends true ? { reindex(): Op<{ ok: boolean, indexed: number }> } : {})
+
 export declare function marcidb(transport: string | MarciTransport): MarciDB;

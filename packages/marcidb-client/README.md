@@ -49,11 +49,10 @@ import { marcidb } from "marcidb-client";
 
 const db = marcidb("http://localhost:3000");
 
-// Find
-const users = await db.user.findMany({
-  id: true,
-  name: true,
-});
+// Find — a chainable query; no select = id + every scalar
+const users = await db.user.where({ name: { $startsWith: "A" } }).order("id", "desc").limit(20);
+const named = await db.user.select({ id: true, name: true });
+const one = await db.user.where({ id: 1 }).first();
 
 // Insert
 const id = await db.user.insert({

@@ -140,12 +140,48 @@ Rules and trade-offs:
 
 ## Queries
 
-### findMany / findFirst
+`db.<model>` is a lazy, immutable **query**. Clauses chain, `select` sets the projection, `await` runs it:
+
+```ts
+const users = await db.user
+  .where({ age: { $gte: 18 } })          // filter — see $where operators below
+  .order("age", "desc")                  // one field; also order({ age: "desc" })
+  .limit(20)
+  .select({
+    name: true,                          // field selection
+    posts: db.post                       // a sub-query: the relation's rows, shaped by its own chain
+      .where({ published: true })
+      .order("id", "desc")
+      .limit(3)
+      .select({ title: true }),
+    likes: db.like.count(),              // an aggregate over the relation → { count }
+  })
+```
+
+The result type is inferred from the select shape. Keys that are not selected do not exist in the result.
+
+- **No `select`, or a select without field keys, returns id + every scalar field** (relations and structs are
+  not scalars — select them explicitly). `await db.user` is "all users, all scalars"; so is
+  `db.post.limit(5)` placed as a sub-query.
+- `.first()` returns the first matching row or `null`; `.count()` the number of rows; `.aggregate({...})` an
+  aggregate (see [Aggregations](#aggregations)). Inside a select, `count()` / `aggregate()` of the relation's model
+  aggregate over the relation.
+- `.where()` twice ANDs; `.skip(n)` skips; `.after(id)` is the exclusive keyset cursor (`after(42)` or
+  `after({ id: 42 })`) — see [`$order`, `$limit`, `$skip`, `$cursor`](#order-limit-skip-cursor).
+- Queries are values: keep `const active = db.user.where({ active: true })` and derive from it — every clause
+  returns a new query. A query is a lazy `Op`, so it batches into `$transaction` like any other operation.
+- A sub-query must be built from the relation's own model (`posts: db.post…`) — the types enforce it.
+
+### The query object
+
+Every query is one JSON object on the wire — the select shape plus `$where` / `$order` / `$limit` / `$skip` /
+`$cursor` — and you can write it directly. `findMany` / `findFirst` take it (merged with whatever the chain
+already set); the same object is what `select(...)` accepts, so the two forms mix freely:
 
 ```ts
 const users = await db.user.findMany({
   name: true,                        // field selection
-  posts: { title: true },            // nested relation select
+  posts: { title: true, $limit: 3 }, // nested relation select, with its own clauses
   $where: { age: { $gte: 18 } },
   $order: { age: "desc" },
   $limit: 20,
@@ -154,7 +190,7 @@ const users = await db.user.findMany({
 })
 ```
 
-The result type is inferred from the select shape. Keys that are not selected do not exist in the result.
+The rest of this section describes the object's vocabulary; each clause has a chain method of the same name.
 
 ### `$where` operators
 
@@ -258,7 +294,7 @@ To compare against the **whole** value instead of a path, put a `$`-operator (or
 - `$limit` / `$skip` — applied after filtering. `$skip` is O(n); prefer `$cursor` for pagination.
 - `$cursor: { id }` — **exclusive** keyset cursor: results strictly after the row with this id, in the current `$order`. Without `$order` the order is fixed to primary-key order. Take the id from the last row of the previous page. If the cursor row was deleted: id-ordered queries continue seamlessly; value-ordered queries return an empty page.
 
-All of the above also work inside nested selects: `posts: { title: true, $order: { id: "desc" }, $limit: 5 }`.
+All of the above also work inside nested selects: `posts: { title: true, $order: { id: "desc" }, $limit: 5 }`, or as a sub-query: `posts: db.post.order("id", "desc").limit(5).select({ title: true })`.
 
 ### Vector & full-text search
 
@@ -387,9 +423,10 @@ Empty set: `count: 0`, the rest are `null` (SQL semantics). Null values are excl
 Aggregate keys inside a relation select replace the array with an aggregate object:
 
 ```ts
-await db.user.findMany({
+await db.user.select({
   name: true,
-  posts: { $count: true, $max: "views", $where: { published: true } },
+  posts: db.post.where({ published: true }).aggregate({ $count: true, $max: "views" }),
+  // or the object: posts: { $count: true, $max: "views", $where: { published: true } }
 })
 // → { name, posts: { count: number, max: number | null } }
 ```
@@ -434,23 +471,27 @@ import { marcidb } from "marcidb-client"
 const db = marcidb("http://localhost:3000/myapp")
 ```
 
-`npx marcidb generate` produces both the typed client (from `schema.marci`) and a `.march` migration file (a reviewable action list + a snapshot of the resulting schema); `npx marcidb migrate push myapp` ships your migration files and the server applies the new ones (creating the database on first push). The client talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same set of methods:
+`npx marcidb generate` produces both the typed client (from `schema.marci`) and a `.march` migration file (a reviewable action list + a snapshot of the resulting schema); `npx marcidb migrate push myapp` ships your migration files and the server applies the new ones (creating the database on first push). The client talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same query root:
 
 ```ts
-db.<model>.findMany(query)        // Promise<Result[]>
-db.<model>.findFirst(query)       // Promise<Result | null>
+db.<model>                          // a query: await it, chain it, or use it as a sub-query
+  .where(where) .order(field, dir?) .limit(n) .skip(n) .after(id)   // clauses → a new query
+  .select(shape?)                   // the projection (no field keys = id + scalars) → a new query
+  .first()                          // Promise<Result | null>
+  .count(query?)                    // Promise<number>
+  .aggregate(query)                 // Promise<AggregateResult>
+db.<model>.findMany(query?)       // Promise<Result[]> — the query object, merged with the chain
+db.<model>.findFirst(query?)      // Promise<Result | null>
 db.<model>.insert(data)           // Promise<Id>
 db.<model>.update(id, data)       // Promise<void>
 db.<model>.updateMany(query, data) // Promise<number> — rows matched
 db.<model>.delete(id)             // Promise<void>
-db.<model>.count(query?)          // Promise<number>
-db.<model>.aggregate(query)       // Promise<AggregateResult>
 db.<model>.reindex()              // Promise<{ ok, indexed }> — only on models with a @custom index
 
 db.$transaction([ ...ops ])       // Promise<[...results]> — atomic, see Transactions
 ```
 
-(The per-model methods return a lazy `Op<T>`, which is awaitable like a `Promise<T>` and can also be passed to `$transaction`.)
+(Queries and the per-model methods return a lazy `Op<T>`, which is awaitable like a `Promise<T>` and can also be passed to `$transaction`.)
 
 ### updateMany
 
@@ -458,6 +499,7 @@ Applies one update to every row matching `$where`, in a single transaction — e
 
 ```ts
 const n = await db.user.updateMany({ $where: { age: { $lt: 18 } } }, { active: false })
+// = db.user.where({ age: { $lt: 18 } }).updateMany({}, { active: false })
 ```
 
 The returned number counts rows **matched**, not rows whose stored bytes changed — re-applying a value a row already holds still counts, as in SQL. An empty query (`{}`) matches every row.

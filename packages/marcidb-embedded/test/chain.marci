@@ -1,0 +1,11 @@
+model User {
+  name  String
+  age   Int    @index
+  posts Post[] @bind(Post.author)
+}
+
+model Post {
+  title  String
+  views  Int   @index
+  author User
+}
