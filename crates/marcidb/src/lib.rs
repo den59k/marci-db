@@ -29,7 +29,7 @@ pub use crate::marci_db::{MarciDB, OpenOptions, ReindexError, QueryError};
 pub use crate::index_provider::{IndexProvider, IndexTree, IndexIter, RowScan, RowRef, SearchHit, ProviderError, ProviderRegistry};
 pub use crate::transaction::MarciTransaction;
 pub use crate::error::StorageError;
-pub use crate::batch::{execute_batch, execute_op, update_many_query, BatchError, BatchErrorKind, OpError};
+pub use crate::batch::{execute_batch, execute_op, filter_query, BatchError, BatchErrorKind, OpError};
 pub use crate::binary_encode::{execute_query_binary, query_binary_many, query_binary_one, shape_supported, QueryBinaryOutcome, BINARY_VERSION};
 pub use crate::migrate::{apply, MigrateApplyError};
 pub use marcidb_schema::{MigrateOp, MigrateError, serialize_snapshot, parse_snapshot, serialize_type, serialize_field, schema_fingerprint};

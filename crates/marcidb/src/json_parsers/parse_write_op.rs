@@ -80,19 +80,34 @@ fn parse_write_op<'a>(
         let Some(value) = obj.get(&field.name) else {
             // Check whether there is a default value
             if let Some(default_value) = &field.default_value {
-                match field.location {
+                let start_offset;
+                let value_data: &[u8] = match field.location {
                     FieldLocation::Key { index: _ } => {
+                        start_offset = id.len();
                         if let Some(offset) = parse_default_value(&mut id, field, default_value)? {
                             defaults.push(WriteDefault::Key(offset, default_value));
                         }
+                        &id[start_offset..]
                     }
                     FieldLocation::Body { offset_pos } => {
                         write_header(&mut data, offset_pos);
+                        start_offset = data.len();
                         if let Some(offset) = parse_default_value(&mut data, field, default_value)? {
                             defaults.push(WriteDefault::Body(offset, default_value));
                         }
+                        &data[start_offset..]
                     }
-                    _ => {}
+                    _ => &[],
+                };
+                // A defaulted value is a value like any other: it must reach the field's indexes, or
+                // `@default(0) @index` rows are invisible to `{ views: 0 }` (an index scan) while a plain
+                // scan finds them. Counters are filled at write time (`process_write`), so their bytes
+                // are not known here — they are key/autoincrement fields, which carry no value index.
+                if !matches!(default_value, FieldDefault::Counter(_)) && !value_data.is_empty() {
+                    for index in field.indexes.iter() {
+                        if matches!(index, FieldIndex::Custom { .. }) { continue; }
+                        write_indexes.push(WriteIndex::Value(field, index, encode_index(field, index, value_data)));
+                    }
                 }
                 continue;
             }

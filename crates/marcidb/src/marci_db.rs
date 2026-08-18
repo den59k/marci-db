@@ -270,6 +270,15 @@ impl MarciDB {
     Ok(is_delete)
   }
 
+  /// Deletes every row matching `query`, atomically. Returns how many rows were deleted; on any error
+  /// nothing is committed. See [`MarciTransaction::delete_many`].
+  pub fn delete_many(&self, entity: &Entity, query: &QueryOp) -> Result<u64, DeleteError> {
+    let tx = self.begin_write()?;
+    let deleted = tx.delete_many(entity, query)?;
+    tx.commit()?;
+    Ok(deleted)
+  }
+
   /// Atomically applies ops to the DB, writes the new snapshot+version to `__marci_meta__` and switches
   /// the in-memory schema. On error the transaction is rolled back and state is unchanged.
   ///

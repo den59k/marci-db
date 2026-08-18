@@ -1,3 +1,7 @@
+// The generic query layer (query-language types + the builder runtime) — see ./query.ts.
+export * from "./query";
+import type { FieldDesc } from "./query";
+
 export async function request(method: string, url: string, body?: any): Promise<any> {
   const res = await fetch(url, {
     method,
@@ -109,7 +113,7 @@ function readScalar(r: BinReader, t: string): any {
   }
 }
 
-type FieldDesc = { n: string; k: "key" | "body" | "one" | "many"; t?: string | null; m?: string };
+
 type Decoder = (r: BinReader) => any;
 
 /**

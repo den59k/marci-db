@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": { "marcidb-client/runtime": ["../packages/marcidb-client/runtime/index.d.ts"] }
+  },
+  "files": ["chain.types.ts"]
+}

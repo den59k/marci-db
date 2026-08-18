@@ -79,6 +79,41 @@ impl<'db> MarciTransaction<'db> {
     process_delete(&self.tx, id, entity, &action, &self.db.schema, &self.db.providers, None)
   }
 
+  /// Deletes every row matching `query`'s filter — each through the same path as [`delete_item`]
+  /// (cascades, restrict checks, index maintenance) — and returns how many rows were deleted.
+  ///
+  /// Like [`update_many`], the matching ids are resolved up front, so the filter observes the pre-delete
+  /// state; everything happens in this transaction, so an error part-way (a `Restrict` dependency, say)
+  /// leaves nothing committed. A row a cascade already removed simply doesn't count.
+  ///
+  /// [`delete_item`]: MarciTransaction::delete_item
+  /// [`update_many`]: MarciTransaction::update_many
+  pub fn delete_many(&self, entity: &Entity, query: &QueryOp) -> Result<u64, DeleteError> {
+    // Same guards as update_many: a search clause would silently degrade into an unfiltered scan on a
+    // transaction, and a bounded delete without a total order would remove an arbitrary subset.
+    if query.search.is_some() {
+      return Err(DeleteError::Unsupported("$near/$search is not supported in deleteMany"));
+    }
+    if query.limit.is_some() || query.skip.is_some() || query.cursor.is_some() {
+      return Err(DeleteError::Unsupported("$limit/$skip/$cursor are not supported in deleteMany"));
+    }
+
+    // The scan context must drop before the deletes reopen the model/index trees (one live handle per
+    // tree per write transaction) — see update_many.
+    let ids: Vec<Vec<u8>> = {
+      let mut ctx = TransationContext::new(&self.tx, &self.db.schema, |c: DecodeCtx<Vec<u8>>| c.id.to_vec());
+      process_query_many(query, &mut ctx, None)?
+    };
+
+    let mut deleted = 0;
+    for id in ids.iter() {
+      if self.delete_item(entity, id)? {
+        deleted += 1;
+      }
+    }
+    Ok(deleted)
+  }
+
   pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, StorageError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
     let mut ctx = TransationContext::new(&self.tx, &self.db.schema, f);
     return process_query_many(query, &mut ctx, None);
