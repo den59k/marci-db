@@ -6,7 +6,7 @@ use hyper_util::rt::TokioIo;
 use marcidb::{MarciDB, ProviderRegistry};
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_transaction, handle_update, handle_update_many}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_sync_plan, handle_transaction, handle_update, handle_update_many}};
 
 mod handlers;
 mod errors;
@@ -113,6 +113,11 @@ pub async fn handle(
     Ok(response)
 }
 
+/// `?plan=1` on `$sync` — dry run (see `handle_sync_plan`)
+fn plan_requested(req: &Request<hyper::body::Incoming>) -> bool {
+    req.uri().query().map_or(false, |q| q.split('&').any(|kv| matches!(kv, "plan" | "plan=1" | "plan=true")))
+}
+
 // "/{db}/$migrate" | "/{db}/$sync" | "/{db}/$transaction" | "/{db}/{model}/{action}[/{id}]"
 // Actions taking an {id}: update, delete. The rest read their arguments from the body.
 async fn handle_inner(
@@ -124,7 +129,7 @@ async fn handle_inner(
 
     // Liveness probe (docker healthcheck / a host waiting for the container) — before auth on purpose
     if method == Method::GET && path == "$health" {
-        return Ok(Response::new(Full::new(Bytes::from("{\"ok\":true}"))));
+        return Ok(Response::new(Full::new(Bytes::from(format!("{{\"ok\":true,\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION"))))));
     }
 
     if let Some(expected) = &ctx.token {
@@ -155,7 +160,7 @@ async fn handle_inner(
     if method == Method::POST {
         match rest {
             "$migrate" => return handle_migrate(req, ctx, db_name).await,
-            "$sync" => return handle_sync(req, ctx, db_name).await,
+            "$sync" => return if plan_requested(&req) { handle_sync_plan(req, ctx, db_name).await } else { handle_sync(req, ctx, db_name).await },
             "$transaction" => return handle_transaction(req, ctx, db_name).await,
             // Rebuild every model's @custom indexes
             "$reindex" => return handle_reindex_all(ctx, db_name).await,

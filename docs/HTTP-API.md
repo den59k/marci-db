@@ -22,7 +22,7 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-serv
 
 `--help` / `--version` print and exit. Each database is stored under `<data>/<db>`.
 
-`GET /$health` → `{"ok":true}` — liveness probe (docker healthcheck), never authenticated.
+`GET /$health` → `{"ok":true,"version":"0.11.4"}` — liveness probe (docker healthcheck), never authenticated; `version` since 0.11.4 (hosts use it to know `$sync?plan=1` exists).
 `DELETE /:db` → drops a database: closes the handle and removes its directory (`404` if absent). Meant for hosts that own many databases (per-tenant / per-environment DBs); there is no undo.
 
 ## Endpoints
@@ -33,6 +33,7 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 |---|---|---|
 | `POST /:db/$migrate` | JSON `[{ id, ops }]` — migration files | `{ "applied": [...ids] }` — replays new migrations, creating the db if absent |
 | `POST /:db/$sync` | schema text (`.marci`) | empty — diffs & applies the schema directly, creating the db if absent |
+| `POST /:db/$sync?plan=1` | schema text (`.marci`) | `{ ops: [...], destructive }` — dry run: the diff `$sync` would apply, nothing committed, db not created |
 | `POST /:db/:model/findMany` | query object | JSON array |
 | `POST /:db/:model/findFirst` | query object | object or `null` |
 | `POST /:db/:model/insert` | insert object | id object |
@@ -134,6 +135,17 @@ npx marcidb migrate check myapp --url http://localhost:3000
 ```bash
 curl -X POST http://localhost:3000/myapp/\$sync --data-binary @schema.marci
 ```
+
+**Dry run — `?plan=1`.** `POST /:db/$sync?plan=1` with the same body computes the diff and answers it as JSON without committing anything (a missing database is planned against an empty schema and is *not* created):
+
+```json
+{ "destructive": true,
+  "ops": [ { "op": "dropField", "entity": "Task", "field": "text", "destructive": true, "text": "drop field Task.text" },
+           { "op": "createEntity", "entity": "Note", "destructive": false, "text": "create entity Note" },
+           { "op": "addIndex", "entity": "Note", "field": "text", "unique": false, "destructive": false, "text": "add index Note.text" } ] }
+```
+
+`op` ∈ `createEntity | dropEntity | addField | dropField | alterField | addIndex | dropIndex`; `destructive` marks data loss (`dropEntity`, `dropField`); `text` is the action as a `.march` line. Entities are the *materialized* names (a struct field appears as `Parent.field`). An incompatible change answers the same `400` the real `$sync` would. Use it to show/confirm what a schema push does to a database that holds data.
 
 It is deliberately **not** in the CLI — it doesn't touch the migration ledger, so mixing it with `$migrate` on one database desyncs the bookkeeping, and a schema that omits a model diffs to a `drop model` (data loss). Use it only for databases that aren't managed by migration files. It accepts the same changes as `$migrate` and rejects the same ones with `400`.
 
