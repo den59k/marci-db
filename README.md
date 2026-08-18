@@ -16,20 +16,18 @@ model Post {
 ```
 
 ```ts
-const posts = await db.post.findMany({
-  title: true,
-  author: { name: true },
-  $where: { views: { $gt: 100 } },
-  $order: { views: "desc" },
-  $limit: 20,
-})
+const posts = await db.post
+  .where({ views: { $gt: 100 } })
+  .order("views", "desc")
+  .limit(20)
+  .select({ title: true, author: { name: true } })
 ```
 
 ## Features
 
 - **Schema-first**: relations, nested structs and enums with payload fields (including fields shared between variants: `pro | business { ... }`) are part of the schema, not application code
 - **Ordered relation lists**: `images Image[] @list` stores the related ids inline in the row as an ordered array — user-arranged collections (galleries, playlists) keep their order, `$count` is O(1), and `{ $set: [...] }` reorders without touching any index. See [Ordered relation lists](docs/API.md#ordered-relation-lists-list)
-- **Typed TS client**: result types are inferred from the `select` shape, including discriminated unions for enums
+- **Typed TS client**: a chainable query (`db.post.where(…).order(…).limit(…).select(…)`, sub-queries in the select) that is one JSON object on the wire; result types are inferred from the `select` shape, including discriminated unions for enums
 - **Secondary indexes** with a query planner: range scans, `$order` by index, keyset pagination (`$cursor`)
 - **Aggregations**: `count` / `$sum` / `$avg` / `$min` / `$max`, including aggregates over relations inside a select (`posts: { $count: true }` — counted by index keys, without reading rows)
 - **Atomic batch transactions**: `db.$transaction([...])` applies several operations as all-or-nothing, with `ref("0.id")` to feed a generated id into later operations
@@ -70,7 +68,7 @@ npx marcidb migrate push myapp
 import { marcidb } from "marcidb-client"
 const db = marcidb("http://localhost:3000/myapp")
 
-const posts = await db.post.findMany({ title: true, author: { name: true } })
+const posts = await db.post.where({ views: { $gt: 100 } }).select({ title: true, author: { name: true } })
 ```
 
 ## Docker

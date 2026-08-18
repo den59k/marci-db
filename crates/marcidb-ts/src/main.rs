@@ -312,17 +312,32 @@ fn push_union_blocks(lines: &mut Vec<String>, payload_enums: &[&Field], branches
   lines.push(")".to_string());
 }
 
+/// A relation to a top-level model also accepts a sub-query built from that model's collection
+/// (`posts: db.post.limit(5)`, `db.post.count()`) — branded `Sub<"Post">` (see prefix.ts). Struct targets don't.
+fn get_sub_query_str(ref_model: &Entity) -> String {
+  if ref_model.name.contains('.') { String::new() } else { format!(" | Sub<\"{}\">", ref_model.name) }
+}
+
 fn get_field_select_str(field: &Field, schema: &Schema) -> String {
   match &field.ty {
     FieldType::Ref(ref_info) => {
-      format!("  {}?: {} | boolean", field.name, get_model_select_name(&schema.models[ref_info.model_index]))
+      let ref_model = &schema.models[ref_info.model_index];
+      format!("  {}?: {} | boolean{}", field.name, get_model_select_name(ref_model), get_sub_query_str(ref_model))
     },
     FieldType::RefList(ref_info) => {
       let ref_model = &schema.models[ref_info.model_index];
-      format!("  {}?: {} | {} | boolean", field.name, get_model_query_name(ref_model), get_model_aggregate_name(ref_model))
+      format!("  {}?: {} | {} | boolean{}", field.name, get_model_query_name(ref_model), get_model_aggregate_name(ref_model), get_sub_query_str(ref_model))
     },
     _ => format!("  {}?: boolean", field.name)
   }
+}
+
+fn get_model_scalars_name(model: &Entity) -> String {
+  format!("{}ModelScalars", model.name.replace('.', "_"))
+}
+
+fn get_model_types_name(model: &Entity) -> String {
+  format!("{}Types", model.name.replace('.', "_"))
 }
 
 /// Whether any field of the model carries a `@custom` (module) index — i.e. the model has a `reindex()`.
@@ -669,27 +684,43 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push(format!("  $max?: {}", get_aggregate_fields_union(model, false)));
     lines.push("}".to_string());
 
+    // What an empty select returns (mirror of `QueryOp::all` / the client's `scalarSelect`): every non-relation
+    // field, as the `{ field: true }` shape the result type is inferred from.
+    lines.push(format!("type {} = {{", get_model_scalars_name(model)));
+    for field in model.fields.iter() {
+      if field.name.starts_with("@") { continue; }
+      if matches!(field.ty, FieldType::Ref(_) | FieldType::RefList(_)) { continue; }
+      lines.push(format!("  {}: true", field.name));
+    }
+    lines.push("}".to_string());
+
+    // The type bag `Query<T>` (prefix.ts) is parametrised by — top-level models only (structs have no collection).
+    if !model.name.contains('.') {
+      lines.push(format!("type {} = {{", get_model_types_name(model)));
+      lines.push(format!("  name: \"{}\"", model.name));
+      lines.push(format!("  model: {}", get_model_name(model)));
+      lines.push(format!("  id: {}", get_model_id_name(model)));
+      lines.push(format!("  scalars: {}", get_model_scalars_name(model)));
+      lines.push(format!("  select: {}", get_model_select_name(model)));
+      lines.push(format!("  query: {}", get_model_query_name(model)));
+      lines.push(format!("  where: {}", get_model_where_name(model)));
+      lines.push(format!("  order: {}", get_model_order_name(model)));
+      lines.push(format!("  insert: {}", get_model_insert_name(model)));
+      lines.push(format!("  update: {}", get_model_update_name(model)));
+      lines.push(format!("  aggregate: {}", get_model_aggregate_name(model)));
+      lines.push(format!("  reindex: {}", model_has_custom_index(model)));
+      lines.push("}".to_string());
+    }
+
     lines.push("".to_string());
   }
   
+  // `db.<model>` is a `Query` root (prefix.ts): the chain (where/order/limit/select/…) and the object form
+  // (findMany/findFirst/…) over the model's type bag; `reindex()` only for models with a `@custom` index.
   lines.push(format!("export interface MarciDB {{"));
   for model in schema.models.iter() {
     if model.name.contains(".") { continue; };
-    lines.push(format!("  {}: {{", get_model_small_name(model)));
-    lines.push(format!("    findMany<T extends {}>(select: T): Op<GetResult<{}, T>[]>", get_model_query_name(model), get_model_name(model)));
-    lines.push(format!("    findFirst<T extends {}>(select: T): Op<GetResult<{}, T> | null>", get_model_query_name(model), get_model_name(model)));
-    lines.push(format!("    insert(data: {}): Op<{}>", get_model_insert_name(model), get_model_id_name(model)));
-    lines.push(format!("    update(id: {}, data: {}): Op<void>", get_model_id_name(model), get_model_update_name(model)));
-    // Applies `data` to every matching row in one transaction; resolves to the number of rows matched
-    lines.push(format!("    updateMany(query: {{ $where?: {} }}, data: {}): Op<number>", get_model_where_name(model), get_model_update_name(model)));
-    lines.push(format!("    delete(id: {}): Op<void>", get_model_id_name(model)));
-    lines.push(format!("    count(query?: {{ $where?: {} }}): Op<number>", get_model_where_name(model)));
-    lines.push(format!("    aggregate<T extends {}>(query: T): Op<AggregateResult<{}, T>>", get_model_aggregate_name(model), get_model_name(model)));
-    // Models with a `@custom` (vector / full-text) index can rebuild it from current data.
-    if model_has_custom_index(model) {
-      lines.push("    reindex(): Op<{ ok: boolean, indexed: number }>".to_string());
-    }
-    lines.push("  }".to_string());
+    lines.push(format!("  {}: Collection<{}>", get_model_small_name(model), get_model_types_name(model)));
   }
   // Atomic batch transaction: operations are applied all or none; the results are
   // a tuple sized by the number of operations. Use ref("0.id") to reference previous results
@@ -702,22 +733,9 @@ fn generate_types(input: &str, output_dir: &str) {
   
   // Create the index.js file
   let mut lines: Vec<String> = vec![];
-  for model in schema.models.iter() { 
+  for model in schema.models.iter() {
     if model.name.contains(".") { continue; };
-    lines.push(format!("{}: {{", get_model_small_name(model)));
-    lines.push(format!("  findMany: (select) => op({{ model: \"{0}\", action: \"findMany\", query: select }}),", model.name));
-    lines.push(format!("  findFirst: (select) => op({{ model: \"{0}\", action: \"findFirst\", query: select }}),", model.name));
-    lines.push(format!("  insert: (data) => op({{ model: \"{0}\", action: \"insert\", data }}),", model.name));
-    lines.push(format!("  update: (id, data) => op({{ model: \"{0}\", action: \"update\", id, data }}),", model.name));
-    lines.push(format!("  updateMany: (query, data) => op({{ model: \"{0}\", action: \"updateMany\", query: query ?? {{}}, data }}),", model.name));
-    lines.push(format!("  delete: (id) => op({{ model: \"{0}\", action: \"delete\", id }}),", model.name));
-    lines.push(format!("  count: (query) => op({{ model: \"{0}\", action: \"count\", query: query ?? {{}} }}),", model.name));
-    let has_custom = model_has_custom_index(model);
-    lines.push(format!("  aggregate: (query) => op({{ model: \"{0}\", action: \"aggregate\", query }}){1}", model.name, if has_custom { "," } else { "" }));
-    if has_custom {
-      lines.push(format!("  reindex: () => op({{ model: \"{0}\", action: \"$reindex\" }})", model.name));
-    }
-    lines.push("},".to_string());
+    lines.push(format!("{}: collection(\"{}\"),", get_model_small_name(model), model.name));
   }
 
   let index_out = include_str!("prefix.js")

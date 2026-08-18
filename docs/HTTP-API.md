@@ -34,7 +34,7 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | `POST /:db/$migrate` | JSON `[{ id, ops }]` — migration files | `{ "applied": [...ids] }` — replays new migrations, creating the db if absent |
 | `POST /:db/$sync` | schema text (`.marci`) | empty — diffs & applies the schema directly, creating the db if absent |
 | `POST /:db/$sync?plan=1` | schema text (`.marci`) | `{ ops: [...], destructive }` — dry run: the diff `$sync` would apply, nothing committed, db not created |
-| `POST /:db/:model/findMany` | query object | JSON array |
+| `POST /:db/:model/findMany` | query object (`{}` = id + all scalars) | JSON array |
 | `POST /:db/:model/findFirst` | query object | object or `null` |
 | `POST /:db/:model/insert` | insert object | id object |
 | `POST /:db/:model/update/:id` | update object | empty body |
@@ -52,6 +52,8 @@ curl -X POST http://localhost:3000/myapp/Post/findMany \
   -H "Content-Type: application/json" \
   -d '{ "title": true, "author": { "name": true }, "$where": { "views": { "$gt": 100 } }, "$limit": 20 }'
 # → [ { "title": "...", "author": { "name": "..." } }, ... ]
+# a query object without field keys (only $-clauses, or {}) selects id + every scalar field — at any nesting level
+curl -X POST http://localhost:3000/myapp/Post/findMany -H "Content-Type: application/json" -d '{ "$limit": 5 }'
 
 # insert
 curl -X POST http://localhost:3000/myapp/User/insert \

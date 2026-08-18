@@ -81,6 +81,12 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
+  // No field keys at all (only `$`-clauses, or nothing) selects id + every scalar — the same projection
+  // `rel: true` gives a nested relation. Any explicit field key means "exactly these".
+  if mask.not_any() && includes.is_empty() {
+    mask = QueryOp::all(entity).mask;
+  }
+
   Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false, search })
 }
 
@@ -338,7 +344,7 @@ impl ParseError {
 mod tests {
     use serde_json::json;
 
-    use crate::{parse_query, parse_schema, query_op::{PrefixKey}};
+    use crate::{parse_query, parse_schema, query_op::{PrefixKey, QueryOp}};
 
   
   #[test]
@@ -402,6 +408,47 @@ mod tests {
         _ => panic!("Wrong prefix key value: {:?}", encoded.prefix_key)
       }
     }
+  }
+
+  #[test]
+  fn empty_select_is_all_scalars() {
+    let schema = parse_schema("
+      model User {
+          name        String
+          age         Int
+          info        UserInfo?
+          posts       Post[]      @bind(Post.author)
+      }
+      struct UserInfo {
+          bio         String
+      }
+      model Post {
+          title       String
+          author      User
+      }
+    ");
+    let user_model = &schema.models[0];
+    let post_model = schema.models.iter().find(|m| m.name == "Post").unwrap();
+    let all = QueryOp::all(user_model).mask;
+
+    // nothing / only clauses → the `all` projection (relations excluded)
+    for input in [json!({}), json!({ "$where": { "age": 3 }, "$limit": 5 })] {
+      let op = parse_query(&schema, user_model, &input).unwrap();
+      assert_eq!(op.mask, all);
+      assert!(op.includes.is_empty());
+    }
+    // any explicit field key → exactly that
+    let op = parse_query(&schema, user_model, &json!({ "name": true })).unwrap();
+    assert_ne!(op.mask, all);
+    assert_eq!(op.mask.count_ones(), 1);
+    // an include alone keeps the empty scalar mask
+    let op = parse_query(&schema, user_model, &json!({ "posts": true })).unwrap();
+    assert!(op.mask.not_any());
+    assert_eq!(op.includes.len(), 1);
+    // nested: `posts: { $limit: 1 }` → all of Post's scalars
+    let op = parse_query(&schema, user_model, &json!({ "name": true, "posts": { "$limit": 1 } })).unwrap();
+    let crate::query_op::IncludeQuery::Query(inner) = &op.includes[0].query else { panic!("query include") };
+    assert_eq!(inner.mask, QueryOp::all(post_model).mask);
   }
 
   #[test]
