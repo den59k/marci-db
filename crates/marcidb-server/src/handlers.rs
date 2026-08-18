@@ -68,6 +68,52 @@ pub async fn handle_sync(req: Request<hyper::body::Incoming>, ctx: Arc<ServerCon
     Ok(ok_response(Vec::new()))
 }
 
+/// Dry run of `$sync` (`POST /:db/$sync?plan=1`): the same parse → reconcile → diff, but nothing is
+/// committed and a missing database is NOT created (it is planned against an empty schema). Answers the
+/// op list as JSON so a host can show — and require confirmation for — destructive changes before
+/// applying. Incompatible changes fail with the same 400 the real `$sync` would give.
+pub async fn handle_sync_plan(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String) -> HandlerResult {
+    let schema_text = parse_text_body(req).await?;
+
+    let json = blocking(move || {
+        let mut new_schema = marcidb::try_parse_schema(&schema_text)
+            .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        let empty = marcidb::Schema { models: Vec::new() };
+        let ops = match ctx.get_db(&db_name, false) {
+            Ok(db) => {
+                let db = db.read().unwrap_or_else(|e| e.into_inner());
+                marcidb_schema::reconcile(&mut new_schema, &db.schema);
+                marcidb_schema::diff(&db.schema, &new_schema)
+            }
+            Err(ApiError::NotFound(_)) => {
+                marcidb_schema::reconcile(&mut new_schema, &empty);
+                marcidb_schema::diff(&empty, &new_schema)
+            }
+            Err(e) => return Err(e),
+        }.map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
+        Ok::<_, ApiError>(plan_to_json(&ops).to_string())
+    }).await?;
+
+    Ok(ok_response(json))
+}
+
+/// `{ ops: [{ op, entity, field?, unique?, destructive, text }], destructive }` — `text` is the action as
+/// `.march` spells it (`drop field User.bio`), for logs and confirmation dialogs.
+fn plan_to_json(ops: &[marcidb::MigrateOp]) -> Value {
+    use marcidb::MigrateOp::*;
+    let items: Vec<Value> = ops.iter().map(|op| match op {
+        CreateEntity { name } => serde_json::json!({ "op": "createEntity", "entity": name, "destructive": false, "text": format!("create entity {}", name) }),
+        DropEntity { name } => serde_json::json!({ "op": "dropEntity", "entity": name, "destructive": true, "text": format!("drop entity {}", name) }),
+        AddField { entity, field } => serde_json::json!({ "op": "addField", "entity": entity, "field": field, "destructive": false, "text": format!("add field {}.{}", entity, field) }),
+        DropField { entity, field } => serde_json::json!({ "op": "dropField", "entity": entity, "field": field, "destructive": true, "text": format!("drop field {}.{}", entity, field) }),
+        AlterField { entity, field } => serde_json::json!({ "op": "alterField", "entity": entity, "field": field, "destructive": false, "text": format!("alter field {}.{}", entity, field) }),
+        AddIndex { entity, field, unique } => serde_json::json!({ "op": "addIndex", "entity": entity, "field": field, "unique": unique, "destructive": false, "text": format!("add {} {}.{}", if *unique { "unique" } else { "index" }, entity, field) }),
+        DropIndex { entity, field, unique } => serde_json::json!({ "op": "dropIndex", "entity": entity, "field": field, "unique": unique, "destructive": false, "text": format!("drop {} {}.{}", if *unique { "unique" } else { "index" }, entity, field) }),
+    }).collect();
+    let destructive = items.iter().any(|i| i["destructive"] == Value::Bool(true));
+    serde_json::json!({ "ops": items, "destructive": destructive })
+}
+
 /// Imperative migration (`$migrate`). The body is the TEXT of the migration actions (self-contained actions,
 /// possibly several migrations in a row). The server dumbly lays them onto its state and applies them —
 /// no ledger. Which actions to send is decided by the `marci-migrate` client based on `GET /:db/$snapshot`.
