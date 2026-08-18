@@ -20,6 +20,7 @@ pub mod range_tests;
 pub mod increment_tests;
 pub mod float_json_tests;
 pub mod update_many_tests;
+pub mod delete_many_tests;
 pub mod id_list_tests;
 pub mod array_ops_tests;
 pub mod row_codec_fuzz_tests;

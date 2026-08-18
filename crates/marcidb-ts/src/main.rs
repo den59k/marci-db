@@ -313,7 +313,7 @@ fn push_union_blocks(lines: &mut Vec<String>, payload_enums: &[&Field], branches
 }
 
 /// A relation to a top-level model also accepts a sub-query built from that model's collection
-/// (`posts: db.post.limit(5)`, `db.post.count()`) — branded `Sub<"Post">` (see prefix.ts). Struct targets don't.
+/// (`posts: db.post.limit(5)`, `db.post.count()`) — branded `Sub<"Post">` (see query.ts). Struct targets don't.
 fn get_sub_query_str(ref_model: &Entity) -> String {
   if ref_model.name.contains('.') { String::new() } else { format!(" | Sub<\"{}\">", ref_model.name) }
 }
@@ -694,7 +694,7 @@ fn generate_types(input: &str, output_dir: &str) {
     }
     lines.push("}".to_string());
 
-    // The type bag `Query<T>` (prefix.ts) is parametrised by — top-level models only (structs have no collection).
+    // The type bag `Query<T>` (marcidb-client/runtime query.ts) is parametrised by — top-level models only (structs have no collection).
     if !model.name.contains('.') {
       lines.push(format!("type {} = {{", get_model_types_name(model)));
       lines.push(format!("  name: \"{}\"", model.name));
@@ -715,8 +715,8 @@ fn generate_types(input: &str, output_dir: &str) {
     lines.push("".to_string());
   }
   
-  // `db.<model>` is a `Query` root (prefix.ts): the chain (where/order/limit/select/…) and the object form
-  // (findMany/findFirst/…) over the model's type bag; `reindex()` only for models with a `@custom` index.
+  // `db.<model>` is a `Query` root (marcidb-client/runtime query.ts): the chain (where/order/limit/select/…)
+  // over the model's type bag; `reindex()` only for models with a `@custom` index.
   lines.push(format!("export interface MarciDB {{"));
   for model in schema.models.iter() {
     if model.name.contains(".") { continue; };

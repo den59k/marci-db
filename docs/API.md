@@ -175,11 +175,12 @@ The result type is inferred from the select shape. Keys that are not selected do
 ### The query object
 
 Every query is one JSON object on the wire — the select shape plus `$where` / `$order` / `$limit` / `$skip` /
-`$cursor` — and you can write it directly. `findMany` / `findFirst` take it (merged with whatever the chain
-already set); the same object is what `select(...)` accepts, so the two forms mix freely:
+`$cursor` — and you can write it directly: `select(...)` accepts the whole object, merged with whatever the
+chain already set (a clause given in the object wins, `$where`s AND). This is the form to build queries
+dynamically:
 
 ```ts
-const users = await db.user.findMany({
+const users = await db.user.select({
   name: true,                        // field selection
   posts: { title: true, $limit: 3 }, // nested relation select, with its own clauses
   $where: { age: { $gte: 18 } },
@@ -191,6 +192,9 @@ const users = await db.user.findMany({
 ```
 
 The rest of this section describes the object's vocabulary; each clause has a chain method of the same name.
+
+> `findMany(query)` / `findFirst(query)` are the pre-0.13 spelling of `select(query)` / `select(query).first()`
+> — still there, **deprecated**, removed in the next minor.
 
 ### `$where` operators
 
@@ -348,6 +352,10 @@ await db.user.update({ id }, {
 })
 
 await db.user.delete({ id })
+
+// bulk, filtered by the chain — see updateMany / deleteMany below
+await db.user.where({ age: { $lt: 18 } }).updateMany({ active: false })
+await db.session.where({ expiresAt: { $lt: Date.now() } }).deleteMany()
 ```
 
 **Key fields cannot be updated** — `@id` fields (and each part of a composite key) are absent from the update type. Write the new row and delete the old one if you need to move a record's identity.
@@ -478,15 +486,17 @@ db.<model>                          // a query: await it, chain it, or use it as
   .where(where) .order(field, dir?) .limit(n) .skip(n) .after(id)   // clauses → a new query
   .select(shape?)                   // the projection (no field keys = id + scalars) → a new query
   .first()                          // Promise<Result | null>
-  .count(query?)                    // Promise<number>
+  .count()                          // Promise<number>
   .aggregate(query)                 // Promise<AggregateResult>
-db.<model>.findMany(query?)       // Promise<Result[]> — the query object, merged with the chain
-db.<model>.findFirst(query?)      // Promise<Result | null>
 db.<model>.insert(data)           // Promise<Id>
 db.<model>.update(id, data)       // Promise<void>
-db.<model>.updateMany(query, data) // Promise<number> — rows matched
 db.<model>.delete(id)             // Promise<void>
+db.<model>.where(w).updateMany(data) // Promise<number> — rows matched (no where = every row)
+db.<model>.where(w).deleteMany()  // Promise<number> — rows deleted (a where is required)
 db.<model>.reindex()              // Promise<{ ok, indexed }> — only on models with a @custom index
+
+// deprecated (removed in the next minor): findMany(query) = select(query), findFirst(query) =
+// select(query).first(), updateMany(query, data) = where(query.$where).updateMany(data), count(query)
 
 db.$transaction([ ...ops ])       // Promise<[...results]> — atomic, see Transactions
 ```
@@ -495,14 +505,13 @@ db.$transaction([ ...ops ])       // Promise<[...results]> — atomic, see Trans
 
 ### updateMany
 
-Applies one update to every row matching `$where`, in a single transaction — either all of them land or none do:
+Applies one update to every row the chain's `where` matches, in a single transaction — either all of them land or none do:
 
 ```ts
-const n = await db.user.updateMany({ $where: { age: { $lt: 18 } } }, { active: false })
-// = db.user.where({ age: { $lt: 18 } }).updateMany({}, { active: false })
+const n = await db.user.where({ age: { $lt: 18 } }).updateMany({ active: false })
 ```
 
-The returned number counts rows **matched**, not rows whose stored bytes changed — re-applying a value a row already holds still counts, as in SQL. An empty query (`{}`) matches every row.
+The returned number counts rows **matched**, not rows whose stored bytes changed — re-applying a value a row already holds still counts, as in SQL. Without a `where` it updates every row.
 
 Matching ids are resolved before any row is written, so the filter sees the pre-update state: a row that stops matching part-way through is still updated, and one that starts matching is not.
 
@@ -513,6 +522,18 @@ Three things are rejected rather than silently ignored:
 - **relation operations** (`$connect`, `$push`, `$update`, …) in `data` — these recurse per matched row, so the work is unbounded. Use per-row `update` for those.
 
 Field selections in the query are ignored: `updateMany` only ever resolves ids.
+
+### deleteMany
+
+Deletes every row the chain's `where` matches, in a single transaction, and returns how many were deleted:
+
+```ts
+const n = await db.session.where({ expiresAt: { $lt: Date.now() } }).deleteMany()
+```
+
+Each row goes through the same path as a single `delete`: cascades apply, and a `Restrict` dependency on any matched row fails the whole operation — nothing is committed, including rows matched before it. `$limit` / `$skip` / `$cursor` and `$near` / `$search` are rejected, as for `updateMany`.
+
+**A `where` is required** — the client refuses `db.user.deleteMany()` outright. Deleting every row is spelled `db.user.where({}).deleteMany()`.
 
 ### Atomic counters — `$increment`
 
@@ -527,10 +548,9 @@ The read, the addition and the write all happen inside the update's own transact
 Combined with a guard in `$where`, `updateMany` becomes a **compare-and-set** — the returned count tells you whether it applied:
 
 ```ts
-const n = await db.user.updateMany(
-  { $where: { id, depositRub: { $gte: 800 } } },
-  { depositRub: { $increment: -800 } },
-)
+const n = await db.user
+  .where({ id, depositRub: { $gte: 800 } })
+  .updateMany({ depositRub: { $increment: -800 } })
 if (n === 0) throw new Error("insufficient funds")
 ```
 

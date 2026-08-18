@@ -1,6 +1,6 @@
 /**
  * Type-level check of the query builder over the generated playground client (index.d.ts) — compiled, never
- * run: `bunx tsc --noEmit --strict playground/chain.types.ts`. Positive cases must compile; negative cases are
+ * run: `bunx tsc -p playground`. Positive cases must compile; negative cases are
  * `@ts-expect-error` lines (an unused directive is itself an error).
  */
 import { marcidb, ref, type Sub } from "./index"
@@ -67,7 +67,13 @@ export const _compiles = async () => {
   assertEqual<typeof first, { id: number; title: string } | null>(true)
   assertEqual<typeof count, number>(true)
   await db.$transaction([db.user.insert({ id: "u9", name: "A" }), db.post.insert({ title: "p", author: { id: ref("0.id") } })])
+  const updated = await db.post.where({ title: "old" }).updateMany({ title: "new" })
+  assertEqual<typeof updated, number>(true)
+  const deleted = await db.post.where({ title: "old" }).deleteMany()
+  assertEqual<typeof deleted, number>(true)
+  // the deprecated forms still type-check until they are removed
   await db.post.where({ title: "old" }).updateMany({}, { title: "new" })
+  await db.post.count({ $where: { title: "a" } })
 
   // a query is a Sub of its model
   const sub: Sub<"Post"> = db.post.limit(1)
@@ -87,4 +93,8 @@ export const _rejects = async () => {
   db.post.where({ $and: [{ title: "a" }], title: "b" })
   // @ts-expect-error — no reindex without a @custom index
   db.post.reindex()
+  // @ts-expect-error — updateMany takes the update, not a filter
+  db.post.updateMany({ $where: { title: "a" } })
+  // @ts-expect-error — deleteMany takes no filter argument
+  db.post.deleteMany({ $where: { title: "a" } })
 }

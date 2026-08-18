@@ -106,8 +106,20 @@ test("builders are immutable and batch into $transaction", async () => {
   expect((await base).length).toBe(3);
 });
 
-test("updateMany honours the chain's where", async () => {
-  expect(await client.post.where({ author: { name: "Alice" } }).updateMany({ $where: { views: { $lt: 25 } } }, { views: { $increment: 100 } })).toBe(2);
+test("updateMany(data) and deleteMany() take the filter from the chain", async () => {
+  expect(await client.post.where({ author: { name: "Alice" } }).where({ views: { $lt: 25 } }).updateMany({ views: { $increment: 100 } })).toBe(2);
   const bumped = await client.post.where({ views: { $gt: 100 } }).order("title").select({ title: true });
   expect(bumped).toEqual([{ title: "a1" }, { title: "a2" }]);
+  // the deprecated two-argument form still works (its $where ANDs with the chain)
+  expect(await client.post.where({ author: { name: "Alice" } }).updateMany({ $where: { views: { $gt: 100 } } }, { views: 1 })).toBe(2);
+
+  // deleteMany: refuses without a where; counts deleted rows; batches into $transaction
+  expect(() => client.post.deleteMany()).toThrow(/needs a where/);
+  expect(await client.post.where({ views: 1 }).deleteMany()).toBe(2);
+  expect((await client.post.order("title")).map((p: any) => p.title)).toEqual(["a3", "b1"]);
+  const [n, left] = await client.$transaction([client.post.where({ title: "b1" }).deleteMany(), client.post.count()]);
+  expect([n, left]).toEqual([1, 1]);
+  // .where({}) is the explicit "every row"
+  expect(await client.post.where({}).deleteMany()).toBe(1);
+  expect(await client.post.count()).toBe(0);
 });

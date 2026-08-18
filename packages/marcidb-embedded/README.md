@@ -64,7 +64,7 @@ const db = await openTestDatabase(schema); // temp dir + fsync off + $sync(schem
 const client = marcidb(db);
 
 await client.user.insert({ name: "Alice", email: "alice@example.com", age: 30 });
-const users = await client.user.findMany({ name: true, age: true });
+const users = await client.user.select({ name: true, age: true });
 console.log(users); // [{ name: "Alice", age: 30 }]
 
 db.close(); // also removes the temp directory

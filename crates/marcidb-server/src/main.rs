@@ -6,7 +6,7 @@ use hyper_util::rt::TokioIo;
 use marcidb::{MarciDB, ProviderRegistry};
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_sync_plan, handle_transaction, handle_update, handle_update_many}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_delete_many, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_sync_plan, handle_transaction, handle_update, handle_update_many}};
 
 mod handlers;
 mod errors;
@@ -182,6 +182,7 @@ async fn handle_inner(
         (&Method::POST, "count") => handle_count(req, ctx, db_name, model).await,
         (&Method::POST, "aggregate") => handle_aggregate(req, ctx, db_name, model).await,
         (&Method::POST, "updateMany") => handle_update_many(req, ctx, db_name, model).await,
+        (&Method::POST, "deleteMany") => handle_delete_many(req, ctx, db_name, model).await,
         (&Method::POST, "update") => {
             let Some(id) = id else { return Err(ApiError::BadRequest("Param :itemId required".to_string())) };
             handle_update(req, id, ctx, db_name, model).await

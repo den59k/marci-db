@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, update_many_query};
+use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, filter_query};
 use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body, read_response, BinaryNeg, ReadBody}};
@@ -300,12 +300,29 @@ pub async fn handle_update_many(req: Request<hyper::body::Incoming>, ctx: Arc<Se
         let update_op = parse_update(&db.schema, entity, data)
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
         // The body carries `data` alongside the `$`-operators; keep only the latter for the scan
-        let query_op = parse_query(&db.schema, entity, &update_many_query(&json_val))
+        let query_op = parse_query(&db.schema, entity, &filter_query(&json_val))
             .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
 
         let updated = db.update_many(entity, &query_op, &update_op)
             .map_err(|e| ApiError::BadRequest(format!("Failed to update: {:?}", e)))?;
         Ok(updated.to_string())
+    })).await?;
+
+    Ok(ok_response(result))
+}
+
+/// `POST /{db}/{model}/deleteMany` with a body of `{ $where }` — deletes every matching row in one
+/// transaction (cascades and restrict checks as for a single delete) and responds with the number deleted.
+pub async fn handle_delete_many(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+
+    let result = blocking(move || with_db(&ctx, &db_name, |db| {
+        let entity = model(db, &model_name)?;
+        let query_op = parse_query(&db.schema, entity, &filter_query(&json_val))
+            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+        let deleted = db.delete_many(entity, &query_op)
+            .map_err(|e| ApiError::BadRequest(format!("Failed to delete: {:?}", e)))?;
+        Ok(deleted.to_string())
     })).await?;
 
     Ok(ok_response(result))
