@@ -470,6 +470,29 @@ Reads inside the transaction see the writes of earlier operations (read-your-wri
 
 Reach for it when several **independent** writes must be atomic (e.g. a balance transfer). The "create parent + children" case doesn't need it — nested writes (`insert({ ..., posts: [...] })`) are already atomic in a single operation.
 
+## Journals
+
+A journal is a named, durable log of what happened to one model. Ask for it and the engine starts recording; read it in a loop:
+
+```ts
+const deleted = db.file.$journal("stored-files", { on: "delete" })
+
+for await (const change of deleted) {
+  // change: { seq: number, op: "delete", row: { id, blob, size } }
+  await removeBytes(change.row.blob)
+}
+```
+
+- **Every delete reaches it, however the row went.** The entry is written in the transaction that removes the row, from the one path every delete takes — `delete`, `deleteMany`, a `$transaction`, and a **cascade** from a parent (`@onDelete(Cascade)`, an owned child) alike. A transaction that rolls back takes its entries with it.
+- **`row` is the row as it last was** — its id and every scalar field, the shape a query without a select returns. It is stored decoded, so an entry stays readable after later migrations.
+- **The name is the journal.** The first `$journal("stored-files", …)` creates it; a later one — after a restart, from another process — continues it. Changes made before it was created are not in it. Two names on one model are two independent journals.
+- **The loop confirms as it goes.** An entry is dropped once the loop has moved past it. One whose body threw, or that was never reached (`break`, a crash), is delivered again to the next reader of that name — so make the body safe to repeat.
+- **It waits.** With the journal read through, the loop waits for the next entry. `{ on: "delete", wait: false }` ends it instead — for "process what is there, then go on".
+- **`on` is fixed for a name.** Asking for an existing journal with other operations is an error. Only `"delete"` is recorded so far.
+- **`await deleted.drop()`** removes the journal and what it still holds. A journal nobody reads keeps growing — drop the ones you stop reading. A dropped model takes its journals with it.
+
+A model nobody journals pays nothing. A journaled one pays one extra write per deleted row and journal.
+
 ## Client setup
 
 ```ts
@@ -494,6 +517,7 @@ db.<model>.delete(id)             // Promise<void>
 db.<model>.where(w).updateMany(data) // Promise<number> — rows matched (no where = every row)
 db.<model>.where(w).deleteMany()  // Promise<number> — rows deleted (a where is required)
 db.<model>.reindex()              // Promise<{ ok, indexed }> — only on models with a @custom index
+db.<model>.$journal(name, { on }) // AsyncIterable<{ seq, op, row }> + drop() — see Journals
 
 // deprecated (removed in the next minor): findMany(query) = select(query), findFirst(query) =
 // select(query).first(), updateMany(query, data) = where(query.$where).updateMany(data), count(query)

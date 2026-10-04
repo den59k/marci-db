@@ -55,7 +55,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
     match &update_ref.op {
         UpdateRelationOp::Remove(delete_op) => {
           if let Some(item_id) = get_id_from_ref_info(tx, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema)? {
-            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, &db.providers, None).map_err(|e| UpdateError::DeleteError(e))?;
+            process_delete(tx, &item_id, update_ref.st, delete_op, db, None).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::DisconnectAll => {
@@ -79,7 +79,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           let mut tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
           for item_id in get_ids_from_ref_info(tx, &tree, update_ref.ref_info, id)? {
             // println!("ready to delete {} {:#?}", update_ref.field.name, delete_op);
-            process_delete(tx, &item_id, update_ref.st, delete_op, &db.schema, &db.providers, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
+            process_delete(tx, &item_id, update_ref.st, delete_op, db, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::Push(write_ops) => {
@@ -95,7 +95,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           let mut tree = tx.require_tree(db.schema.models[update_ref.ref_info.model_index].name.as_bytes())?;
           for item_id in item_ids {
             let full_id = [id, item_id.as_slice()].concat();
-            process_delete(tx, &full_id, update_ref.st, delete_op, &db.schema, &db.providers, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
+            process_delete(tx, &full_id, update_ref.st, delete_op, db, Some(&mut tree)).map_err(|e| UpdateError::DeleteError(e))?;
           }
         },
         UpdateRelationOp::Connect(item_ids) => {

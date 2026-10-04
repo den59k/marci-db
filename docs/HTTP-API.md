@@ -27,7 +27,7 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-serv
 
 ## Endpoints
 
-Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
+Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text, and the [journal](#journals) routes). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
 
 | Endpoint | Body | Response |
 |---|---|---|
@@ -44,6 +44,9 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | `POST /:db/:model/count` | `{ "$where"?: ... }` (or `{}`) | bare number |
 | `POST /:db/:model/aggregate` | aggregate object | object with requested keys |
 | `POST /:db/$transaction` | array of operations | array of results — see [Transactions](#transactions) |
+| `POST /:db/:model/$journal/:name` | `{ "on": "delete" }` | `{ "created": bool }` — see [Journals](#journals) |
+| `GET /:db/:model/$journal/:name` | — (`?after=&limit=&wait=`) | JSON array of entries |
+| `DELETE /:db/:model/$journal/:name` | — | `{ "dropped": bool }` |
 
 ### Examples
 
@@ -196,6 +199,32 @@ batch op #1: Insert(UniqueViolation("User.email", ...))
 ```
 
 Parse, constraint and `$ref` errors are `400`; a storage failure on commit is `500`. Auto-increment counters are **not** rolled back (gaps are possible, as with SQL sequences).
+
+## Journals
+
+A journal is a named log of a model's deleted rows, written in the deleting transaction — cascades included (see the [TypeScript API](API.md#journals) for the semantics).
+
+```bash
+# create (a second call with the same "on" changes nothing; another "on" is a 400)
+curl -X POST localhost:3000/myapp/File/\$journal/stored-files -d '{ "on": "delete" }'
+# → { "created": true }
+
+# read: the oldest entries kept
+curl 'localhost:3000/myapp/File/$journal/stored-files?limit=100'
+# → [ { "seq": 41, "op": "delete", "row": { "id": 7, "blob": "a1", "size": 1024 } }, ... ]
+
+# confirm everything up to seq 42 — those entries are dropped — and get the next ones;
+# hold the request for up to 30 s when there are none
+curl 'localhost:3000/myapp/File/$journal/stored-files?after=42&wait=30'
+
+# drop the journal
+curl -X DELETE localhost:3000/myapp/File/\$journal/stored-files
+```
+
+- `name` is 1–64 characters of `A-Z a-z 0-9 _ -`.
+- `after` is the only way an entry leaves a journal. A reader that failed repeats its request with the same `after` and gets the same entries; confirming twice is harmless.
+- `limit` defaults to 100 (at most 1000), `wait` is in seconds (at most 60). A waiting request holds no lock on the database.
+- Reading or confirming a journal that does not exist is a `404`.
 
 ## Errors
 

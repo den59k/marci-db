@@ -1,16 +1,19 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, ProviderRegistry, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete, on_field_update}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, FieldIndex, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset, move_offsets_left, row_header_len}};
+use crate::{Field, MarciDB, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete, on_field_update}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, FieldIndex, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset, move_offsets_left, row_header_len}};
 
 pub fn process_delete<'a>(
   tx: &'a WriteTransaction,
   id: &[u8],
   entity: &Entity,
   action: &DeleteOp,
-  schema: &Schema,
-  providers: &ProviderRegistry,
+  db: &MarciDB,
   tree: Option<&mut Tree<'a>>
 ) -> Result<bool, DeleteError> {
+  let schema = &db.schema;
+  let providers = &db.providers;
+  // A journaled model's delete records the row it removes, so the body is read whatever the op needs.
+  let journaled = db.journals.records_delete(&entity.name);
   let mut body_value: Option<Vec<u8>> = None;
   {
     let mut owned;
@@ -22,7 +25,7 @@ pub fn process_delete<'a>(
         }
     };
 
-    if action.is_body_need() {
+    if action.is_body_need() || journaled {
       let Some(body) = tree.get(id)? else {
         return Ok(false)
       };
@@ -32,6 +35,10 @@ pub fn process_delete<'a>(
     if !tree.delete(id)? {
       return Ok(false)
     }
+  }
+
+  if journaled {
+    db.journals.record_delete(tx, entity, schema, id, body_value.as_deref().unwrap_or(&[])).map_err(DeleteError::Journal)?;
   }
 
   for delete_index in action.indexes_to_delete.iter() {
@@ -69,7 +76,7 @@ pub fn process_delete<'a>(
     match &dep.action_type {
       DependencyActionType::Delete (action) => {
         for item_id in item_ids.iter() {
-          process_delete(tx, &item_id, dep.rev_entity, action, schema, providers, None)?;
+          process_delete(tx, &item_id, dep.rev_entity, action, db, None)?;
         }
       },
       DependencyActionType::SetNull { offset_pos } => {
@@ -150,14 +157,15 @@ pub fn process_delete<'a>(
     // An owned (CurrentId) collection whose children carry their OWN dependencies/indexes can't be
     // bulk-removed by prefix — each child must be deleted individually so its cleanup runs. Children
     // are stored under this row's key prefix. (When a Cascade dependency already deleted them above,
-    // this prefix scan simply finds nothing.)
-    if let RefToDelete::ChildEntity { entity: child, delete_op } = ref_to_delete && !delete_op.is_empty() {
+    // this prefix scan simply finds nothing.) A journaled child goes the same way: a range delete
+    // would remove its rows unrecorded.
+    if let RefToDelete::ChildEntity { entity: child, delete_op } = ref_to_delete && (!delete_op.is_empty() || db.journals.records_delete(&child.name)) {
       let child_ids: Vec<Vec<u8>> = {
         let tree = tx.require_tree(child.name.as_bytes())?;
         tree.prefix_keys(&id)?.map(|e| Ok(e?.to_vec())).collect::<Result<Vec<_>, canopydb::Error>>()?
       };
       for child_id in child_ids.iter() {
-        process_delete(tx, child_id, child, delete_op, schema, providers, None)?;
+        process_delete(tx, child_id, child, delete_op, db, None)?;
       }
       continue;
     }

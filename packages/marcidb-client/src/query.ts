@@ -174,7 +174,9 @@ export type Op<T> = PromiseLike<T> & { readonly [__op]: T }
 
 // A transport-neutral operation descriptor and the pluggable transport that runs it. The HTTP transport
 // is selected by passing a URL string; marcidb-embedded provides an in-process FFI transport.
-export type MarciOp = { model: string, action: string, query?: any, data?: any, id?: any }
+export type MarciOp = { model: string, action: string, query?: any, data?: any, id?: any, journal?: JournalArgs }
+/** The arguments of a journal action (`$journalOpen` / `$journalRead` / `$journalDrop`). `wait` is in seconds. */
+export type JournalArgs = { name: string, on?: readonly JournalOp[], after?: number, limit?: number, wait?: number }
 export type MarciTransport = {
   exec(op: MarciOp): Promise<any>
   batch(ops: MarciOp[]): Promise<any[]>
@@ -272,8 +274,35 @@ export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends Promise
   findFirst<Q extends T["query"] = {}>(query?: Q): Op<Rows<T, Q> | null>
 }
 
-/** `db.<model>`: the root query, plus `reindex()` for models with a `@custom` (vector / full-text) index. */
-export type Collection<T extends ModelTypes> = Query<T> & (T["reindex"] extends true ? { reindex(): Op<{ ok: boolean, indexed: number }> } : {})
+// ───────────────────────────── journals ─────────────────────────────
+
+/** What a journal can record. Only deletes so far. */
+export type JournalOp = "delete"
+/** One recorded change. `row` is the row as it last was: its id and every scalar field. */
+export type JournalEntry<T extends ModelTypes, O extends JournalOp = JournalOp> = { seq: number, op: O, row: Rows<T, T["scalars"]> }
+export type JournalOptions<O extends JournalOp> = {
+  /** The operations to record. A journal that exists with other ones is an error, not a redefinition. */
+  on: O | readonly O[]
+  /** `false`: the loop ends when the journal is read through. By default it waits for the next entry. */
+  wait?: boolean
+}
+/**
+ * A named, durable log of a model's changes. It starts recording when it is first asked for and keeps
+ * every entry until the loop that reads it has moved past it — an entry whose loop body threw, or that
+ * was never reached, is delivered again to the next reader of the same name.
+ */
+export interface Journal<T extends ModelTypes, O extends JournalOp = JournalOp> extends AsyncIterable<JournalEntry<T, O>> {
+  /** Drops the journal with whatever it still holds; the model's writes stop paying for it. */
+  drop(): Promise<void>
+}
+
+/**
+ * `db.<model>`: the root query, plus `reindex()` for models with a `@custom` (vector / full-text) index and
+ * `$journal(name, { on })` — the journal of this model's changes under that name, created on first use.
+ */
+export type Collection<T extends ModelTypes> = Query<T>
+  & (T["reindex"] extends true ? { reindex(): Op<{ ok: boolean, indexed: number }> } : {})
+  & { $journal<O extends JournalOp>(name: string, options: JournalOptions<O>): Journal<T, O> }
 
 // ───────────────────────────── builder runtime ─────────────────────────────
 
@@ -342,6 +371,43 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
     return out;
   };
 
+  // `db.<model>.$journal(name, { on })`. The journal is opened at once — what happens between this call
+  // and the first read is already recorded. Reading confirms: each request carries the seq of the last
+  // entry the loop got past, which is what lets the engine drop it.
+  const journal = (model: string, name: string, options: { on: any; wait?: boolean }): any => {
+    const on = Array.isArray(options.on) ? options.on : [options.on];
+    const wait = options.wait === false ? 0 : 30;
+    const opened = run({ model, action: "$journalOpen", journal: { name, on } });
+    opened.catch(() => {}); // reported by the first read, not as an unhandled rejection
+    const read = (after: number | undefined, limit: number, wait: number): Promise<any[]> =>
+      run({ model, action: "$journalRead", journal: { name, after, limit, wait } });
+    return {
+      async *[Symbol.asyncIterator]() {
+        await opened;
+        let done: number | undefined;      // the last entry the loop body finished
+        let confirmed: number | undefined; // the last one a request has carried
+        try {
+          for (;;) {
+            const entries = await read(done, 100, wait);
+            confirmed = done;
+            if (entries.length === 0) {
+              if (wait === 0) return;
+              continue;
+            }
+            for (const entry of entries) {
+              yield entry;
+              done = entry.seq;
+            }
+          }
+        } finally {
+          // Left mid-batch (`break`, a throw): confirm what was finished, so it is not delivered again.
+          if (done !== undefined && done !== confirmed) await read(done, 1, 0).catch(() => {});
+        }
+      },
+      drop: () => opened.catch(() => {}).then(() => run({ model, action: "$journalDrop", journal: { name } })).then(() => {}),
+    };
+  };
+
   // `db.<model>` — an immutable builder; each clause returns a new one over the same `run`.
   const collection = (model: string): any => {
     const make = (st: QueryState): any => {
@@ -397,6 +463,7 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
           return op({ model, action: "deleteMany", query: whereOnly() });
         },
         reindex: () => op({ model, action: "$reindex" }),
+        $journal: (name: string, options: { on: any; wait?: boolean }) => journal(model, name, options),
 
         findMany: (query?: Record<string, any>) => op({ model, action: "findMany", query: build(query) }),
         findFirst: (query?: Record<string, any>) => op({ model, action: "findFirst", query: build(query) }),

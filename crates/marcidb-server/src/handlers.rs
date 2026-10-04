@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{BatchErrorKind, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, filter_query};
+use marcidb::{BatchErrorKind, JournalError, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, filter_query};
 use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body, read_response, BinaryNeg, ReadBody}};
@@ -363,4 +363,88 @@ pub async fn handle_reindex_all(ctx: Arc<ServerContext>, db_name: String) -> Han
     })).await?;
 
     Ok(ok_response(format!("{{\"ok\":true,\"indexed\":{}}}", count)))
+}
+
+
+// ─────────────────────────────── journals (`/{db}/{model}/$journal/{name}`) ───────────────────────────────
+
+fn journal_error(e: JournalError) -> ApiError {
+    match &e {
+        JournalError::Storage(_) => ApiError::Internal(e.to_string()),
+        JournalError::NotFound { .. } => ApiError::NotFound(e.to_string()),
+        _ => ApiError::BadRequest(e.to_string()),
+    }
+}
+
+fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| v))
+}
+
+fn number_param<T: std::str::FromStr>(query: &str, name: &str) -> Result<Option<T>, ApiError> {
+    query_param(query, name)
+        .map(|v| v.parse::<T>().map_err(|_| ApiError::BadRequest(format!("'{}' must be a number", name))))
+        .transpose()
+}
+
+/// `POST`: creates the journal recording the operations of the body's `on` (a name or a list of
+/// them), or changes nothing when it exists with the same ones. Returns `{ "created": <bool> }`.
+pub async fn handle_journal_open(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String, name: String) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+    let on: Vec<String> = match json_val.get("on") {
+        Some(Value::String(op)) => vec![op.clone()],
+        Some(Value::Array(ops)) => ops.iter()
+            .map(|op| op.as_str().map(str::to_string).ok_or_else(|| ApiError::BadRequest("'on' must be an operation name or a list of them".to_string())))
+            .collect::<Result<_, _>>()?,
+        _ => return Err(ApiError::BadRequest("'on' must be an operation name or a list of them".to_string())),
+    };
+
+    let created = blocking(move || with_db(&ctx, &db_name, |db| {
+        let entity = model(db, &model_name)?;
+        db.journal_open(entity, &name, &on).map_err(journal_error)
+    })).await?;
+
+    Ok(ok_response(format!("{{\"created\":{}}}", created)))
+}
+
+/// `GET ?after=<seq>&limit=<n>&wait=<seconds>`: confirms every entry up to `after` (they are dropped)
+/// and returns the next ones, oldest first — `[{ "seq", "op", "row" }]`. With `wait`, an empty journal
+/// holds the request until an entry is committed or the time is out. The wait holds no lock on the
+/// database: a migration is not kept behind a reader.
+pub async fn handle_journal_read(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String, name: String) -> HandlerResult {
+    let query = req.uri().query().unwrap_or("").to_string();
+    let after: Option<u64> = number_param(&query, "after")?;
+    let limit: usize = number_param(&query, "limit")?.unwrap_or(100).clamp(1, 1000);
+    let wait: u64 = number_param(&query, "wait")?.unwrap_or(0).min(60);
+
+    let entries = blocking(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+        loop {
+            let (signal, seen, entries) = with_db(&ctx, &db_name, |db| {
+                let entity = model(db, &model_name)?;
+                // The generation is taken BEFORE the read: an entry committed between the two moves it.
+                let signal = db.journal_signal();
+                let seen = signal.generation();
+                let entries = db.journal_read(entity, &name, after, limit).map_err(journal_error)?;
+                Ok((signal, seen, entries))
+            })?;
+
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if !entries.is_empty() || left.is_zero() {
+                return Ok(entries);
+            }
+            signal.wait(seen, left);
+        }
+    }).await?;
+
+    Ok(ok_response(array_to_json(&entries)))
+}
+
+/// `DELETE`: drops the journal with whatever it still holds. Returns `{ "dropped": <bool> }`.
+pub async fn handle_journal_drop(ctx: Arc<ServerContext>, db_name: String, model_name: String, name: String) -> HandlerResult {
+    let dropped = blocking(move || with_db(&ctx, &db_name, |db| {
+        let entity = model(db, &model_name)?;
+        db.journal_drop(entity, &name).map_err(journal_error)
+    })).await?;
+
+    Ok(ok_response(format!("{{\"dropped\":{}}}", dropped)))
 }

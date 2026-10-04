@@ -76,7 +76,7 @@ impl<'db> MarciTransaction<'db> {
 
   pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
     let action = prepare_delete(&self.db.schema, entity, Some(id), None);
-    process_delete(&self.tx, id, entity, &action, &self.db.schema, &self.db.providers, None)
+    process_delete(&self.tx, id, entity, &action, self.db, None)
   }
 
   /// Deletes every row matching `query`'s filter — each through the same path as [`delete_item`]
@@ -138,6 +138,7 @@ impl<'db> MarciTransaction<'db> {
   /// Commits all the transaction's changes. After the commit they are visible to new readers
   pub fn commit(self) -> Result<(), StorageError> {
     self.tx.commit()?;
+    self.db.journals.committed();
     Ok(())
   }
 

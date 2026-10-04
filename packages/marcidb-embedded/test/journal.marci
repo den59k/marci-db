@@ -1,0 +1,18 @@
+model User {
+  name   String
+  posts  Post[] @bind(Post.author)
+  files  File[] @bind(File.user)
+}
+
+model Post {
+  title  String
+  author User   @onDelete(Cascade)
+  files  File[] @bind(File.post)
+}
+
+model File {
+  blob   String
+  size   Int
+  post   Post?  @onDelete(Cascade)
+  user   User?  @onDelete(Cascade)
+}

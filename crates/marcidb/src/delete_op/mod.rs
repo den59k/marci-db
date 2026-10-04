@@ -75,6 +75,8 @@ pub enum DeleteError {
   Unsupported(&'static str),
   /// A live `@custom` index hook (e.g. full-text `on_delete`) failed while maintaining the index.
   IndexError(ProviderError),
+  /// The deleted row could not be written to a journal of its model (journal.rs).
+  Journal(String),
   Storage(StorageError)
 }
 

@@ -97,4 +97,19 @@ export const _rejects = async () => {
   db.post.updateMany({ $where: { title: "a" } })
   // @ts-expect-error — deleteMany takes no filter argument
   db.post.deleteMany({ $where: { title: "a" } })
+
+  // ── journals: the entry carries the row as an empty select returns it ──
+  const deleted = db.post.$journal("posts", { on: "delete" })
+  for await (const change of deleted) {
+    assertEqual<typeof change.op, "delete">(true)
+    assertEqual<typeof change.row, Awaited<typeof db.post>[number]>(true)
+    assertEqual<typeof change.seq, number>(true)
+  }
+  await deleted.drop()
+  // @ts-expect-error — an operation that is not journaled
+  db.post.$journal("posts", { on: "update" })
+  // @ts-expect-error — a journal needs its operations
+  db.post.$journal("posts")
+  // @ts-expect-error — a journal is of a model, not of a query
+  db.post.where({ title: "a" }).$journal("posts", { on: "delete" })
 }

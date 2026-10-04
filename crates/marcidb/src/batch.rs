@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::{DeleteError, InsertError, MarciDB, MarciTransaction, QueryError, ReindexError, StorageError, UpdateError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
+use crate::{DeleteError, InsertError, JournalError, MarciDB, MarciTransaction, QueryError, ReindexError, StorageError, UpdateError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
 
 /// A batch transaction error with the index of the operation on which it occurred.
 /// `index == ops.len()` means an error at commit (after all operations)
@@ -163,6 +163,7 @@ pub enum OpError {
   Delete(DeleteError),
   Query(QueryError),
   Reindex(ReindexError),
+  Journal(JournalError),
   Storage(StorageError),
 }
 
@@ -172,6 +173,7 @@ impl OpError {
   pub fn is_storage(&self) -> bool {
     match self {
       OpError::Storage(_) => true,
+      OpError::Journal(JournalError::Storage(_)) => true,
       OpError::Query(QueryError::Storage(_)) => true,
       OpError::Query(QueryError::Search(e)) => matches!(e, ReindexError::Storage(_) | ReindexError::Provider(crate::ProviderError::Storage(_))),
       OpError::Reindex(e) => matches!(e, ReindexError::Storage(_) | ReindexError::Provider(crate::ProviderError::Storage(_))),
@@ -193,6 +195,7 @@ impl fmt::Display for OpError {
       OpError::Delete(e) => write!(f, "{:?}", e),
       OpError::Query(e) => write!(f, "{:?}", e),
       OpError::Reindex(e) => write!(f, "{}", e),
+      OpError::Journal(e) => write!(f, "{}", e),
       OpError::Storage(e) => write!(f, "{:?}", e),
     }
   }
@@ -214,7 +217,10 @@ fn op_parse_err<E: fmt::Debug>(e: E) -> OpError {
 /// transaction (the engine's short-lived write methods). This is the embedding/FFI counterpart of the
 /// server's per-route handlers — same command shape as one element of an `execute_batch` array.
 ///
-/// Result format by action matches [`execute_batch`], plus `$reindex` → `{ "ok": true, "indexed": <n> }`.
+/// Result format by action matches [`execute_batch`], plus `$reindex` → `{ "ok": true, "indexed": <n> }`
+/// and the journal actions (journal.rs), their arguments under `journal`: `$journalOpen`
+/// (`{ name, on }`) → `{ "created": <bool> }`, `$journalRead` (`{ name, after, limit }`) → the entries,
+/// `$journalDrop` (`{ name }`) → `{ "dropped": <bool> }`.
 pub fn execute_op(db: &MarciDB, op: &Value) -> Result<Value, OpError> {
   let obj = op.as_object().ok_or(OpError::NotAnObject)?;
   let model = obj.get("model").and_then(|m| m.as_str()).ok_or(OpError::MissingField("model"))?;
@@ -277,8 +283,36 @@ pub fn execute_op(db: &MarciDB, op: &Value) -> Result<Value, OpError> {
       let indexed = db.reindex_entity(entity).map_err(OpError::Reindex)?;
       Ok(serde_json::json!({ "ok": true, "indexed": indexed }))
     },
+    "$journalOpen" => {
+      let (name, args) = journal_args(obj)?;
+      let on: Vec<String> = match args.get("on") {
+        Some(Value::String(op)) => vec![op.clone()],
+        Some(Value::Array(ops)) => ops.iter().filter_map(|op| op.as_str().map(str::to_string)).collect(),
+        _ => vec![],
+      };
+      let created = db.journal_open(entity, name, &on).map_err(OpError::Journal)?;
+      Ok(serde_json::json!({ "created": created }))
+    },
+    "$journalRead" => {
+      let (name, args) = journal_args(obj)?;
+      let after = args.get("after").and_then(Value::as_u64);
+      let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
+      let entries = db.journal_read(entity, name, after, limit).map_err(OpError::Journal)?;
+      Ok(json_value(array_to_json(&entries)))
+    },
+    "$journalDrop" => {
+      let dropped = db.journal_drop(entity, journal_args(obj)?.0).map_err(OpError::Journal)?;
+      Ok(serde_json::json!({ "dropped": dropped }))
+    },
     other => Err(OpError::UnknownAction(other.to_string())),
   }
+}
+
+/// The `journal` object of a journal action and the name it carries.
+fn journal_args(obj: &serde_json::Map<String, Value>) -> Result<(&str, &serde_json::Map<String, Value>), OpError> {
+  let args = op_field(obj, "journal")?.as_object().ok_or(OpError::MissingField("journal"))?;
+  let name = args.get("name").and_then(Value::as_str).ok_or(OpError::MissingField("journal.name"))?;
+  Ok((name, args))
 }
 
 fn parse_err<E: fmt::Debug>(e: E) -> BatchErrorKind {
