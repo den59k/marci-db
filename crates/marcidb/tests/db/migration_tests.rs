@@ -371,3 +371,51 @@ fn migrate_enum_reorder_preserves_data() {
     json!({ "name": "Alice", "type": "pro", "sign": "a-sign" })
   );
 }
+
+/// A list bound to the other side's reference, added by a migration, gets its binding tree: connecting
+/// through it, reading it and the cascade over it all work on a database that existed before — and the
+/// rows that already pointed at the model are in the new list.
+#[test]
+fn migrate_add_bound_list_creates_its_binding_tree() {
+  let before = "
+    model Post {
+        text   String
+    }
+    model File {
+        name   String
+        post   Post?  @onDelete(Cascade)
+    }
+  ";
+  let after = "
+    model Post {
+        text   String
+        files  File[] @bind(File.post)
+        covers File[] @bind(File.cover)
+    }
+    model File {
+        name   String
+        post   Post?  @onDelete(Cascade)
+        cover  Post?  @onDelete(Cascade)
+    }
+  ";
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+  let post = insert_data(&db, "Post", json!({ "text": "hi" }));
+  insert_data(&db, "File", json!({ "name": "old", "post": post }));
+
+  migrate_to(&mut db, after).unwrap();
+
+  // the reference that existed before the list did
+  assert_eq!(get_data(&db, "Post", json!({ "files": { "name": true } })), json!([{ "files": [{ "name": "old" }] }]));
+
+  // a reference made after it, on the list whose both sides are new
+  let cover = insert_data(&db, "File", json!({ "name": "new" }));
+  update_data(&db, "File", &cover, json!({ "cover": { "$connect": post } }));
+  assert_eq!(get_data(&db, "Post", json!({ "covers": { "name": true } })), json!([{ "covers": [{ "name": "new" }] }]));
+
+  // the cascade runs over both
+  let entity = db.get_model("Post").unwrap();
+  let id = marcidb::parse_id(&db.schema, entity, &post).unwrap();
+  db.delete_item(entity, &id).unwrap();
+  assert_eq!(db.count(db.get_model("File").unwrap()).unwrap(), 0);
+}
