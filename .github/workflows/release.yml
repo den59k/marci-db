@@ -202,21 +202,29 @@ jobs:
 
   # -------- publish the npm packages (marcidb-client, marcidb-embedded) --------
   # Assembles EVERY platform's codegen binaries + native libs into the package dirs, builds the JS bundles,
-  # then publishes both with NPM_TOKEN — so one tag ships all platforms (mac included) without hand-committing
-  # binaries. Runs after the per-OS build jobs. `release.sh` stamps the version into the tagged commit, so the
-  # checked-out package.json already carries the right version.
+  # then publishes both — so one tag ships all platforms (mac included) without hand-committing binaries. Runs
+  # after the per-OS build jobs. `release.sh` stamps the version into the tagged commit, so the checked-out
+  # package.json already carries the right version.
+  #
+  # Authentication is npm trusted publishing (OIDC): no token is stored anywhere. On npmjs.com both packages
+  # name this repository and `release.yml` as their trusted publisher, so renaming or moving this file breaks
+  # publishing until those settings are updated.
   publish-npm:
     needs: [embedded, codegen]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets npm exchange the job's OIDC token for publish rights
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }} # always the tagged commit (its package.json carries the stamped version)
       - uses: oven-sh/setup-bun@v2
+      # Trusted publishing needs npm 11.5.1+, which Node 24 ships.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: "https://registry.npmjs.org" # writes the .npmrc that reads NODE_AUTH_TOKEN
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
 
       # All platforms' artifacts → the package dirs. merge-multiple flattens the per-OS artifacts into one dir;
       # the copy overwrites the committed win/linux binaries with fresh builds and adds mac.
@@ -238,17 +246,23 @@ jobs:
           ( cd packages/marcidb-embedded && bunx bunup src/index.ts --external koffi --external bun:ffi --out-dir dist )
 
       # Publish client first (embedded peer-depends on it). --ignore-scripts because dist/runtime are already
-      # built here (prepublishOnly would re-run bunup, which isn't installed).
-      - name: Publish marcidb-client
-        working-directory: packages/marcidb-client
-        run: npm publish --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish marcidb-embedded
-        working-directory: packages/marcidb-embedded
-        run: npm publish --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # built here (prepublishOnly would re-run bunup, which isn't installed). A version that is already on the
+      # registry is skipped, so re-running a partly published release (workflow_dispatch) is safe.
+      - name: Publish npm packages
+        shell: bash
+        run: |
+          npm --version
+          for dir in packages/marcidb-client packages/marcidb-embedded; do
+            spec="$(node -p "const p = require('./$dir/package.json'); p.name + '@' + p.version")"
+            if [ -n "$(npm view "$spec" version 2>/dev/null)" ]; then
+              echo "::warning::$spec is already on the registry, skipping"
+              continue
+            fi
+            if ! ( cd "$dir" && npm publish --ignore-scripts --access public ); then
+              echo "::error::npm refused $spec. On npmjs.com, is $GITHUB_REPOSITORY + release.yml set as its trusted publisher?"
+              exit 1
+            fi
+          done
 
   # -------- Docker images: {full, core} -> GHCR --------
   docker:
