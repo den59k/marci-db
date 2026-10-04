@@ -73,6 +73,25 @@ pub fn apply(tx: &WriteTransaction, old: &Schema, new: &Schema, ops: &[MigrateOp
         if let FieldType::RefList(ref_info) = &f.ty && let RefBinding::IdList { rev_tree } = &ref_info.binding {
           tx.get_or_create_tree(rev_tree.as_bytes())?;
         }
+        // A list bound to the other side's reference (`files File[] @bind(File.owner)`) keeps its pairs in
+        // a binding tree of its own: without it the first connect — or the first delete of a row of this
+        // model — fails on a missing tree. Rows that already point here are entered now.
+        if let FieldType::RefList(ref_info) = &f.ty && let RefBinding::IndexTree(tree_name) = &ref_info.binding {
+          let mut tree = tx.get_or_create_tree(tree_name.as_bytes())?;
+          if let Some(rev_idx) = ref_info.rev_field_idx {
+            let child = &new.models[ref_info.model_index];
+            let rev_field = &child.fields[rev_idx];
+            if let FieldType::Ref(rev_info) = &rev_field.ty && matches!(rev_info.binding, RefBinding::FieldValue)
+              && let Some(child_tree) = tx.get_tree(child.name.as_bytes())? {
+              for row in child_tree.iter()? {
+                let (child_id, body) = row?;
+                if let Some(parent_id) = get_data(child, rev_field, &child_id, &body, new) {
+                  tree.insert(&[parent_id, child_id.as_ref()].concat(), &[])?;
+                }
+              }
+            }
+          }
+        }
       }
       MigrateOp::AlterField { .. } => {}
       MigrateOp::AddIndex { entity, field, .. } => build_index(tx, new, entity, field)?,
