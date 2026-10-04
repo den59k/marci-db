@@ -24,6 +24,7 @@ pub mod delete_many_tests;
 pub mod id_list_tests;
 pub mod array_ops_tests;
 pub mod row_codec_fuzz_tests;
+pub mod journal_tests;
 
 use std::str::FromStr;
 

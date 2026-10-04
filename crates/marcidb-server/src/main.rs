@@ -6,7 +6,7 @@ use hyper_util::rt::TokioIo;
 use marcidb::{MarciDB, ProviderRegistry};
 use tokio::{fs, net::TcpListener};
 
-use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_delete_many, handle_find_first, handle_find_many, handle_insert, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_sync_plan, handle_transaction, handle_update, handle_update_many}};
+use crate::{errors::ApiError, handlers::{handle_aggregate, handle_count, handle_delete, handle_delete_many, handle_find_first, handle_find_many, handle_insert, handle_journal_drop, handle_journal_open, handle_journal_read, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_sync_plan, handle_transaction, handle_update, handle_update_many}};
 
 mod handlers;
 mod errors;
@@ -193,6 +193,16 @@ async fn handle_inner(
         },
         // Rebuild this model's @custom indexes
         (&Method::POST, "$reindex") => handle_reindex(ctx, db_name, model).await,
+        // A journal of this model's changes: create, read (and confirm), drop
+        (_, "$journal") => {
+            let Some(name) = id else { return Err(ApiError::BadRequest("Param :journal required".to_string())) };
+            match method {
+                Method::POST => handle_journal_open(req, ctx, db_name, model, name).await,
+                Method::GET => handle_journal_read(req, ctx, db_name, model, name).await,
+                Method::DELETE => handle_journal_drop(ctx, db_name, model, name).await,
+                _ => Err(ApiError::NotFound(format!("Route {} /{} not found", method, path))),
+            }
+        },
         _ => Err(ApiError::NotFound(format!("Route {} /{} not found", method, path))),
     }
 }

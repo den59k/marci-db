@@ -15,6 +15,7 @@ mod index_provider;
 mod url_parser;
 mod update_op;
 mod num_utils;
+mod journal;
 
 // The schema model + parser + snapshot codec live in the foundation crate. Alias it as `crate::schema` so
 // the engine's many `crate::schema::…` references keep resolving, and re-export the public types at the
@@ -28,6 +29,7 @@ pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::{MarciDB, OpenOptions, ReindexError, QueryError};
 pub use crate::index_provider::{IndexProvider, IndexTree, IndexIter, RowScan, RowRef, SearchHit, ProviderError, ProviderRegistry};
 pub use crate::transaction::MarciTransaction;
+pub use crate::journal::{JournalError, JournalSignal};
 pub use crate::error::StorageError;
 pub use crate::batch::{execute_batch, execute_op, filter_query, BatchError, BatchErrorKind, OpError};
 pub use crate::binary_encode::{execute_query_binary, query_binary_many, query_binary_one, shape_supported, QueryBinaryOutcome, BINARY_VERSION};

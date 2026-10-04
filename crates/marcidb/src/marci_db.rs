@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 use canopydb::{Database, Transaction, Tree, WriteTransaction};
 use serde_json::Value;
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, journal::Journals, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 /// Storage-engine options threaded into `MarciDB::try_*_with_options`. Defaults match the durable
 /// `MarciDB::new`/`open` path; the embedding/test layer flips `disable_fsync` for fast, ephemeral DBs.
@@ -31,6 +31,8 @@ pub struct MarciDB {
   /// via [`MarciDB::with_providers`]. Shared across DBs that the same host opens. `pub(crate)` so the write
   /// paths can dispatch the live-maintenance hooks (`on_insert`/`on_update`/`on_delete`).
   pub(crate) providers: Arc<ProviderRegistry>,
+  /// The journals readers opened on this database's models (journal.rs). Empty unless one was asked for.
+  pub(crate) journals: Journals,
 }
 
 impl MarciDB {
@@ -73,9 +75,10 @@ impl MarciDB {
     }
 
     let counters = build_counters(&schema, &tx)?;
+    let journals = Journals::load(&tx)?;
     tx.commit()?;
 
-    Ok(MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()) })
+    Ok(MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
   }
 
   /// Installs the `@custom` index providers (builder style). The same registry is typically shared across
@@ -118,9 +121,10 @@ impl MarciDB {
 
     let rx = db.begin_read()?;
     let counters = build_counters(&schema, &rx)?;
+    let journals = Journals::load(&rx)?;
     drop(rx);
 
-    Ok(MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()) })
+    Ok(MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
   }
 
   pub fn get_model(&self, name: &str) -> Option<&Entity> {
@@ -230,6 +234,10 @@ impl MarciDB {
     Ok(MarciTransaction::new(self, self.db.begin_write()?))
   }
 
+  /// The storage transactions themselves, for the engine's own modules (journal.rs).
+  pub(crate) fn raw_begin_write(&self) -> Result<WriteTransaction, StorageError> { Ok(self.db.begin_write()?) }
+  pub(crate) fn raw_begin_read(&self) -> Result<canopydb::ReadTransaction, StorageError> { Ok(self.db.begin_read()?) }
+
   /// Runs a block in a single transaction: on `Ok` — commit, on `Err` or panic — rollback.
   /// A convenient wrapper over [`MarciDB::begin_write`] when manual commit control isn't needed.
   /// A commit error is wrapped into `E` (hence the `E: From<StorageError>` requirement)
@@ -291,6 +299,12 @@ impl MarciDB {
     let tx = self.db.begin_write()?;
     apply(&tx, &self.schema, &new_schema, ops)?;
 
+    // A dropped model takes its journals with it.
+    let dropped: Vec<&String> = ops.iter().filter_map(|op| match op { crate::schema::MigrateOp::DropEntity { name } => Some(name), _ => None }).collect();
+    for name in dropped.iter() {
+      self.journals.drop_model_trees(&tx, name)?;
+    }
+
     {
       let mut meta = tx.get_or_create_tree(META_TREE)?;
       let version = meta.get(b"version")?
@@ -300,6 +314,7 @@ impl MarciDB {
       meta.insert(b"version", &version.to_be_bytes())?;
     }
     tx.commit()?;
+    for name in dropped { self.journals.forget_model(name); }
 
     self.swap_schema(new_schema)?;
     Ok(())

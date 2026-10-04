@@ -12,7 +12,7 @@ import { loadFfi } from "./loader.js";
 const ffi = await loadFfi();
 
 /** A transport-neutral operation descriptor (matches `MarciOp` from the generated client). */
-export type MarciOp = { model: string; action: string; query?: any; data?: any; id?: any };
+export type MarciOp = { model: string; action: string; query?: any; data?: any; id?: any; journal?: { name: string; on?: readonly string[]; after?: number; limit?: number; wait?: number } };
 
 /** Error kinds mirror the server's HTTP error taxonomy. */
 export type MarciErrorKind = "bad_request" | "not_found" | "internal";
@@ -108,7 +108,13 @@ export function openDatabase(dir: string, options: EmbeddedOptions = {}): Embedd
   // atomic transaction. So you can write `marcidb(db)` directly — no `.transport` step.
   async function exec(op: MarciOp): Promise<any> {
     ensureOpen();
-    return unwrap(ffi.exec(handle, JSON.stringify(op)));
+    const result = unwrap(ffi.exec(handle, JSON.stringify(op)));
+    // A journal read that waits: the engine call is synchronous and must not hold the JS thread, so an
+    // empty answer is given after a pause — the reader's loop asks again, as it does when a wait runs out.
+    if (op.action === "$journalRead" && op.journal?.wait && result.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return result;
   }
   async function batch(ops: MarciOp[]): Promise<any[]> {
     ensureOpen();

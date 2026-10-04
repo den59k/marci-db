@@ -9,6 +9,7 @@ MarciDB is built on [canopydb](https://crates.io/crates/canopydb) — an embedde
 - **one tree per model** — `User`, `Post`, `Project.users` (nested structs become their own entities with a dotted name)
 - **one tree per secondary index** — `index_User.age`
 - **one tree per list relation** — `User.posts->Post.author` (the binding tree)
+- **one tree per journal** — `__journal__/File/stored-files`: `seq` (u64 BE) → an op byte + the row as JSON text. `__marci_journals__` holds one record per journal (its operations and the last confirmed seq), so a seq is never handed out twice — not after the journal was emptied, not across a reopen
 
 Everything below builds on a single property of these trees: **keys are ordered**, and range/prefix scans are cheap.
 

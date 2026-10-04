@@ -31,6 +31,14 @@ function httpTransport(url) {
         case "count":     return request("POST", `${url}/${op.model}/count`, op.query ?? {});
         case "aggregate": return request("POST", `${url}/${op.model}/aggregate`, op.query);
         case "$reindex":  return request("POST", `${url}/${op.model}/$reindex`);
+        // A journal of the model's changes: create, read (`after` confirms), drop
+        case "$journalOpen": return request("POST", `${url}/${op.model}/$journal/${op.journal.name}`, { on: op.journal.on });
+        case "$journalRead": {
+          const { name, after, limit, wait } = op.journal;
+          const params = [after !== undefined && `after=${after}`, limit !== undefined && `limit=${limit}`, wait && `wait=${wait}`].filter(Boolean).join("&");
+          return request("GET", `${url}/${op.model}/$journal/${name}${params ? "?" + params : ""}`);
+        }
+        case "$journalDrop": return request("DELETE", `${url}/${op.model}/$journal/${op.journal.name}`);
         default: throw new Error(`marcidb: unknown action '${op.action}'`);
       }
     },
