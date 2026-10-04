@@ -48,17 +48,20 @@ manifests rather than silently re-resolving.
 
 ## Prerequisites (one-time)
 
-- **`NPM_TOKEN`** repo secret — an npm **Automation** or **Granular Access** token (these skip the 2FA
-  one-time password that CI can't enter; a classic *Publish* token will fail with `EOTP`). Scope a granular
-  token to `marcidb-client` + `marcidb-embedded` with read/write. The `publish-npm` job reads it via
-  `NODE_AUTH_TOKEN`.
+- **npm trusted publishing** — no token or secret. On npmjs.com, for **each** of `marcidb-client` and
+  `marcidb-embedded`: *Settings* → *Trusted Publisher* → *GitHub Actions*, organization/user `den59k`,
+  repository `marci-db`, workflow filename `release.yml` (no environment). The `publish-npm` job gets a
+  short-lived OIDC token (`id-token: write`) and npm exchanges it for publish rights; provenance is attached
+  automatically. Renaming or moving `release.yml` breaks publishing until these settings are updated.
+  Once it works, you can set *Publishing access* to "Require two-factor authentication and disallow tokens".
 - **GHCR package visibility** — container packages are **private by default**. To allow anonymous
   `docker pull`, set `marcidb-server` to **Public** once (GitHub → your packages → `marcidb-server` →
   *Package settings* → *Change visibility*). Pushing uses the built-in `GITHUB_TOKEN`; no extra secret.
 
-If a release fails *after* one npm package has published, that version is taken — bump to the next patch
-rather than re-running (npm refuses to publish over an existing version). If it fails *before* any publish
-(e.g. a bad token), fix it and **Re-run failed jobs** — the tag already points at the right commit.
+If the npm publish fails, fix the cause and **Re-run failed jobs** — the tag already points at the right
+commit, and a package version that is already on the registry is skipped rather than failing the run. Note
+that a re-run uses the workflow file *as of the tag*; if the fix was to `release.yml` itself, run the
+workflow manually instead (*Actions* → *Release* → *Run workflow* on `main`, with the existing tag).
 
 ## Changelog format
 
