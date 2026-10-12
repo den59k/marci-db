@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{BatchErrorKind, JournalError, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, filter_query};
+use marcidb::{JournalError, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, filter_query};
 use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body, read_response, BinaryNeg, ReadBody}};
@@ -162,8 +162,7 @@ pub async fn handle_transaction(req: Request<hyper::body::Incoming>, ctx: Arc<Se
 
         match execute_batch(db, ops) {
             Ok(results) => Ok(serde_json::to_string(&Value::Array(results)).unwrap()),
-            Err(e) if matches!(e.kind, BatchErrorKind::Storage(_)) => Err(ApiError::Internal(e.to_string())),
-            Err(e) => Err(ApiError::BadRequest(e.to_string())),
+            Err(e) => Err(ApiError::from(e)),
         }
     })).await?;
 
@@ -176,9 +175,8 @@ pub async fn handle_insert(req: Request<hyper::body::Incoming>, ctx: Arc<ServerC
     let id = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let write_op = parse_insert(&db.schema, entity, &json_val)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
-        let writed_id = db.insert_item(entity, &write_op)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to insert: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        let writed_id = db.insert_item(entity, &write_op)?;
         Ok(decode_id(&writed_id, entity, &db.schema).to_string())
     })).await?;
 
@@ -202,7 +200,7 @@ pub async fn handle_find_many(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let query_op = parse_query(&db.schema, entity, &json_val)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         if binary_allowed(&neg, db, &query_op) {
             let bytes = query_binary_many(db, &query_op).map_err(query_error)?;
             return Ok(ReadBody::Binary(bytes));
@@ -222,7 +220,7 @@ pub async fn handle_find_first(req: Request<hyper::body::Incoming>, ctx: Arc<Ser
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let query_op = parse_query(&db.schema, entity, &json_val)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         if binary_allowed(&neg, db, &query_op) {
             let bytes = query_binary_one(db, &query_op).map_err(query_error)?;
             return Ok(ReadBody::Binary(bytes));
@@ -241,7 +239,7 @@ pub async fn handle_count(req: Request<hyper::body::Incoming>, ctx: Arc<ServerCo
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let mut aggregate_op = parse_aggregate(&db.schema, entity, &json_val)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         aggregate_op.count = true;
 
         let result = db.aggregate(&aggregate_op)
@@ -258,7 +256,7 @@ pub async fn handle_aggregate(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let aggregate_op = parse_aggregate(&db.schema, entity, &json_val)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         if !aggregate_op.has_aggregates() {
             return Err(ApiError::BadRequest("At least one of $count, $sum, $avg, $min, $max is required".to_string()));
         }
@@ -279,9 +277,8 @@ pub async fn handle_update(req: Request<hyper::body::Incoming>, item_id: String,
         let id = parse_id_from_url(&db.schema, entity, &item_id)
             .map_err(|e| ApiError::BadRequest(format!("Failed to parse :item_id: {:?}", e)))?;
         let update_op = parse_update(&db.schema, entity, &json_val)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
-        db.update_item(entity, &id, &update_op)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to update: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        db.update_item(entity, &id, &update_op)?;
         Ok(())
     })).await?;
 
@@ -298,13 +295,12 @@ pub async fn handle_update_many(req: Request<hyper::body::Incoming>, ctx: Arc<Se
         let data = json_val.get("data")
             .ok_or_else(|| ApiError::BadRequest("Field 'data' required".to_string()))?;
         let update_op = parse_update(&db.schema, entity, data)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         // The body carries `data` alongside the `$`-operators; keep only the latter for the scan
         let query_op = parse_query(&db.schema, entity, &filter_query(&json_val))
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-        let updated = db.update_many(entity, &query_op, &update_op)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to update: {:?}", e)))?;
+        let updated = db.update_many(entity, &query_op, &update_op)?;
         Ok(updated.to_string())
     })).await?;
 
@@ -319,9 +315,8 @@ pub async fn handle_delete_many(req: Request<hyper::body::Incoming>, ctx: Arc<Se
     let result = blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let query_op = parse_query(&db.schema, entity, &filter_query(&json_val))
-            .map_err(|e| ApiError::BadRequest(format!("Failed to encode: {:?}", e)))?;
-        let deleted = db.delete_many(entity, &query_op)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to delete: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        let deleted = db.delete_many(entity, &query_op)?;
         Ok(deleted.to_string())
     })).await?;
 
@@ -333,8 +328,7 @@ pub async fn handle_delete(item_id: String, ctx: Arc<ServerContext>, db_name: St
         let entity = model(db, &model_name)?;
         let id = parse_id_from_url(&db.schema, entity, &item_id)
             .map_err(|e| ApiError::BadRequest(format!("Failed to parse :item_id: {:?}", e)))?;
-        db.delete_item(entity, &id)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to delete: {:?}", e)))?;
+        db.delete_item(entity, &id)?;
         Ok(())
     })).await?;
 

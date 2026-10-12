@@ -228,12 +228,23 @@ curl -X DELETE localhost:3000/myapp/File/\$journal/stored-files
 
 ## Errors
 
-Errors are returned as plain-text messages with a status code:
+An error answers with a JSON body and the status its kind means:
 
-| Status | When |
-|---|---|
-| `400 Bad Request` | invalid JSON, unknown field, malformed query/insert/update, bad `:id` syntax, missing aggregate keys, unsupported or diverged migration |
-| `404 Not Found` | unknown database, model or action |
-| `500 Internal Server Error` | internal failures |
+```json
+{ "error": "Order.dish: no row with id \"nothing\" to point at", "kind": "foreign_key", "field": "Order.dish" }
+```
 
-Constraint violations (unique, foreign key, duplicate id) are currently reported as `400` with the error in the message text; a structured error format is planned. For `POST /$transaction` the message is prefixed with the failing operation's index (`batch op #N: ...`) and the whole batch is rolled back — see [Transactions](#atomicity-and-errors).
+| `kind` | Status | When |
+|---|---|---|
+| `unique` | `409` | a `@unique` value is taken (`field`; the message names the row holding it) |
+| `foreign_key` | `409` | a relation points at an id with no row behind it (`field`) |
+| `restrict` | `409` | the delete is refused by a `Restrict` relation (`field` = the relation pointing at the row) |
+| `duplicate_id` | `409` | a row with the given id exists |
+| `not_found` | `404` | unknown database, model or action; the row to update or delete does not exist |
+| `bad_request` | `400` | invalid JSON, unknown or missing field, malformed query/insert/update, bad `:id` syntax, missing aggregate keys, unsupported or diverged migration |
+| `unauthorized` | `401` | the token is missing or wrong |
+| `internal` | `500` | a fault of the server |
+
+`kind` is what a client switches on; `error` is a message for a person; `field` is present when the failure is about
+one field (`Model.field`). For `POST /$transaction` the message is prefixed with the failing operation's index
+(`batch op #N: ...`) and the whole batch is rolled back — see [Transactions](#atomicity-and-errors).

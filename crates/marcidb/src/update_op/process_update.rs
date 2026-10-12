@@ -32,7 +32,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
         if field_index.is_unique() {
           if let Some(exists) = tree.prefix_keys(&index_data)?.next() {
             let exists_id = exists?[index_data.len()..].to_vec();
-            return Err(UpdateError::UniqueViolation(field.full_name.clone(), exists_id))
+            return Err(UpdateError::UniqueViolation(field.full_name.clone(), crate::id_text(&exists_id, entity, &db.schema)))
           }
         }
         tree.insert(&[ index_data.as_slice(), &id ].concat(), &[])?;
@@ -99,7 +99,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           }
         },
         UpdateRelationOp::Connect(item_ids) => {
-          write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::link(e, update_ref.field))?
+          write_ref_indexes(tx, entity, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::link(e, update_ref.field))?
         },
         UpdateRelationOp::Disconnect(item_ids) => {
           delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
@@ -118,7 +118,7 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
             delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &removed).map_err(|e| UpdateError::WriteIndexesError(e))?;
           }
           if !added.is_empty() {
-            write_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &added).map_err(|e| UpdateError::link(e, update_ref.field))?;
+            write_ref_indexes(tx, entity, update_ref.ref_info, &db.schema, id, &added).map_err(|e| UpdateError::link(e, update_ref.field))?;
           }
         },
         UpdateRelationOp::UpdateItems(items) => {
@@ -374,7 +374,7 @@ fn apply_id_list_update(tx: &WriteTransaction, entity: &Entity, field: &Field, r
     delete_ref_indexes(tx, ref_info, &db.schema, id, &removed).map_err(|e| UpdateError::WriteIndexesError(e))?;
   }
   if !added.is_empty() {
-    write_ref_indexes(tx, ref_info, &db.schema, id, &added).map_err(|e| UpdateError::link(e, field))?;
+    write_ref_indexes(tx, entity, ref_info, &db.schema, id, &added).map_err(|e| UpdateError::link(e, field))?;
   }
 
   let offset_start = get_offset(&data, offset_pos);

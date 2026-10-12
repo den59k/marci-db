@@ -23,7 +23,7 @@ mod journal;
 pub(crate) use marcidb_schema as schema;
 
 pub use marcidb_schema::{parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType,FieldExistsCondition,EnumInfo,RefInfo,RefBinding,Attribute,DeleteConstraint,FieldCustomFormat,FieldDefault,FieldIndex,FieldIndexNum};
-pub use crate::json_parsers::{parse_insert,parse_update,parse_query,parse_aggregate,aggregate_to_json,decode_document,decode_id,array_to_json,parse_id,EncodeError};
+pub use crate::json_parsers::{parse_insert,parse_update,parse_query,parse_aggregate,aggregate_to_json,decode_document,decode_id, id_text,array_to_json,parse_id,EncodeError};
 pub use crate::aggregate_op::{AggregateOp,AggregateResult,SumValue};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::{MarciDB, OpenOptions, ReindexError, QueryError};

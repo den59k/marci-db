@@ -71,7 +71,7 @@ fn insert_refuses_a_pointer_at_nothing() {
     assert_eq!(get_data(&db, "Order", json!({})), json!([]));
 
     // the rows that exist link as before
-    let post = insert_data(&db, "Post", json!({ "title": "Found", "author": alice.clone() }));
+    insert_data(&db, "Post", json!({ "title": "Found", "author": alice.clone() }));
     insert_data(&db, "Order", json!({ "dish": { "id": "latte" }, "qty": 2 }));
     assert_eq!(
         get_data(&db, "Post", json!({ "title": true, "author": { "name": true } })),

@@ -17,7 +17,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use marcidb::{
-    BatchErrorKind, MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
+    MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
     QueryBinaryOutcome, ReindexError, execute_batch, execute_op, execute_query_binary, parse_snapshot,
     serialize_snapshot, try_parse_schema,
 };
@@ -40,12 +40,13 @@ thread_local! {
 struct Fault {
     kind: &'static str,
     message: String,
+    /// The `Model.field` a constraint failure is about.
+    field: Option<String>,
 }
 
 impl Fault {
-    fn bad_request(m: impl Into<String>) -> Self { Fault { kind: "bad_request", message: m.into() } }
-    fn not_found(m: impl Into<String>) -> Self { Fault { kind: "not_found", message: m.into() } }
-    fn internal(m: impl Into<String>) -> Self { Fault { kind: "internal", message: m.into() } }
+    fn bad_request(m: impl Into<String>) -> Self { Fault { kind: "bad_request", message: m.into(), field: None } }
+    fn internal(m: impl Into<String>) -> Self { Fault { kind: "internal", message: m.into(), field: None } }
 }
 
 fn ok_envelope(data: Value) -> String {
@@ -53,7 +54,9 @@ fn ok_envelope(data: Value) -> String {
 }
 
 fn err_envelope(f: &Fault) -> String {
-    json!({ "ok": false, "error": f.message, "kind": f.kind }).to_string()
+    let mut body = json!({ "ok": false, "error": f.message, "kind": f.kind });
+    if let Some(field) = &f.field { body["field"] = Value::String(field.clone()); }
+    body.to_string()
 }
 
 /// Best-effort message out of a caught panic payload.
@@ -234,8 +237,7 @@ fn exec_value(db: &MarciDB, value: Value) -> Result<Value, Fault> {
     match value {
         Value::Array(ops) => match execute_batch(db, &ops) {
             Ok(results) => Ok(Value::Array(results)),
-            Err(e) if matches!(e.kind, BatchErrorKind::Storage(_)) => Err(Fault::internal(e.to_string())),
-            Err(e) => Err(Fault::bad_request(e.to_string())),
+            Err(e) => Err(Fault { kind: e.kind(), field: e.field().map(str::to_string), message: e.to_string() }),
         },
         obj @ Value::Object(_) => execute_op(db, &obj).map_err(op_fault),
         _ => Err(Fault::bad_request("operation must be a JSON object or an array of operations")),
@@ -299,14 +301,10 @@ pub extern "C" fn marci_free_buffer(ptr: *mut u8, len: usize) {
     unsafe { drop(Box::from_raw(ptr::slice_from_raw_parts_mut(ptr, len))) };
 }
 
+/// The engine classifies its own failures (`OpError::kind`): a constraint (`unique`, `foreign_key`, `restrict`,
+/// `duplicate_id`), `not_found`, `bad_request`, or `internal` for a storage fault.
 fn op_fault(e: OpError) -> Fault {
-    if e.is_storage() {
-        return Fault::internal(e.to_string());
-    }
-    match &e {
-        OpError::UnknownModel(_) | OpError::UnknownAction(_) => Fault::not_found(e.to_string()),
-        _ => Fault::bad_request(e.to_string()),
-    }
+    Fault { kind: e.kind(), field: e.field().map(str::to_string), message: e.to_string() }
 }
 
 // ───────────────────────────────── schema / admin ─────────────────────────────────

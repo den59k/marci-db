@@ -15,7 +15,9 @@ const ffi = await loadFfi();
 export type MarciOp = { model: string; action: string; query?: any; data?: any; id?: any; journal?: { name: string; on?: readonly string[]; after?: number; limit?: number; wait?: number } };
 
 /** Error kinds mirror the server's HTTP error taxonomy. */
-export type MarciErrorKind = "bad_request" | "not_found" | "internal";
+/** The class of a refused operation (the envelope's `kind`): a constraint — `unique`, `foreign_key`, `restrict`,
+ *  `duplicate_id` —, `not_found`, `bad_request`, or `internal` for a fault of the engine. */
+export type MarciErrorKind = "unique" | "foreign_key" | "restrict" | "duplicate_id" | "not_found" | "bad_request" | "internal";
 
 /**
  * The transport object consumed by `marcidb()` from `marcidb-client`. `queryBinary` is the optional binary
@@ -66,13 +68,16 @@ export interface TestDatabase extends EmbeddedDatabase {
   path: string;
 }
 
-/** Error thrown when a native operation returns an `ok:false` envelope. `kind` mirrors the server's. */
+/** Error thrown when a native operation returns an `ok:false` envelope. `kind` mirrors the server's; `field` is
+ *  the `Model.field` a constraint failure is about. */
 export class MarciEmbeddedError extends Error {
   override name = "MarciEmbeddedError" as const;
   kind: MarciErrorKind;
-  constructor(message: string, kind: MarciErrorKind) {
+  field?: string;
+  constructor(message: string, kind: MarciErrorKind, field?: string) {
     super(message);
     this.kind = kind;
+    this.field = field;
   }
 }
 
@@ -86,7 +91,7 @@ function unwrap(envelope: string | null): any {
     throw new MarciEmbeddedError(`malformed native envelope: ${envelope}`, "internal");
   }
   if (parsed.ok) return parsed.data;
-  throw new MarciEmbeddedError(parsed.error ?? "unknown error", parsed.kind ?? "internal");
+  throw new MarciEmbeddedError(parsed.error ?? "unknown error", parsed.kind ?? "internal", parsed.field);
 }
 
 /**

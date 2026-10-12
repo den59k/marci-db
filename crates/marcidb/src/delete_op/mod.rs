@@ -69,7 +69,9 @@ pub enum DependencyActionType<'a> {
 #[derive(Debug,PartialEq)]
 pub enum DeleteError {
   ItemNotFound,
-  RestrictConstraints(String,Vec<Vec<u8>>),
+  /// Rows still point at the one being deleted through a `Restrict` relation: the field's full name
+  /// (`Enrollment.class`) and the ids of those rows (the client's form of the id).
+  RestrictConstraints(String, Vec<String>),
   EncodeError(EncodeError),
   /// A cascade/dependency of this form is not implemented yet (nested owned collections, IndexTree-rev)
   Unsupported(&'static str),
@@ -95,5 +97,40 @@ impl From<StorageError> for DeleteError {
 impl From<ProviderError> for DeleteError {
   fn from(e: ProviderError) -> Self {
     DeleteError::IndexError(e)
+  }
+}
+
+impl std::fmt::Display for DeleteError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      DeleteError::ItemNotFound => write!(f, "the row does not exist"),
+      DeleteError::RestrictConstraints(field, ids) => write!(f, "{}: rows {} still point at this one; delete or repoint them first", field, ids.join(", ")),
+      DeleteError::EncodeError(e) => write!(f, "{}", e),
+      DeleteError::Unsupported(what) => write!(f, "not supported: {}", what),
+      DeleteError::IndexError(e) => write!(f, "{}", e),
+      DeleteError::Journal(e) => write!(f, "journal: {}", e),
+      DeleteError::Storage(e) => write!(f, "{}", e),
+    }
+  }
+}
+impl std::error::Error for DeleteError {}
+
+impl DeleteError {
+  /// The class of the refusal, as clients see it — see `InsertError::kind`; `restrict` is the delete refused
+  /// by a `Restrict` relation.
+  pub fn kind(&self) -> &'static str {
+    match self {
+      DeleteError::ItemNotFound => "not_found",
+      DeleteError::RestrictConstraints(..) => "restrict",
+      DeleteError::Journal(_) | DeleteError::Storage(_) => "internal",
+      _ => "bad_request",
+    }
+  }
+  /// The field the refusal is about (`Model.field`), when it is about one.
+  pub fn field(&self) -> Option<&str> {
+    match self {
+      DeleteError::RestrictConstraints(field, _) => Some(field),
+      _ => None,
+    }
   }
 }

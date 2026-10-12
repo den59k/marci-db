@@ -334,7 +334,7 @@ pub enum ParseError {
 impl ParseError {
     pub fn type_mismatch(field: &Field, expected: impl Into<String>) -> Self {
         ParseError::TypeMismatch {
-            field: field.name.clone(),
+            field: field.full_name.clone(),
             expected: expected.into(),
         }
     }
@@ -621,3 +621,18 @@ mod tests {
   }
 
 }
+impl std::fmt::Display for ParseError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      ParseError::NotAnObject => write!(f, "the query must be a JSON object"),
+      ParseError::MissingIdField(field) => write!(f, "{} is required", field),
+      ParseError::WhereError(e) => write!(f, "$where: {}", e),
+      ParseError::TypeMismatch { field, expected } => write!(f, "{}: expected {}", field, expected),
+      ParseError::UnknownField(field) => write!(f, "unknown field '{}'", field),
+      ParseError::NotSortable(field) => write!(f, "{} cannot be sorted by", field),
+      ParseError::WrongServiceValue(key, expected) => write!(f, "{}: expected {}", key, expected),
+      ParseError::CursorError(e) => write!(f, "$cursor: {}", e),
+    }
+  }
+}
+impl std::error::Error for ParseError {}

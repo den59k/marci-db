@@ -2,6 +2,37 @@
 export * from "./query";
 import type { FieldDesc } from "./query";
 
+/** The class of a refused request — the server's `kind`: a constraint (`unique`, `foreign_key`, `restrict`,
+ *  `duplicate_id`), `not_found`, `bad_request`, `unauthorized`, or `internal` for a fault of the server. */
+export type MarciErrorKind = "unique" | "foreign_key" | "restrict" | "duplicate_id" | "not_found" | "bad_request" | "unauthorized" | "internal";
+
+/** A failed request: `kind` is what to switch on, `field` the `Model.field` a constraint is about, the message is for a person. */
+export class MarciError extends Error {
+  override name = "MarciError" as const;
+  readonly status: number;
+  readonly kind: MarciErrorKind;
+  readonly field?: string;
+  constructor(status: number, message: string, kind: MarciErrorKind, field?: string) {
+    super(message);
+    this.status = status;
+    this.kind = kind;
+    this.field = field;
+  }
+}
+
+const kindOfStatus = (status: number): MarciErrorKind =>
+  status === 404 ? "not_found" : status === 401 ? "unauthorized" : status >= 500 ? "internal" : "bad_request";
+
+/** The error of a failed response: the server's JSON body (`error`, `kind`, `field`), or its text (an older server). */
+async function failure(res: Response): Promise<MarciError> {
+  const text = await res.text();
+  try {
+    const body = JSON.parse(text);
+    if (body && typeof body.error === "string") return new MarciError(res.status, body.error, body.kind ?? kindOfStatus(res.status), body.field);
+  } catch { /* plain text */ }
+  return new MarciError(res.status, text || `HTTP ${res.status}`, kindOfStatus(res.status));
+}
+
 export async function request(method: string, url: string, body?: any): Promise<any> {
   const res = await fetch(url, {
     method,
@@ -9,10 +40,7 @@ export async function request(method: string, url: string, body?: any): Promise<
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`MarciDB [${res.status}]: ${text}`);
-  }
+  if (!res.ok) throw await failure(res);
 
   // 204 No Content — delete/update may not return a body
   // const contentType = res.headers.get("content-type");
@@ -45,10 +73,7 @@ export async function requestBinary(url: string, body: any, schemaHash: string):
     body: JSON.stringify(body ?? {}),
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`MarciDB [${res.status}]: ${text}`);
-  }
+  if (!res.ok) throw await failure(res);
 
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes(BINARY_MEDIA_TYPE)) {

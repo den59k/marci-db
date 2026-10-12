@@ -253,6 +253,16 @@ pub fn decode_id(id: &[u8], entity: &Entity, schema: &Schema) -> String {
     return str;
 }
 
+/// The id as a client sees it, for an error message: the bare value of a single-key model (`"latte"`, `5`),
+/// the object for a composite key (`{"chat":{"id":1},"user":{"id":2}}`).
+pub fn id_text(id: &[u8], entity: &Entity, schema: &Schema) -> String {
+    let json = decode_id(id, entity, schema);
+    match serde_json::from_str::<serde_json::Value>(&json) {
+        Ok(serde_json::Value::Object(obj)) if obj.len() == 1 => obj.values().next().unwrap().to_string(),
+        _ => json,
+    }
+}
+
 // Decodes a value from the ID into JSON
 fn decode_id_field<'a>(data: &'a [u8], field: &Field, schema: &Schema, obj: &mut String) -> Result<(), DecodeError> {
     let field_name = field.name.clone();

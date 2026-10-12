@@ -2,15 +2,18 @@ use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, id_text, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
-  /// A relation field names a row that does not exist: the field's full name and the id it pointed at.
-  ForeignKeyViolation(String, Vec<u8>),
+  /// A relation field names a row that does not exist: the field's full name and the id it pointed at
+  /// (ids in these errors are the client's form of the id — `id_text`).
+  ForeignKeyViolation(String, String),
   ItemNotFound,
-  IdViolation(String, Vec<u8>),
-  UniqueViolation(String, Vec<u8>),
+  /// A row with this id exists: the model's name and the id.
+  IdViolation(String, String),
+  /// A `@unique` value is taken: the field's full name and the id of the row holding it.
+  UniqueViolation(String, String),
   DuplicateKey(Vec<u8>),
   CannotChangePrimaryKey(String),
   ParentIdRequired,
@@ -84,7 +87,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
   {
     let mut tree = tx.require_tree(entity.name.as_bytes())?;
     if tree.get(&write_id)?.is_some() {
-      return Err(InsertError::IdViolation(entity.name.clone(), write_id.clone()));
+      return Err(InsertError::IdViolation(entity.name.clone(), id_text(&write_id, entity, &db.schema)));
     }
     tree.insert(&write_id, data)?;
   }
@@ -96,7 +99,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
         if field_index.is_unique() {
           if let Some(exists) = tree.prefix_keys(&data.as_slice())?.next() {
             let exists_id = exists?[data.len()..].to_vec();
-            return Err(InsertError::UniqueViolation(field.full_name.clone(), exists_id))
+            return Err(InsertError::UniqueViolation(field.full_name.clone(), id_text(&exists_id, entity, &db.schema)))
           }
         }
         let val = [ data.as_slice(), write_id.as_slice() ].concat();
@@ -120,7 +123,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
         }
       }
       WriteRelation::Connect { ref_info, ids, field, .. } => {
-        write_ref_indexes(tx, ref_info, &db.schema, &write_id, &ids).map_err(|e| e.to_insert_error(field))?;
+        write_ref_indexes(tx, entity, ref_info, &db.schema, &write_id, &ids).map_err(|e| e.to_insert_error(field))?;
       }
     }
   }
@@ -141,12 +144,13 @@ fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) -> Result<(), canopy
 /// that is not a row of its model is refused, and nothing of the write survives (the transaction rolls
 /// back). The check sees rows written earlier in the same transaction, so a batch inserts the
 /// referenced row first.
-pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
+pub fn write_ref_indexes(tx: &WriteTransaction, entity: &Entity, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
   {
-    let target = tx.require_tree(schema.models[ref_info.model_index].name.as_bytes())?;
+    let target_entity = &schema.models[ref_info.model_index];
+    let target = tx.require_tree(target_entity.name.as_bytes())?;
     for item_id in ids {
       if target.get(item_id)?.is_none() {
-        return Err(WriteIndexesError::ForeignKeyViolation(item_id.clone()));
+        return Err(WriteIndexesError::ForeignKeyViolation(id_text(item_id, target_entity, schema)));
       }
     }
   }
@@ -173,10 +177,10 @@ pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Sch
   if let Some(ref_field_idx) = ref_info.rev_field_idx {
     match &schema.models[ref_info.model_index].fields[ref_field_idx].ty {
       FieldType::Ref(ref_info) => {
-        write_ref_index_opposite(tx, ref_info, id, ids, is_unique)?;
+        write_ref_index_opposite(tx, entity, schema, ref_info, id, ids, is_unique)?;
       },
       FieldType::RefList(ref_info) => {
-        write_ref_index_opposite(tx, ref_info, id, ids, is_unique)?;
+        write_ref_index_opposite(tx, entity, schema, ref_info, id, ids, is_unique)?;
       },
       _ => panic!("Trying to connect to non-Ref field")
     }
@@ -222,14 +226,14 @@ pub fn delete_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Sc
   Ok(())
 }
 
-fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>, check_unique: bool) -> Result<(), WriteIndexesError> {
+fn write_ref_index_opposite(tx: &WriteTransaction, entity: &Entity, schema: &Schema, ref_info: &RefInfo, id: &[u8], ids: &Vec<Vec<u8>>, check_unique: bool) -> Result<(), WriteIndexesError> {
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
     let mut tree = tx.require_tree(tree_name.as_bytes())?;
     for item_id in ids {
       if check_unique {
         if let Some(exists) = tree.prefix_keys(&item_id)?.next() {
           let exists_id = exists?[item_id.len()..].to_vec();
-          return Err(WriteIndexesError::UniqueViolation(exists_id))
+          return Err(WriteIndexesError::UniqueViolation(id_text(&exists_id, entity, schema)))
         }
       }
       insert_index(&mut tree, item_id, id)?;
@@ -241,10 +245,31 @@ fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8]
 
 #[derive(Debug,PartialEq)]
 pub enum WriteIndexesError {
-  UniqueViolation(Vec<u8>),
+  /// A one-to-one relation's target is already held: the id of the row holding it.
+  UniqueViolation(String),
   /// The id a link points at is not a row of the target model.
-  ForeignKeyViolation(Vec<u8>),
+  ForeignKeyViolation(String),
   Storage(StorageError)
+}
+
+impl std::fmt::Display for WriteIndexesError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      WriteIndexesError::UniqueViolation(id) => write!(f, "the relation is one-to-one and the row with id {} already holds it", id),
+      WriteIndexesError::ForeignKeyViolation(id) => write!(f, "no row with id {} to point at", id),
+      WriteIndexesError::Storage(e) => write!(f, "{}", e),
+    }
+  }
+}
+
+impl WriteIndexesError {
+  pub fn kind(&self) -> &'static str {
+    match self {
+      WriteIndexesError::UniqueViolation(_) => "unique",
+      WriteIndexesError::ForeignKeyViolation(_) => "foreign_key",
+      WriteIndexesError::Storage(_) => "internal",
+    }
+  }
 }
 
 impl From<canopydb::Error> for WriteIndexesError {
@@ -265,6 +290,44 @@ impl WriteIndexesError {
         WriteIndexesError::UniqueViolation(exists_id) => InsertError::UniqueViolation(field.full_name.clone(), exists_id),
         WriteIndexesError::ForeignKeyViolation(id) => InsertError::ForeignKeyViolation(field.full_name.clone(), id),
         WriteIndexesError::Storage(e) => InsertError::Storage(e),
+    }
+  }
+}
+impl std::fmt::Display for InsertError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      InsertError::ForeignKeyViolation(field, id) => write!(f, "{}: no row with id {} to point at", field, id),
+      InsertError::ItemNotFound => write!(f, "the row does not exist"),
+      InsertError::IdViolation(model, id) => write!(f, "{}: a row with id {} already exists", model, id),
+      InsertError::UniqueViolation(field, id) => write!(f, "{}: the value is already taken (by the row with id {})", field, id),
+      InsertError::DuplicateKey(key) => write!(f, "duplicate key {:?}", key),
+      InsertError::CannotChangePrimaryKey(field) => write!(f, "{}: a key field cannot be changed", field),
+      InsertError::ParentIdRequired => write!(f, "the parent's id is required"),
+      InsertError::IndexError(e) => write!(f, "{}", e),
+      InsertError::Storage(e) => write!(f, "{}", e),
+    }
+  }
+}
+impl std::error::Error for InsertError {}
+
+impl InsertError {
+  /// The class of the refusal, as clients see it (the `kind` of an error envelope or JSON error body):
+  /// `unique`, `foreign_key`, `duplicate_id`, `not_found`, `bad_request`, or `internal` for a storage fault.
+  pub fn kind(&self) -> &'static str {
+    match self {
+      InsertError::ForeignKeyViolation(..) => "foreign_key",
+      InsertError::UniqueViolation(..) => "unique",
+      InsertError::IdViolation(..) | InsertError::DuplicateKey(_) => "duplicate_id",
+      InsertError::ItemNotFound => "not_found",
+      InsertError::Storage(_) => "internal",
+      _ => "bad_request",
+    }
+  }
+  /// The field the refusal is about (`Model.field`), when it is about one.
+  pub fn field(&self) -> Option<&str> {
+    match self {
+      InsertError::ForeignKeyViolation(field, _) | InsertError::UniqueViolation(field, _) | InsertError::CannotChangePrimaryKey(field) => Some(field),
+      _ => None,
     }
   }
 }

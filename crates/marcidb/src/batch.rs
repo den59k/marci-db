@@ -33,11 +33,56 @@ pub enum BatchErrorKind {
 
 impl fmt::Display for BatchError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "batch op #{}: {:?}", self.index, self.kind)
+    write!(f, "batch op #{}: {}", self.index, self.kind)
   }
 }
 
 impl std::error::Error for BatchError {}
+
+impl BatchError {
+  /// The class of the failure — see `OpError::kind`.
+  pub fn kind(&self) -> &'static str { self.kind.kind() }
+  /// The field the failure is about, when it is about one.
+  pub fn field(&self) -> Option<&str> { self.kind.field() }
+}
+
+impl fmt::Display for BatchErrorKind {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      BatchErrorKind::NotAnObject => write!(f, "operation must be a JSON object"),
+      BatchErrorKind::MissingField(name) => write!(f, "missing required field '{}'", name),
+      BatchErrorKind::UnknownModel(m) => write!(f, "unknown model '{}'", m),
+      BatchErrorKind::UnknownAction(a) => write!(f, "unknown action '{}'", a),
+      BatchErrorKind::BadRef(r) => write!(f, "bad $ref: {}", r),
+      BatchErrorKind::Parse(e) => write!(f, "{}", e),
+      BatchErrorKind::Insert(e) => write!(f, "{}", e),
+      BatchErrorKind::Update(e) => write!(f, "{}", e),
+      BatchErrorKind::Delete(e) => write!(f, "{}", e),
+      BatchErrorKind::Storage(e) => write!(f, "{}", e),
+    }
+  }
+}
+
+impl BatchErrorKind {
+  pub fn kind(&self) -> &'static str {
+    match self {
+      BatchErrorKind::Storage(_) => "internal",
+      BatchErrorKind::UnknownModel(_) | BatchErrorKind::UnknownAction(_) => "not_found",
+      BatchErrorKind::Insert(e) => e.kind(),
+      BatchErrorKind::Update(e) => e.kind(),
+      BatchErrorKind::Delete(e) => e.kind(),
+      _ => "bad_request",
+    }
+  }
+  pub fn field(&self) -> Option<&str> {
+    match self {
+      BatchErrorKind::Insert(e) => e.field(),
+      BatchErrorKind::Update(e) => e.field(),
+      BatchErrorKind::Delete(e) => e.field(),
+      _ => None,
+    }
+  }
+}
 
 /// Executes a list of operations in a single atomic transaction.
 ///
@@ -190,25 +235,51 @@ impl fmt::Display for OpError {
       OpError::UnknownModel(m) => write!(f, "unknown model '{}'", m),
       OpError::UnknownAction(a) => write!(f, "unknown action '{}'", a),
       OpError::Parse(e) => write!(f, "{}", e),
-      OpError::Insert(e) => write!(f, "{:?}", e),
-      OpError::Update(e) => write!(f, "{:?}", e),
-      OpError::Delete(e) => write!(f, "{:?}", e),
+      OpError::Insert(e) => write!(f, "{}", e),
+      OpError::Update(e) => write!(f, "{}", e),
+      OpError::Delete(e) => write!(f, "{}", e),
       OpError::Query(e) => write!(f, "{:?}", e),
       OpError::Reindex(e) => write!(f, "{}", e),
       OpError::Journal(e) => write!(f, "{}", e),
-      OpError::Storage(e) => write!(f, "{:?}", e),
+      OpError::Storage(e) => write!(f, "{}", e),
     }
   }
 }
 
 impl std::error::Error for OpError {}
 
+impl OpError {
+  /// The class of the failure, as clients see it (the `kind` of the error envelope / JSON error body):
+  /// a constraint — `unique`, `foreign_key`, `restrict`, `duplicate_id` —, `not_found`, `bad_request`,
+  /// or `internal` for a storage fault.
+  pub fn kind(&self) -> &'static str {
+    if self.is_storage() { return "internal" }
+    match self {
+      OpError::UnknownModel(_) | OpError::UnknownAction(_) => "not_found",
+      OpError::Insert(e) => e.kind(),
+      OpError::Update(e) => e.kind(),
+      OpError::Delete(e) => e.kind(),
+      OpError::Journal(JournalError::NotFound { .. }) => "not_found",
+      _ => "bad_request",
+    }
+  }
+  /// The field the failure is about (`Model.field`), when it is about one.
+  pub fn field(&self) -> Option<&str> {
+    match self {
+      OpError::Insert(e) => e.field(),
+      OpError::Update(e) => e.field(),
+      OpError::Delete(e) => e.field(),
+      _ => None,
+    }
+  }
+}
+
 fn op_field<'a>(obj: &'a serde_json::Map<String, Value>, name: &'static str) -> Result<&'a Value, OpError> {
   obj.get(name).ok_or(OpError::MissingField(name))
 }
 
-fn op_parse_err<E: fmt::Debug>(e: E) -> OpError {
-  OpError::Parse(format!("{:?}", e))
+fn op_parse_err<E: fmt::Display>(e: E) -> OpError {
+  OpError::Parse(e.to_string())
 }
 
 /// Executes a single `{ model, action, ... }` operation against the DB, returning its result as a JSON
@@ -315,8 +386,8 @@ fn journal_args(obj: &serde_json::Map<String, Value>) -> Result<(&str, &serde_js
   Ok((name, args))
 }
 
-fn parse_err<E: fmt::Debug>(e: E) -> BatchErrorKind {
-  BatchErrorKind::Parse(format!("{:?}", e))
+fn parse_err<E: fmt::Display>(e: E) -> BatchErrorKind {
+  BatchErrorKind::Parse(e.to_string())
 }
 
 /// Parses the string assembled by the json layer back into a `Value`. Decoding always yields valid JSON

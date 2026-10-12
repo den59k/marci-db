@@ -31,29 +31,29 @@ fn write_unique_test() {
   let _passport_b = insert_data(&db, "Passport", json!({ "id": "123124", "user": &user_b }));
 
   let user_a_id = parse_id(&db.schema, db.get_model("User").unwrap(), &user_a).unwrap();
-  let user_b_id = parse_id(&db.schema, db.get_model("User").unwrap(), &user_b).unwrap();
+  let _user_b_id = parse_id(&db.schema, db.get_model("User").unwrap(), &user_b).unwrap();
 
-  let passport_a_id = parse_id(&db.schema, db.get_model("Passport").unwrap(), &passport_a).unwrap();
+  let _passport_a_id = parse_id(&db.schema, db.get_model("Passport").unwrap(), &passport_a).unwrap();
 
   {
     let entity = db.get_model("User").unwrap();
     let to_insert = parse_insert(&db.schema, entity, &json!({ "name": "Alice New", "email": "alice@test.test" })).unwrap();
     let resp = db.insert_item(entity, &to_insert);
-    assert_eq!(resp, Err(InsertError::UniqueViolation("User.email".to_string(), user_a_id.clone())));
+    assert_eq!(resp, Err(InsertError::UniqueViolation("User.email".to_string(), user_a["id"].to_string())));
   }
 
   {
     let entity = db.get_model("User").unwrap();
     let to_update = parse_update(&db.schema, entity, &json!({ "email": "bob@test.test" })).unwrap();
     let resp = db.update_item(entity, &user_a_id, &to_update);
-    assert_eq!(resp, Err(UpdateError::UniqueViolation("User.email".to_string(), user_b_id.clone())));
+    assert_eq!(resp, Err(UpdateError::UniqueViolation("User.email".to_string(), user_b["id"].to_string())));
   }
 
   {
     let entity = db.get_model("Passport").unwrap();
     let to_insert = parse_insert(&db.schema, entity, &json!({ "id": "111111", "user": &user_a })).unwrap();
     let resp = db.insert_item(entity, &to_insert);
-    assert_eq!(resp, Err(InsertError::UniqueViolation("Passport.user".to_string(), passport_a_id.clone())));
+    assert_eq!(resp, Err(InsertError::UniqueViolation("Passport.user".to_string(), passport_a["id"].to_string())));
   }
 
   {

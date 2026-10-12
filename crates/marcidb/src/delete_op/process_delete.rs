@@ -133,7 +133,7 @@ pub fn process_delete<'a>(
         }
       },
       DependencyActionType::Restrict => {
-        return Err(DeleteError::RestrictConstraints(dep.rev_field.full_name.clone(), item_ids))
+        return Err(DeleteError::RestrictConstraints(dep.rev_field.full_name.clone(), item_ids.iter().map(|i| crate::id_text(i, dep.rev_entity, &db.schema)).collect()))
       },
     }
   }

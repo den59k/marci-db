@@ -332,8 +332,40 @@ pub fn rev_id_list_field(schema: &Schema, ref_info: &crate::schema::RefInfo) -> 
 impl EncodeError {
     pub fn type_mismatch(field: &Field, expected: impl Into<String>) -> Self {
         EncodeError::TypeMismatch {
-            field: field.name.clone(),
+            field: field.full_name.clone(),
             expected: expected.into(),
         }
     }
 }
+
+impl std::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EncodeError::NotAnObject => write!(f, "expected a JSON object"),
+            EncodeError::MissingIdField(field) => write!(f, "{} is required (a row is named by its id)", field),
+            EncodeError::IdFieldIsNull(field) => write!(f, "{}: the id cannot be null", field),
+            EncodeError::TypeMismatch { field, expected } => write!(f, "{}: expected {}", field, expected),
+            EncodeError::TryWriteToVirtualField => write!(f, "cannot write to a back-reference"),
+            EncodeError::WrongEnumValue(field, value) => write!(f, "{}: '{}' is not a value of the enum", field, value),
+            EncodeError::UnavailableKeyField(field) => write!(f, "{}: this type cannot be a key", field),
+            EncodeError::FieldHasDynamicSize(field) => write!(f, "{}: a key field needs a fixed size", field),
+            EncodeError::UnavailableKeyFieldId(field) => write!(f, "{}: not a key field", field),
+            EncodeError::EmptyObject => write!(f, "the object is empty"),
+            EncodeError::VirtualFieldNotWritable(field) => write!(f, "{} is read-only (a back-reference)", field),
+            EncodeError::NotNumber(field) => write!(f, "{}: expected a number", field),
+            EncodeError::OnlyOneKeyExpected(field, value) => write!(f, "{}: one operator expected, got {}", field, value),
+            EncodeError::UnsupportedOperation(what) => write!(f, "{}", what),
+            EncodeError::NotAnArray => write!(f, "expected an array"),
+            EncodeError::OnlyBodyKeyAvailableToEdit(field) => write!(f, "{}: a key field cannot be updated", field),
+            EncodeError::RevFieldRequired(field) => write!(f, "{}: the relation needs a back-reference (@bind)", field),
+            EncodeError::NestedWriteNotSupported { field, op } => write!(f, "{}: {} is not supported on a reference; link a row with $connect", field, op),
+            EncodeError::MissingRequiredField(field) => write!(f, "{} is required", field),
+            EncodeError::NullNotAllowed(field) => write!(f, "{}: null is not allowed", field),
+            EncodeError::MutateViaListSide(field, list_field) => write!(f, "{}: change the membership through {} (the @list side)", field, list_field),
+            EncodeError::OwnedRelationOnly { field, op } => write!(f, "{}: {} creates owned children; an independent model is linked with $connect", field, op),
+            EncodeError::LinkedRelationOnly { field, op } => write!(f, "{}: {} links independent rows; a struct child is created through its parent", field, op),
+            EncodeError::FixedSizeList(field) => write!(f, "{}: a fixed-size list cannot change its length", field),
+        }
+    }
+}
+impl std::error::Error for EncodeError {}

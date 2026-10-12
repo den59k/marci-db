@@ -172,7 +172,7 @@ Node doesn't support text import attributes.
 - `reindexAll()` — rebuild every model's `@custom` (vector / full-text) indexes.
 - `close()` — release the database (idempotent). `closed` — boolean.
 
-Errors surface as `MarciEmbeddedError` with a `.kind` of `bad_request | not_found | internal`.
+Errors surface as `MarciEmbeddedError`: `.kind` is what to switch on — a constraint (`unique`, `foreign_key`, `restrict`, `duplicate_id`), `not_found`, `bad_request` or `internal` —, `.field` the `Model.field` a constraint is about (`"Order.dish"`), the message is for a person (`Order.dish: no row with id "nothing" to point at`).
 
 Notes:
 - Always `await` `$sync` / `$migrate` — they return promises; an un-awaited rejection on error is

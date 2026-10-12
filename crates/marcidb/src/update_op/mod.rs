@@ -40,12 +40,13 @@ pub enum ListOp {
 #[derive(Debug,PartialEq)]
 pub enum UpdateError {
   ItemNotFound,
-  UniqueViolation(String, Vec<u8>),
+  /// A `@unique` value is taken: the field's full name and the id of the row holding it (the client's form of the id).
+  UniqueViolation(String, String),
   DeleteError(DeleteError),
   InsertError(InsertError),
   WriteIndexesError(WriteIndexesError),
   /// A relation field was pointed at a row that does not exist: the field's full name and the id.
-  ForeignKeyViolation(String, Vec<u8>),
+  ForeignKeyViolation(String, String),
   /// A live `@custom` index hook (e.g. full-text `on_update`) failed while maintaining the index.
   IndexError(ProviderError),
   /// The relation operation is not implemented yet.
@@ -136,4 +137,46 @@ pub enum UpdateRelationOp<'a> {
   ConnectUniqueList(Vec<Vec<u8>>),
   /// `@list` relation: removes every occurrence of the given ids
   DisconnectList(Vec<Vec<u8>>),
+}
+impl std::fmt::Display for UpdateError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      UpdateError::ItemNotFound => write!(f, "the row does not exist"),
+      UpdateError::UniqueViolation(field, id) => write!(f, "{}: the value is already taken (by the row with id {})", field, id),
+      UpdateError::DeleteError(e) => write!(f, "{}", e),
+      UpdateError::InsertError(e) => write!(f, "{}", e),
+      UpdateError::WriteIndexesError(e) => write!(f, "{}", e),
+      UpdateError::ForeignKeyViolation(field, id) => write!(f, "{}: no row with id {} to point at", field, id),
+      UpdateError::IndexError(e) => write!(f, "{}", e),
+      UpdateError::Unsupported(what) => write!(f, "not supported: {}", what),
+      UpdateError::IncrementOutOfRange(field) => write!(f, "{}: the increment takes the value out of the field's range", field),
+      UpdateError::Storage(e) => write!(f, "{}", e),
+    }
+  }
+}
+impl std::error::Error for UpdateError {}
+
+impl UpdateError {
+  /// The class of the refusal, as clients see it — see `InsertError::kind`.
+  pub fn kind(&self) -> &'static str {
+    match self {
+      UpdateError::ItemNotFound => "not_found",
+      UpdateError::UniqueViolation(..) => "unique",
+      UpdateError::ForeignKeyViolation(..) => "foreign_key",
+      UpdateError::DeleteError(e) => e.kind(),
+      UpdateError::InsertError(e) => e.kind(),
+      UpdateError::WriteIndexesError(e) => e.kind(),
+      UpdateError::Storage(_) => "internal",
+      _ => "bad_request",
+    }
+  }
+  /// The field the refusal is about (`Model.field`), when it is about one.
+  pub fn field(&self) -> Option<&str> {
+    match self {
+      UpdateError::UniqueViolation(field, _) | UpdateError::ForeignKeyViolation(field, _) | UpdateError::IncrementOutOfRange(field) => Some(field),
+      UpdateError::DeleteError(e) => e.field(),
+      UpdateError::InsertError(e) => e.field(),
+      _ => None,
+    }
+  }
 }
