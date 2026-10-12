@@ -6,7 +6,8 @@ use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, ind
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
-  ForeignKeyViolation(String, u64),
+  /// A relation field names a row that does not exist: the field's full name and the id it pointed at.
+  ForeignKeyViolation(String, Vec<u8>),
   ItemNotFound,
   IdViolation(String, Vec<u8>),
   UniqueViolation(String, Vec<u8>),
@@ -135,7 +136,21 @@ fn insert_index(tree: &mut Tree, left: &[u8], right: &[u8]) -> Result<(), canopy
   Ok(())
 }
 
+/// Links `id` to each of `ids` in the relation's index trees — the one path every link takes (insert,
+/// `$connect`, `$set` of a link list, `@list`), so this is where the foreign key is checked: a target
+/// that is not a row of its model is refused, and nothing of the write survives (the transaction rolls
+/// back). The check sees rows written earlier in the same transaction, so a batch inserts the
+/// referenced row first.
 pub fn write_ref_indexes(tx: &WriteTransaction, ref_info: &RefInfo, schema: &Schema, id: &[u8], ids: &Vec<Vec<u8>>) -> Result<(), WriteIndexesError> {
+  {
+    let target = tx.require_tree(schema.models[ref_info.model_index].name.as_bytes())?;
+    for item_id in ids {
+      if target.get(item_id)?.is_none() {
+        return Err(WriteIndexesError::ForeignKeyViolation(item_id.clone()));
+      }
+    }
+  }
+
   if let RefBinding::IndexTree(tree_name) = &ref_info.binding {
     let mut tree = tx.require_tree(tree_name.as_bytes())?;
     for item_id in ids {
@@ -227,6 +242,8 @@ fn write_ref_index_opposite(tx: &WriteTransaction, ref_info: &RefInfo, id: &[u8]
 #[derive(Debug,PartialEq)]
 pub enum WriteIndexesError {
   UniqueViolation(Vec<u8>),
+  /// The id a link points at is not a row of the target model.
+  ForeignKeyViolation(Vec<u8>),
   Storage(StorageError)
 }
 
@@ -246,6 +263,7 @@ impl WriteIndexesError {
   fn to_insert_error(self, field: &Field) -> InsertError {
     match self {
         WriteIndexesError::UniqueViolation(exists_id) => InsertError::UniqueViolation(field.full_name.clone(), exists_id),
+        WriteIndexesError::ForeignKeyViolation(id) => InsertError::ForeignKeyViolation(field.full_name.clone(), id),
         WriteIndexesError::Storage(e) => InsertError::Storage(e),
     }
   }

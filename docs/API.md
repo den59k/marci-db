@@ -89,6 +89,11 @@ policy** — writing the attribute only overrides the default:
 optional relation — on a required one it is a schema error, since nulling the field would leave the row
 violating its own schema.
 
+A relation must point at a row that exists: an insert or update whose relation field names an id with no
+row behind it (`author: { id: 999 }`, `tags: { $connect: [{ id: 999 }] }`, a ref in a composite key) is
+rejected with `ForeignKeyViolation(<Model.field>, <id>)` and nothing of the write is kept. Inside a
+transaction the referenced row may be one written earlier in the same transaction — insert it first.
+
 `@onDelete` belongs on the side that **holds** the reference. On a back-reference list (`Model[]`) it is a
 schema error — a list's members are governed by their own foreign key.
 

@@ -44,6 +44,8 @@ pub enum UpdateError {
   DeleteError(DeleteError),
   InsertError(InsertError),
   WriteIndexesError(WriteIndexesError),
+  /// A relation field was pointed at a row that does not exist: the field's full name and the id.
+  ForeignKeyViolation(String, Vec<u8>),
   /// A live `@custom` index hook (e.g. full-text `on_update`) failed while maintaining the index.
   IndexError(ProviderError),
   /// The relation operation is not implemented yet.
@@ -53,6 +55,16 @@ pub enum UpdateError {
   /// storing a wrapped value.
   IncrementOutOfRange(String),
   Storage(StorageError)
+}
+
+impl UpdateError {
+  /// The error of linking rows through `field`, with the field's name where the message needs it.
+  pub(crate) fn link(e: WriteIndexesError, field: &Field) -> UpdateError {
+    match e {
+      WriteIndexesError::ForeignKeyViolation(id) => UpdateError::ForeignKeyViolation(field.full_name.clone(), id),
+      e => UpdateError::WriteIndexesError(e),
+    }
+  }
 }
 
 impl From<canopydb::Error> for UpdateError {
