@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema, UniqueGroup}, utils::get_data};
+use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, FieldCompareRef, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema, UniqueGroup}, utils::get_data};
 
 /// A row's key in a unique group's tree, without the row id: each part encoded as that field's value index
 /// encodes it (fixed-size parts as they are, variable ones with a terminator), in field order. None when a
@@ -293,6 +293,7 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
       let best = items.iter()
         .filter_map(|f| generate_prefix_scored(entity, f))
         .chain(fuse_range_bounds(items))
+        .chain(unique_group_prefix(entity, items))
         .min_by_key(|(_, score)| *score);
 
       match (id_prefix, best) {
@@ -352,6 +353,39 @@ fn generate_prefix_scored<'a>(entity: &'a Entity, where_op: &Where) -> Option<(P
   }
 }
 
+/// An equality on every field of a `@unique(<name>)` group (`{ user: { id: 1 }, post: { id: 2 } }`) is one
+/// point lookup in the group's tree — the row it names, as a `@unique` field's equality is. A relation
+/// part contributes when its condition names the target by its id. The key is the parts in field order,
+/// each as the group's tree encodes it (`encode_unique_group` on the write side).
+fn unique_group_prefix<'a>(entity: &'a Entity, items: &[Where<'_>]) -> Option<(PrefixKey<'a>, u8)> {
+  entity.unique_groups.iter().find_map(|group| {
+    let mut key = Vec::new();
+    for (fi, part) in group.parts.iter() {
+      let field = &entity.fields[*fi];
+      let value = items.iter().find_map(|w| match w {
+        Where::Field(f, FieldCompare::Eq(v)) if std::ptr::eq(*f, field) => Some(v.clone()),
+        Where::Field(f, FieldCompare::Ref(target, _, FieldCompareRef::Eq(filter))) if std::ptr::eq(*f, field) => id_named_by(target, filter),
+        _ => None,
+      })?;
+      key.extend(encode_index(field, part, &value));
+    }
+    Some((PrefixKey::IndexRange { start: Some(key.clone()), end: increase_bit(&key), tree_name: group.tree_name.clone(), fixed_size: Some(key.len()) }, SCORE_UNIQUE_EQ))
+  })
+}
+
+/// The id a filter names exactly (`{ id: 1 }`, or every part of a composite key), as the key bytes.
+fn id_named_by(entity: &Entity, filter: &Where<'_>) -> Option<Vec<u8>> {
+  let pairs: Vec<(&Field, &Vec<u8>)> = match filter {
+    Where::Field(f, FieldCompare::Eq(v)) => vec![(*f, v)],
+    Where::And(items) => items.iter().filter_map(|w| match w { Where::Field(f, FieldCompare::Eq(v)) => Some((*f, v)), _ => None }).collect(),
+    _ => return None,
+  };
+  match try_to_generate_id_prefix(entity, pairs) {
+    Some(PrefixKey::Id(id)) => Some(id),
+    _ => None,
+  }
+}
+
 pub fn try_to_generate_id_prefix<'a>(entity: &Entity, items: Vec<(&Field,&Vec<u8>)>) -> Option<PrefixKey<'a>> {
   let mut prefix_value = vec![];
 
@@ -373,4 +407,54 @@ pub fn try_to_generate_id_prefix<'a>(entity: &Entity, items: Vec<(&Field,&Vec<u8
     return None
   }
   return Some(PrefixKey::IdPrefix(prefix_value))
+}
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+  use crate::{parse_query, parse_schema, query_op::PrefixKey};
+
+  const SCHEMA: &str = "
+    model User {
+      name String
+    }
+    model Post {
+      title String
+    }
+    model Like {
+      user  User    @unique(pair)
+      post  Post    @unique(pair)
+      kind  String  @index
+    }
+    model Booking {
+      master  String  @unique(slot)
+      at      Int     @unique(slot)
+    }
+  ";
+
+  fn tree_of(prefix: &Option<PrefixKey>) -> Option<String> {
+    match prefix { Some(PrefixKey::IndexRange { tree_name, .. }) => Some(tree_name.clone()), _ => None }
+  }
+
+  #[test]
+  fn an_equality_on_every_part_of_a_unique_group_is_a_lookup_in_its_tree() {
+    let schema = parse_schema(SCHEMA);
+    let like = schema.models.iter().find(|m| m.name == "Like").unwrap();
+    let booking = schema.models.iter().find(|m| m.name == "Booking").unwrap();
+
+    // relation parts named by their id; the plain @index on `kind` loses to the unique lookup
+    let q = parse_query(&schema, like, &json!({ "$where": { "user": { "id": 1 }, "post": { "id": 2 }, "kind": "heart" } })).unwrap();
+    assert_eq!(tree_of(&q.prefix_key), Some("unique_Like.pair".to_string()));
+    // one part alone: not the group's tree
+    let q = parse_query(&schema, like, &json!({ "$where": { "user": { "id": 1 } } })).unwrap();
+    assert_ne!(tree_of(&q.prefix_key), Some("unique_Like.pair".to_string()));
+    // a relation part named by something other than its id: a scan of the target, not the group
+    let q = parse_query(&schema, like, &json!({ "$where": { "user": { "name": "Alice" }, "post": { "id": 2 } } })).unwrap();
+    assert_ne!(tree_of(&q.prefix_key), Some("unique_Like.pair".to_string()));
+
+    // scalar parts
+    let q = parse_query(&schema, booking, &json!({ "$where": { "master": "Ann", "at": 10 } })).unwrap();
+    assert_eq!(tree_of(&q.prefix_key), Some("unique_Booking.slot".to_string()));
+    let q = parse_query(&schema, booking, &json!({ "$where": { "master": "Ann", "at": { "$gt": 10 } } })).unwrap();
+    assert_eq!(tree_of(&q.prefix_key), None);
+  }
 }
