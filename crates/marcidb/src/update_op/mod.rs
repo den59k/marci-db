@@ -1,6 +1,6 @@
-mod process_update;
+pub mod process_update;
 
-use crate::{Field, InsertError, ProviderError, StorageError, delete_op::{DeleteError, DeleteOp}, num_utils::NumberDelta, schema::{Entity, RefInfo}, write_op::{WriteIndexesError, WriteOp}};
+use crate::{Field, InsertError, ProviderError, StorageError, delete_op::{DeleteError, DeleteOp}, json_parsers::EncodeError, num_utils::NumberDelta, schema::{Entity, RefInfo}, write_op::{WriteIndexesError, WriteOp}};
 pub use process_update::process_update;
 
 #[derive(Debug)]
@@ -51,6 +51,11 @@ pub enum UpdateError {
   IndexError(ProviderError),
   /// The relation operation is not implemented yet.
   Unsupported(&'static str),
+  /// Unlinking a child through the `@bind` side would leave it without its parent: the child's field
+  /// (`Post.author`) and the list it was unlinked from (`User.posts`).
+  RequiredRelation(String, String),
+  /// A write the engine built for a related row was refused by its parser.
+  Encode(EncodeError),
   /// An `$increment` would take the field outside its range — a negative result on an unsigned field, or
   /// past the type's min/max. The write is rejected and the whole transaction rolls back, rather than
   /// storing a wrapped value.
@@ -150,6 +155,8 @@ impl std::fmt::Display for UpdateError {
       UpdateError::IndexError(e) => write!(f, "{}", e),
       UpdateError::Unsupported(what) => write!(f, "not supported: {}", what),
       UpdateError::IncrementOutOfRange(field) => write!(f, "{}: the increment takes the value out of the field's range", field),
+      UpdateError::RequiredRelation(child_field, list_field) => write!(f, "{}: cannot unlink from {} — {} is required; delete the row or point it at another", list_field, list_field, child_field),
+      UpdateError::Encode(e) => write!(f, "{}", e),
       UpdateError::Storage(e) => write!(f, "{}", e),
     }
   }
@@ -173,7 +180,7 @@ impl UpdateError {
   /// The field the refusal is about (`Model.field`), when it is about one.
   pub fn field(&self) -> Option<&str> {
     match self {
-      UpdateError::UniqueViolation(field, _) | UpdateError::ForeignKeyViolation(field, _) | UpdateError::IncrementOutOfRange(field) => Some(field),
+      UpdateError::UniqueViolation(field, _) | UpdateError::ForeignKeyViolation(field, _) | UpdateError::IncrementOutOfRange(field) | UpdateError::RequiredRelation(_, field) => Some(field),
       UpdateError::DeleteError(e) => e.field(),
       UpdateError::InsertError(e) => e.field(),
       _ => None,

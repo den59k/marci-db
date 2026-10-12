@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, id_text, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, id_text, update_op::{UpdateError, process_update::{bound_child_field, relink_children}}, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
@@ -19,6 +19,8 @@ pub enum InsertError {
   ParentIdRequired,
   /// A live `@custom` index hook (e.g. full-text `on_insert`) failed while maintaining the index.
   IndexError(ProviderError),
+  /// Linking the new row's children through a `@bind` list failed (their own field is written).
+  Relation(Box<UpdateError>),
   Storage(StorageError)
 }
 
@@ -123,7 +125,11 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
         }
       }
       WriteRelation::Connect { ref_info, ids, field, .. } => {
-        write_ref_indexes(tx, entity, ref_info, &db.schema, &write_id, &ids).map_err(|e| e.to_insert_error(field))?;
+        if let Some(child_field) = bound_child_field(&db.schema, field, ref_info) {
+          relink_children(tx, db, entity, &write_id, field, ref_info, child_field, ids, true).map_err(|e| InsertError::Relation(Box::new(e)))?;
+        } else {
+          write_ref_indexes(tx, entity, ref_info, &db.schema, &write_id, &ids).map_err(|e| e.to_insert_error(field))?;
+        }
       }
     }
   }
@@ -304,6 +310,7 @@ impl std::fmt::Display for InsertError {
       InsertError::CannotChangePrimaryKey(field) => write!(f, "{}: a key field cannot be changed", field),
       InsertError::ParentIdRequired => write!(f, "the parent's id is required"),
       InsertError::IndexError(e) => write!(f, "{}", e),
+      InsertError::Relation(e) => write!(f, "{}", e),
       InsertError::Storage(e) => write!(f, "{}", e),
     }
   }
@@ -319,6 +326,7 @@ impl InsertError {
       InsertError::UniqueViolation(..) => "unique",
       InsertError::IdViolation(..) | InsertError::DuplicateKey(_) => "duplicate_id",
       InsertError::ItemNotFound => "not_found",
+      InsertError::Relation(e) => e.kind(),
       InsertError::Storage(_) => "internal",
       _ => "bad_request",
     }
@@ -327,6 +335,7 @@ impl InsertError {
   pub fn field(&self) -> Option<&str> {
     match self {
       InsertError::ForeignKeyViolation(field, _) | InsertError::UniqueViolation(field, _) | InsertError::CannotChangePrimaryKey(field) => Some(field),
+      InsertError::Relation(e) => e.field(),
       _ => None,
     }
   }

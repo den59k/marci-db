@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{ListOp, UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, decode_primitive_list, encode_id_list, encode_primitive_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, id_text, json_parsers::{EncodeError, parse_update, decode_id}, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{ListOp, UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, decode_primitive_list, encode_id_list, encode_primitive_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -62,10 +62,15 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           // Break the single-ref relation without deleting the related object. The forward FK (body
           // field) is already nulled/overwritten by the `update_fields` pass above; here we only tear
           // down the index entries for the previously-connected object. `data` still holds the
-          // pre-update body, so the old target id is recoverable.
+          // pre-update body, so the old target id is recoverable. On the `@bind` side of a one-to-one
+          // the link is the other row's field: that row is unlinked (its own update clears the tree).
           let ids: Vec<Vec<u8>> = get_id_from_ref_info(tx, entity, update_ref.field, update_ref.ref_info, id, &data, &db.schema)?
             .into_iter().collect();
-          delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
+          if let Some(child_field) = bound_child_field(&db.schema, update_ref.field, update_ref.ref_info) {
+            relink_children(tx, db, entity, id, update_ref.field, update_ref.ref_info, child_field, &ids, false)?;
+          } else {
+            delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
+          }
         },
         UpdateRelationOp::Create(write_op) => {
           process_write(tx, update_ref.st, write_op, db, Some(id)).map_err(|e| UpdateError::InsertError(e))?;
@@ -99,10 +104,18 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           }
         },
         UpdateRelationOp::Connect(item_ids) => {
-          write_ref_indexes(tx, entity, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::link(e, update_ref.field))?
+          if let Some(child_field) = bound_child_field(&db.schema, update_ref.field, update_ref.ref_info) {
+            relink_children(tx, db, entity, id, update_ref.field, update_ref.ref_info, child_field, item_ids, true)?;
+          } else {
+            write_ref_indexes(tx, entity, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::link(e, update_ref.field))?
+          }
         },
         UpdateRelationOp::Disconnect(item_ids) => {
-          delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
+          if let Some(child_field) = bound_child_field(&db.schema, update_ref.field, update_ref.ref_info) {
+            relink_children(tx, db, entity, id, update_ref.field, update_ref.ref_info, child_field, item_ids, false)?;
+          } else {
+            delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, item_ids).map_err(|e| UpdateError::WriteIndexesError(e))?;
+          }
         },
         UpdateRelationOp::SetLinks(item_ids) => {
           // Replace link membership: diff against the currently-linked ids, then disconnect/connect
@@ -114,11 +127,16 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
           };
           let removed: Vec<Vec<u8>> = current.iter().filter(|i| !item_ids.contains(i)).cloned().collect();
           let added: Vec<Vec<u8>> = item_ids.iter().filter(|i| !current.contains(i)).cloned().collect();
-          if !removed.is_empty() {
-            delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &removed).map_err(|e| UpdateError::WriteIndexesError(e))?;
-          }
-          if !added.is_empty() {
-            write_ref_indexes(tx, entity, update_ref.ref_info, &db.schema, id, &added).map_err(|e| UpdateError::link(e, update_ref.field))?;
+          if let Some(child_field) = bound_child_field(&db.schema, update_ref.field, update_ref.ref_info) {
+            relink_children(tx, db, entity, id, update_ref.field, update_ref.ref_info, child_field, &removed, false)?;
+            relink_children(tx, db, entity, id, update_ref.field, update_ref.ref_info, child_field, &added, true)?;
+          } else {
+            if !removed.is_empty() {
+              delete_ref_indexes(tx, update_ref.ref_info, &db.schema, id, &removed).map_err(|e| UpdateError::WriteIndexesError(e))?;
+            }
+            if !added.is_empty() {
+              write_ref_indexes(tx, entity, update_ref.ref_info, &db.schema, id, &added).map_err(|e| UpdateError::link(e, update_ref.field))?;
+            }
           }
         },
         UpdateRelationOp::UpdateItems(items) => {
@@ -415,6 +433,51 @@ fn get_id_from_ref_info<'a>(tx: &Transaction, entity: &Entity, field: &Field, re
     },
     RefBinding::IdList { .. } => panic!("A to-one relation cannot use an IdList binding"),
   }
+}
+
+/// The holder's own relation field when `field` is the `@bind` side of a relation the other row stores:
+/// a one-to-many's list (`User.posts Post[] @bind(Post.author)`) or a one-to-one's virtual ref
+/// (`User.passport Passport? @bind(Passport.user)`). That side stores nothing itself — the link IS the
+/// other row's `author` / `user`. A many-to-many (both sides lists) and a `@list` have no such field and
+/// keep their index trees.
+pub fn bound_child_field<'a>(schema: &'a Schema, field: &Field, ref_info: &RefInfo) -> Option<&'a Field> {
+  if !matches!(field.location, FieldLocation::Virtual) { return None }
+  let rev_idx = ref_info.rev_field_idx?;
+  let child_field = &schema.models[ref_info.model_index].fields[rev_idx];
+  match (&child_field.ty, &child_field.location) {
+    (crate::schema::FieldType::Ref(_), FieldLocation::Body { .. } | FieldLocation::Key { .. }) => Some(child_field),
+    _ => None,
+  }
+}
+
+/// Links (`attach`) or unlinks the other rows through the `@bind` side (a one-to-many's list, a one-to-one's
+/// virtual ref): each row's own relation field is written, through its update, so its body, its indexes
+/// and the reverse tree agree — before this, a `$connect` on `User.posts` wrote the tree alone and
+/// `Post.author` stayed null.
+/// A child that does not exist is a foreign-key violation of the list field; a required child field
+/// cannot be unlinked (the child would be left without its parent); a field in the child's key cannot
+/// change at all.
+pub fn relink_children(tx: &WriteTransaction, db: &MarciDB, parent: &Entity, parent_id: &[u8], list_field: &Field, ref_info: &RefInfo, child_field: &Field, child_ids: &[Vec<u8>], attach: bool) -> Result<(), UpdateError> {
+  if child_ids.is_empty() { return Ok(()) }
+  let child_entity = &db.schema.models[ref_info.model_index];
+  if matches!(child_field.location, FieldLocation::Key { .. }) {
+    return Err(UpdateError::Encode(EncodeError::OnlyBodyKeyAvailableToEdit(child_field.full_name.clone())));
+  }
+  if !attach && !child_field.nullable {
+    return Err(UpdateError::RequiredRelation(child_field.full_name.clone(), list_field.full_name.clone()));
+  }
+  let target: serde_json::Value = if attach {
+    serde_json::json!({ "$connect": serde_json::from_str::<serde_json::Value>(&decode_id(parent_id, parent, &db.schema)).expect("decode_id is JSON") })
+  } else {
+    serde_json::Value::Null
+  };
+  let op = parse_update(&db.schema, child_entity, &serde_json::json!({ child_field.name.clone(): target })).map_err(UpdateError::Encode)?;
+  for child_id in child_ids {
+    if !process_update(tx, child_entity, child_id, &op, db)? {
+      return Err(UpdateError::ForeignKeyViolation(list_field.full_name.clone(), id_text(child_id, child_entity, &db.schema)));
+    }
+  }
+  Ok(())
 }
 
 /// Fetches the ids of related objects

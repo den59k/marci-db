@@ -27,6 +27,7 @@ pub mod row_codec_fuzz_tests;
 pub mod journal_tests;
 pub mod foreign_key_tests;
 pub mod error_text_tests;
+pub mod bind_list_tests;
 
 use std::str::FromStr;
 

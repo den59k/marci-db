@@ -367,6 +367,8 @@ await db.session.where({ expiresAt: { $lt: Date.now() } }).deleteMany()
 
 A relation-list field takes **one object**, not a list of them: `{ $connect: …, $remove: … }` applies every operator it contains in a single update. A primitive-array field takes one operator per update (or a bare array, which replaces the value).
 
+Linking through the `@bind` side — a one-to-many's list (`user.update({ posts: { $connect: [post] } })`, or `posts: [{ id }]` on insert) or a one-to-one's virtual ref (`user.update({ passport: { $connect: p } })`) — writes the other row's own field (`post.author = user`), so both sides always agree: a post connected to another user moves, a passport connected to another user is released by the old one, `$remove` / `null` nulls an optional field and is refused on a required one (delete the row or point it at another), and a relation that is part of the other row's key cannot be relinked at all.
+
 ### Relation & array operators
 
 Every operator belongs to one of two families, and a field's kind decides which family it speaks. **Content ops** treat the elements as data the parent owns: primitive values, or `struct` children that live and die with the parent. **Link ops** treat the elements as references to independent rows: they change the relation, never the rows themselves. An operator from the wrong family is rejected — by the TypeScript types and by the engine.
