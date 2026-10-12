@@ -174,7 +174,7 @@ export type Op<T> = PromiseLike<T> & { readonly [__op]: T }
 
 // A transport-neutral operation descriptor and the pluggable transport that runs it. The HTTP transport
 // is selected by passing a URL string; marcidb-embedded provides an in-process FFI transport.
-export type MarciOp = { model: string, action: string, query?: any, data?: any, id?: any, journal?: JournalArgs }
+export type MarciOp = { model: string, action: string, query?: any, data?: any, id?: any, key?: any, onInsert?: any, journal?: JournalArgs }
 /** The arguments of a journal action (`$journalOpen` / `$journalRead` / `$journalDrop`). `wait` is in seconds. */
 export type JournalArgs = { name: string, on?: readonly JournalOp[], after?: number, limit?: number, wait?: number }
 export type MarciTransport = {
@@ -255,7 +255,16 @@ export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends Promise
   aggregate<A extends T["aggregate"]>(query: A): Op<AggregateResult<T["model"], A>> & Sub<T["name"], NoInfer<A>>
 
   insert(data: T["insert"]): Op<T["id"]>
+  /** The new row by `select`'s shape — its defaults, dates and files as stored: one call, nothing to read back. */
+  insert<S extends T["query"]>(data: T["insert"], options: { select: S }): Promise<Rows<T, S>>
   update(id: IdArg<T["id"]>, data: T["update"]): Op<void>
+  /** Writes the row `key` names — the id, or the fields of ONE unique index (a `@unique` field, all the fields of
+   *  a `@unique(<name>)` group): an update of `data` when it exists, an insert of key + data when not. `data` is
+   *  in the insert form (plain values, `{ id }` for a relation; no `$` operators). `onInsert` adds fields used
+   *  only when the row is created. Resolves to the id, like `insert`. */
+  upsert<K extends Partial<T["insert"]> | T["id"]>(key: K, data: Omit<T["insert"], keyof K>, options?: { onInsert?: Partial<T["insert"]> }): Op<T["id"]>
+  /** The row written, by `select`'s shape — as stored, whichever path the upsert took. */
+  upsert<K extends Partial<T["insert"]> | T["id"], S extends T["query"]>(key: K, data: Omit<T["insert"], keyof K>, options: { onInsert?: Partial<T["insert"]>, select: S }): Promise<Rows<T, S>>
   /** Applies `data` to every row the chain's `where` matches (all rows without one); resolves to the number of rows. */
   updateMany(data: T["update"]): Op<number>
   /** @deprecated pass the filter through the chain: `db.user.where(w).updateMany(data)` (removed in the next minor). */
@@ -317,6 +326,9 @@ export type QueryLayerOptions = {
   run(op: MarciOp): Promise<any>;
   /** Hook for `insert` payloads (the lecodes SDK generates uuid ids here). */
   prepareInsert?(model: string, data: any): any;
+  /** Hook for the `onInsert` part of an `upsert` — the fields used only when the row is created (the lecodes SDK
+   *  puts a uuid id here). Receives what the caller gave (or undefined), returns what is sent. */
+  prepareUpsert?(model: string, onInsert: any): any;
 };
 
 const AGGREGATE_KEYS = ["$count", "$sum", "$avg", "$min", "$max"];
@@ -427,6 +439,10 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
         return w ? { $where: w } : {};
       };
       const findMany = (): MarciOp => ({ model, action: "findMany", query: build() });
+      // the row as stored, read back by the id the engine answered — a plain promise: a read is not a $transaction member
+      const readBack = (written: Op<any>, select: Record<string, any>) =>
+        written.then((id: any) => run({ model, action: "findFirst", query: resolveShape(model, { ...select, $where: id }) }))
+          .then((row: any) => { if (row === null) throw new Error(`marcidb: ${model}: the row just written is gone`); return row; });
       return {
         get __op() { return findMany(); },
         get __select() { return build(); },
@@ -451,8 +467,16 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
           return Object.assign(op({ model, action: "aggregate", query: q }), { __select: q });
         },
 
-        insert: (data: any) => op({ model, action: "insert", data: options.prepareInsert ? options.prepareInsert(model, data) : data }),
+        insert: (data: any, extra?: { select?: Record<string, any> }) => {
+          const inserted = op({ model, action: "insert", data: options.prepareInsert ? options.prepareInsert(model, data) : data });
+          return extra?.select ? readBack(inserted, extra.select) : inserted;
+        },
         update: (id: any, data: any) => op({ model, action: "update", id: idObject(model, id), data }),
+        upsert: (key: any, data: any, o?: { onInsert?: any, select?: Record<string, any> }) => {
+          const onInsert = options.prepareUpsert ? options.prepareUpsert(model, o?.onInsert) : o?.onInsert;
+          const written = op({ model, action: "upsert", key, data, ...(onInsert !== undefined ? { onInsert } : {}) });
+          return o?.select ? readBack(written, o.select) : written;
+        },
         // `updateMany(data)`; the deprecated `updateMany(query, data)` form is told apart by arity
         updateMany: (a: any, b?: any) => (b === undefined
           ? op({ model, action: "updateMany", query: whereOnly(), data: a })

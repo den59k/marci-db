@@ -59,6 +59,14 @@ fn a_refused_write_names_the_field_and_the_id() {
     assert_eq!(e.to_string(), "Order.dish: rows 1 still point at this one; delete or repoint them first");
     assert_eq!((e.kind(), e.field()), ("restrict", Some("Order.dish")));
     assert!(matches!(e, DeleteError::RestrictConstraints(..)));
+
+    // a row that does not exist: an update or a delete is refused, never silently accepted
+    let e = try_update(&db, "User", &json!({ "id": 999 }), json!({ "name": "Nobody" })).unwrap_err();
+    assert_eq!((e.to_string().as_str(), e.kind()), ("the row does not exist", "not_found"));
+    assert!(matches!(e, UpdateError::ItemNotFound));
+    let e = try_delete(&db, "Dish", json!({ "id": "nothing" })).unwrap_err();
+    assert_eq!((e.to_string().as_str(), e.kind()), ("the row does not exist", "not_found"));
+    assert!(matches!(e, DeleteError::ItemNotFound));
 }
 
 #[test]

@@ -287,6 +287,23 @@ pub async fn handle_update(req: Request<hyper::body::Incoming>, item_id: String,
     Ok(ok_response(Vec::new()))
 }
 
+/// `POST /{db}/{model}/upsert` with a body of `{ key, data, onInsert? }` — the row `key` names (the id, or the
+/// fields of one unique index) is updated with `data`, or inserted as key + data (+ `onInsert`); responds with
+/// the id object, like `insert`.
+pub async fn handle_upsert(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {
+    let json_val = parse_json_body(req).await?;
+
+    let id = blocking(move || with_db(&ctx, &db_name, |db| {
+        let entity = model(db, &model_name)?;
+        let key = json_val.get("key").ok_or_else(|| ApiError::BadRequest("Field 'key' required".to_string()))?;
+        let data = json_val.get("data").ok_or_else(|| ApiError::BadRequest("Field 'data' required".to_string()))?;
+        let id = db.upsert_item(entity, key, data, json_val.get("onInsert"))?;
+        Ok(decode_id(&id, entity, &db.schema).to_string())
+    })).await?;
+
+    Ok(ok_response(id))
+}
+
 /// `POST /{db}/{model}/updateMany` with a body of `{ $where, data }` — applies `data` to every matching
 /// row in one transaction and responds with the number of rows matched.
 pub async fn handle_update_many(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {

@@ -87,9 +87,9 @@ fn crud_lifecycle() {
     })));
     assert_eq!(alice["age"], json!(31));
 
-    // delete → true, then count drops
+    // delete → null, then count drops
     let deleted = data(exec(handle, &json!({ "model": "User", "action": "delete", "id": id })));
-    assert_eq!(deleted, json!(true));
+    assert_eq!(deleted, json!(null));
     let n = data(exec(handle, &json!({ "model": "User", "action": "count", "query": {} })));
     assert_eq!(n, json!(1));
 

@@ -255,11 +255,23 @@ impl MarciDB {
     Ok(item_id)
   }
 
+  /// Updates one row; a row that does not exist is `UpdateError::ItemNotFound` (a client's `not_found`).
   pub fn update_item(&self, entity: &Entity, id: &[u8], update_op: &UpdateOp) -> Result<(), UpdateError> {
     let tx = self.begin_write()?;
-    tx.update_item(entity, id, update_op)?;
+    if !tx.update_item(entity, id, update_op)? {
+      return Err(UpdateError::ItemNotFound);
+    }
     tx.commit()?;
     Ok(())
+  }
+
+  /// Writes the row `key` names — an update when it exists, an insert when not — atomically; returns the
+  /// id. See [`MarciTransaction::upsert_item`].
+  pub fn upsert_item(&self, entity: &Entity, key: &serde_json::Value, data: &serde_json::Value, on_insert: Option<&serde_json::Value>) -> Result<Vec<u8>, crate::UpsertError> {
+    let tx = self.begin_write()?;
+    let id = tx.upsert_item(entity, key, data, on_insert)?;
+    tx.commit()?;
+    Ok(id)
   }
 
   /// Applies `update_op` to every row matching `query`, atomically. Returns how many rows matched;
@@ -271,11 +283,14 @@ impl MarciDB {
     Ok(updated)
   }
 
-  pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<bool, DeleteError> {
+  /// Deletes one row; a row that does not exist is `DeleteError::ItemNotFound` (a client's `not_found`).
+  pub fn delete_item(&self, entity: &Entity, id: &[u8]) -> Result<(), DeleteError> {
     let tx = self.begin_write()?;
-    let is_delete = tx.delete_item(entity, id)?;
+    if !tx.delete_item(entity, id)? {
+      return Err(DeleteError::ItemNotFound);
+    }
     tx.commit()?;
-    Ok(is_delete)
+    Ok(())
   }
 
   /// Deletes every row matching `query`, atomically. Returns how many rows were deleted; on any error

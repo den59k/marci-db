@@ -29,6 +29,7 @@ pub mod foreign_key_tests;
 pub mod error_text_tests;
 pub mod bind_list_tests;
 pub mod unique_group_tests;
+pub mod upsert_tests;
 
 use std::str::FromStr;
 
@@ -74,6 +75,16 @@ pub fn update_many_data(db: &MarciDB, model: &str, query: Value, data: Value) ->
 }
 
 /// `update_many` without unwrapping, for the rejection / rollback cases.
+/// `upsert` without unwrapping: the id of the row written, or the refusal.
+pub fn try_upsert(db: &MarciDB, model: &str, key: Value, data: Value, on_insert: Option<Value>) -> Result<Value, marcidb::UpsertError> {
+  let entity = db.get_model(model).unwrap();
+  let id = db.upsert_item(entity, &key, &data, on_insert.as_ref())?;
+  Ok(Value::from_str(&decode_id(&id, entity, &db.schema)).unwrap())
+}
+pub fn upsert_data(db: &MarciDB, model: &str, key: Value, data: Value) -> Value {
+  try_upsert(db, model, key, data, None).unwrap()
+}
+
 pub fn try_update_many(db: &MarciDB, model: &str, query: Value, data: Value) -> Result<u64, marcidb::UpdateError> {
   let entity = db.get_model(model).unwrap();
   let query_op = parse_query(&db.schema, entity, &query).unwrap();
@@ -113,7 +124,7 @@ pub fn delete_data(db: &MarciDB, model: &str, data: Value) {
 }
 
 /// `delete` without unwrapping the execution result, for the referential-integrity rejection cases.
-pub fn try_delete(db: &MarciDB, model: &str, data: Value) -> Result<bool, marcidb::DeleteError> {
+pub fn try_delete(db: &MarciDB, model: &str, data: Value) -> Result<(), marcidb::DeleteError> {
   let entity = db.get_model(model).unwrap();
   let id = parse_id(&db.schema, entity, &data).unwrap();
   db.delete_item(entity, &id)

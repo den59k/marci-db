@@ -359,10 +359,19 @@ await db.user.update({ id }, {
 
 await db.user.delete({ id })
 
+// the row a key names — updated when it exists, inserted when not; the id comes back
+await db.setting.upsert({ user: { id }, key: "theme" }, { value: "dark" })
+
 // bulk, filtered by the chain — see updateMany / deleteMany below
 await db.user.where({ age: { $lt: 18 } }).updateMany({ active: false })
 await db.session.where({ expiresAt: { $lt: Date.now() } }).deleteMany()
 ```
+
+### Upsert
+
+`upsert(key, data, { onInsert? })` writes the row `key` names in one operation: an update of `data` when the row exists, an insert of key + data when it does not — no check-then-insert in the application, and nothing can slip in between. The key is the id, or the fields of **one** unique index: a `@unique` field, or all the fields of a `@unique(<name>)` group (`{ user, post }` for one like per user and post). `data` is written in the **insert** form — plain values, `{ id }` for a relation (translated to `$connect` on the update path); `$` operators are refused, since an increment has no meaning for a row that is being created. `onInsert` adds fields used only when the row is created (`createdAt`, an id the client generates). An update or a delete of a row that does not exist is a `not_found` error.
+
+`insert(data, { select })` and `upsert(key, data, { select })` resolve to the row as stored, by the shape — its defaults, dates and relations filled — instead of the id: one call, nothing to read back.
 
 **Key fields cannot be updated** — `@id` fields (and each part of a composite key) are absent from the update type. Write the new row and delete the old one if you need to move a record's identity.
 

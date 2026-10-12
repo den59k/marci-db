@@ -85,7 +85,7 @@ fn batch_read_your_writes() {
 }
 
 #[test]
-fn batch_delete_returns_bool() {
+fn batch_delete_of_a_missing_row_is_not_found() {
   let (_dir, db) = make_db();
 
   execute_batch(&db, &[
@@ -95,13 +95,19 @@ fn batch_delete_returns_bool() {
 
   let results = execute_batch(&db, &[
     json!({ "model": "User", "action": "delete", "id": { "id": 1 } }),
-    json!({ "model": "User", "action": "delete", "id": { "id": 999 } }),
     json!({ "model": "User", "action": "count",  "query": {} }),
   ]).unwrap();
+  assert_eq!(results[0], json!(null));   // existed — deleted
+  assert_eq!(results[1], json!(1));
 
-  assert_eq!(results[0], json!(true));   // existed — deleted
-  assert_eq!(results[1], json!(false));  // did not exist
-  assert_eq!(results[2], json!(1));
+  // a row that does not exist: the operation fails, the batch rolls back
+  let err = execute_batch(&db, &[
+    json!({ "model": "User", "action": "delete", "id": { "id": 2 } }),
+    json!({ "model": "User", "action": "delete", "id": { "id": 999 } }),
+  ]).unwrap_err();
+  assert_eq!((err.index, err.kind()), (1, "not_found"));
+  let results = execute_batch(&db, &[ json!({ "model": "User", "action": "count", "query": {} }) ]).unwrap();
+  assert_eq!(results[0], json!(1));
   assert_eq!(user_count(&db), 1);
 }
 

@@ -24,6 +24,7 @@ function httpTransport(url) {
         case "findFirst": return request("POST", `${url}/${op.model}/findFirst`, op.query);
         case "insert":    return request("POST", `${url}/${op.model}/insert`, op.data);
         case "update":    return request("POST", `${url}/${op.model}/update/${encodeId(op.id)}`, op.data);
+        case "upsert":    return request("POST", `${url}/${op.model}/upsert`, { key: op.key, data: op.data, ...(op.onInsert !== undefined ? { onInsert: op.onInsert } : {}) });
         // No id in the path — the filter and the payload travel together in the body
         case "updateMany": return request("POST", `${url}/${op.model}/updateMany`, { ...(op.query ?? {}), data: op.data });
         case "delete":    return request("POST", `${url}/${op.model}/delete/${encodeId(op.id)}`);

@@ -37,10 +37,11 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | `POST /:db/:model/findMany` | query object (`{}` = id + all scalars) | JSON array |
 | `POST /:db/:model/findFirst` | query object | object or `null` |
 | `POST /:db/:model/insert` | insert object | id object |
-| `POST /:db/:model/update/:id` | update object | empty body |
+| `POST /:db/:model/update/:id` | update object | empty body (`404` when the row does not exist) |
+| `POST /:db/:model/upsert` | `{ "key": ..., "data": ..., "onInsert"?: ... }` | id object — the row `key` names (the id, or the fields of one unique index) is updated with `data`, or inserted as key + data (+ `onInsert`) — see [Upsert](API.md#upsert) |
 | `POST /:db/:model/updateMany` | `{ "$where"?: ..., "data": ... }` | bare number — rows matched |
 | `POST /:db/:model/deleteMany` | `{ "$where"?: ... }` | bare number — rows deleted (cascades apply; a `Restrict` on any row fails the whole call) |
-| `POST /:db/:model/delete/:id` | — | empty body |
+| `POST /:db/:model/delete/:id` | — | empty body (`404` when the row does not exist) |
 | `POST /:db/:model/count` | `{ "$where"?: ... }` (or `{}`) | bare number |
 | `POST /:db/:model/aggregate` | aggregate object | object with requested keys |
 | `POST /:db/$transaction` | array of operations | array of results — see [Transactions](#transactions) |
@@ -165,9 +166,10 @@ Each operation is `{ "model", "action", <payload> }`. The payload field and the 
 |---|---|---|
 | `insert` | `data` (insert object) | id object |
 | `update` | `id` + `data` (update object) | `null` |
+| `upsert` | `key` + `data` (+ `onInsert`) | id object |
 | `updateMany` | `query` (`{ "$where"?: ... }`) + `data` | number — rows matched |
 | `deleteMany` | `query` (`{ "$where"?: ... }`) | number — rows deleted |
-| `delete` | `id` | `true` / `false` |
+| `delete` | `id` | `null` |
 | `findFirst` | `query` | object or `null` |
 | `findMany` | `query` | array |
 | `count` | `query` (`{ "$where"?: ... }`, or `{}`) | number |
@@ -195,10 +197,10 @@ curl -X POST 'http://localhost:3000/myapp/$transaction' \
 On the first failing operation the whole transaction is rolled back — including operations that already succeeded — and the message names the failing operation by index:
 
 ```
-batch op #1: Insert(UniqueViolation("User.email", ...))
+batch op #1: User.email: the value is already taken (by the row with id 1)
 ```
 
-Parse, constraint and `$ref` errors are `400`; a storage failure on commit is `500`. Auto-increment counters are **not** rolled back (gaps are possible, as with SQL sequences).
+The status and `kind` are the failing operation's (a constraint is `409`, a missing row `404`, a bad payload or `$ref` `400`); a storage failure on commit is `500`. Auto-increment counters are **not** rolled back (gaps are possible, as with SQL sequences).
 
 ## Journals
 

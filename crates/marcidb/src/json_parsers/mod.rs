@@ -5,6 +5,7 @@ mod json_decoder;
 mod parse_where;
 mod parse_update_op;
 mod parsers;
+pub(crate) use parsers::{encode_enum, encode_primitive_value};
 // pub(crate) so the binary read encoder (a sibling of json_parsers) can decode a Json blob to text.
 pub(crate) mod jsonb;
 

@@ -1,6 +1,8 @@
 use canopydb::WriteTransaction;
 
-use crate::{MarciDB, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, error::RequireTree, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
+use serde_json::Value;
+
+use crate::{MarciDB, StorageError, upsert::{UpsertError, process_upsert}, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::{DeleteError, prepare_delete, process_delete}, error::RequireTree, query_op::{DecodeCtx, QueryOp, TransationContext, process_query_many, process_query_one}, schema::Entity, update_op::{UpdateError, UpdateOp, process_update}, write_op::{InsertError, WriteOp, process_write}};
 
 /// An open API-level write transaction.
 ///
@@ -31,6 +33,12 @@ impl<'db> MarciTransaction<'db> {
 
   pub fn update_item(&self, entity: &Entity, id: &[u8], update_op: &UpdateOp) -> Result<bool, UpdateError> {
     process_update(&self.tx, entity, id, update_op, self.db)
+  }
+
+  /// Writes the row `key` names — the id, or the fields of one unique index: an update of `data` when it
+  /// exists, an insert of key + data (+ `on_insert`) when not. Returns the id (upsert.rs).
+  pub fn upsert_item(&self, entity: &Entity, key: &Value, data: &Value, on_insert: Option<&Value>) -> Result<Vec<u8>, UpsertError> {
+    process_upsert(&self.tx, self.db, entity, key, data, on_insert)
   }
 
   /// Applies `update` to every row matching `query`'s filter; returns how many rows matched.

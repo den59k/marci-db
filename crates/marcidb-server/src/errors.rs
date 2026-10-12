@@ -1,6 +1,6 @@
 use http_body_util::Full;
 use hyper::{Response, StatusCode, body::Bytes, header};
-use marcidb::{BatchError, DeleteError, EncodeError, InsertError, OpError, UpdateError};
+use marcidb::{BatchError, DeleteError, EncodeError, InsertError, OpError, UpdateError, UpsertError};
 
 // errors.rs
 /// What a request failed with. Every variant answers as JSON —
@@ -58,6 +58,10 @@ impl From<UpdateError> for ApiError {
 
 impl From<DeleteError> for ApiError {
     fn from(e: DeleteError) -> Self { engine(e.kind(), e.field(), e.to_string()) }
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self { engine(e.kind(), e.field(), e.to_string()) }
 }
 
 impl From<OpError> for ApiError {

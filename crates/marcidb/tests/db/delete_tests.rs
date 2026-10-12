@@ -263,7 +263,7 @@ fn required_relation_restricts_delete_by_default() {
     ]));
 
     // An unreferenced row still deletes
-    assert_eq!(try_delete(&db, "Class", class_b).unwrap(), true);
+    try_delete(&db, "Class", class_b).unwrap();
     assert_eq!(db.count(db.get_model("Class").unwrap()).unwrap(), 1);
 }
 
@@ -288,7 +288,7 @@ fn optional_relation_sets_null_by_default() {
     let class_a = insert_data(&db, "Class", json!({ "title": "Yoga" }));
     insert_data(&db, "Enrollment", json!({ "class": class_a.clone(), "status": "active" }));
 
-    assert_eq!(try_delete(&db, "Class", class_a).unwrap(), true);
+    try_delete(&db, "Class", class_a).unwrap();
     assert_eq!(get_data(&db, "Enrollment", json!({ "class": { "title": true }, "status": true })), json!([
         { "class": null, "status": "active" },
     ]));

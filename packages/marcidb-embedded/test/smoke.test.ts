@@ -44,9 +44,12 @@ test("atomic transaction via the db.transport alias", async () => {
   expect(await db.exec({ model: "User", action: "count", query: {} })).toBe(4);
 });
 
-test("delete returns true and drops the count", async () => {
-  expect(await db.exec({ model: "User", action: "delete", id: firstId })).toBe(true);
+test("delete drops the count; a row that is not there is a typed not_found error", async () => {
+  expect(await db.exec({ model: "User", action: "delete", id: firstId })).toBeNull();
   expect(await db.exec({ model: "User", action: "count", query: {} })).toBe(3);
+  const err = await db.exec({ model: "User", action: "delete", id: firstId }).catch((e) => e);
+  expect(err).toBeInstanceOf(MarciEmbeddedError);
+  expect((err as MarciEmbeddedError).kind).toBe("not_found");
 });
 
 test("snapshot mentions the model", async () => {

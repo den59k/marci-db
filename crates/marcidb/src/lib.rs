@@ -1,6 +1,7 @@
 mod marci_db;
 mod transaction;
 mod batch;
+mod upsert;
 mod migrate;
 mod error;
 mod write_op;
@@ -39,6 +40,7 @@ pub use marcidb_schema::{MigrateOp, MigrateError, serialize_snapshot, parse_snap
 pub use crate::query_op::{DecodeCtx, QueryOp};
 pub use crate::update_op::UpdateError;
 pub use crate::write_op::InsertError;
+pub use crate::upsert::UpsertError;
 pub use crate::delete_op::DeleteError;
 
 #[cfg(test)]

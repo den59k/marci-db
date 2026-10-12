@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::{DeleteError, InsertError, JournalError, MarciDB, MarciTransaction, QueryError, ReindexError, StorageError, UpdateError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
+use crate::{DeleteError, InsertError, JournalError, MarciDB, MarciTransaction, QueryError, ReindexError, StorageError, UpdateError, UpsertError, aggregate_to_json, array_to_json, decode_document, decode_id, parse_aggregate, parse_id, parse_insert, parse_query, parse_update};
 
 /// A batch transaction error with the index of the operation on which it occurred.
 /// `index == ops.len()` means an error at commit (after all operations)
@@ -27,6 +27,7 @@ pub enum BatchErrorKind {
   Insert(InsertError),
   Update(UpdateError),
   Delete(DeleteError),
+  Upsert(UpsertError),
   /// Storage error (including at commit)
   Storage(StorageError),
 }
@@ -58,6 +59,7 @@ impl fmt::Display for BatchErrorKind {
       BatchErrorKind::Insert(e) => write!(f, "{}", e),
       BatchErrorKind::Update(e) => write!(f, "{}", e),
       BatchErrorKind::Delete(e) => write!(f, "{}", e),
+      BatchErrorKind::Upsert(e) => write!(f, "{}", e),
       BatchErrorKind::Storage(e) => write!(f, "{}", e),
     }
   }
@@ -71,6 +73,7 @@ impl BatchErrorKind {
       BatchErrorKind::Insert(e) => e.kind(),
       BatchErrorKind::Update(e) => e.kind(),
       BatchErrorKind::Delete(e) => e.kind(),
+      BatchErrorKind::Upsert(e) => e.kind(),
       _ => "bad_request",
     }
   }
@@ -79,6 +82,7 @@ impl BatchErrorKind {
       BatchErrorKind::Insert(e) => e.field(),
       BatchErrorKind::Update(e) => e.field(),
       BatchErrorKind::Delete(e) => e.field(),
+      BatchErrorKind::Upsert(e) => e.field(),
       _ => None,
     }
   }
@@ -93,9 +97,10 @@ impl BatchErrorKind {
 ///
 /// Result format by operation type:
 /// * `insert` — id object (as for a single insert)
-/// * `update` — `null`
+/// * `update` — `null` (a row that does not exist is an error)
+/// * `upsert` — id object (`key` + `data`, optional `onInsert`: the row the key names is updated, or inserted)
 /// * `updateMany` — number of matched rows
-/// * `delete` — `true`/`false`
+/// * `delete` — `null` (a row that does not exist is an error)
 /// * `deleteMany` — number of deleted rows
 /// * `findFirst` — object or `null`
 /// * `findMany` — array of objects
@@ -132,8 +137,17 @@ fn apply_op(tx: &MarciTransaction, db: &MarciDB, op: &Value, prior: &[Value]) ->
       let id = parse_id(&db.schema, entity, &resolve_refs(field(obj, "id")?, prior)?).map_err(parse_err)?;
       let data = resolve_refs(field(obj, "data")?, prior)?;
       let update_op = parse_update(&db.schema, entity, &data).map_err(parse_err)?;
-      tx.update_item(entity, &id, &update_op).map_err(BatchErrorKind::Update)?;
+      if !tx.update_item(entity, &id, &update_op).map_err(BatchErrorKind::Update)? {
+        return Err(BatchErrorKind::Update(UpdateError::ItemNotFound));
+      }
       Ok(Value::Null)
+    },
+    "upsert" => {
+      let key = resolve_refs(field(obj, "key")?, prior)?;
+      let data = resolve_refs(field(obj, "data")?, prior)?;
+      let on_insert = match obj.get("onInsert") { Some(v) => Some(resolve_refs(v, prior)?), None => None };
+      let id = tx.upsert_item(entity, &key, &data, on_insert.as_ref()).map_err(BatchErrorKind::Upsert)?;
+      Ok(json_value(decode_id(&id, entity, &db.schema)))
     },
     "updateMany" => {
       let query_json = filter_query(&resolve_refs(field(obj, "query")?, prior)?);
@@ -145,8 +159,10 @@ fn apply_op(tx: &MarciTransaction, db: &MarciDB, op: &Value, prior: &[Value]) ->
     },
     "delete" => {
       let id = parse_id(&db.schema, entity, &resolve_refs(field(obj, "id")?, prior)?).map_err(parse_err)?;
-      let deleted = tx.delete_item(entity, &id).map_err(BatchErrorKind::Delete)?;
-      Ok(Value::Bool(deleted))
+      if !tx.delete_item(entity, &id).map_err(BatchErrorKind::Delete)? {
+        return Err(BatchErrorKind::Delete(DeleteError::ItemNotFound));
+      }
+      Ok(Value::Null)
     },
     "deleteMany" => {
       let query_json = filter_query(&resolve_refs(field(obj, "query")?, prior)?);
@@ -206,6 +222,7 @@ pub enum OpError {
   Insert(InsertError),
   Update(UpdateError),
   Delete(DeleteError),
+  Upsert(UpsertError),
   Query(QueryError),
   Reindex(ReindexError),
   Journal(JournalError),
@@ -238,6 +255,7 @@ impl fmt::Display for OpError {
       OpError::Insert(e) => write!(f, "{}", e),
       OpError::Update(e) => write!(f, "{}", e),
       OpError::Delete(e) => write!(f, "{}", e),
+      OpError::Upsert(e) => write!(f, "{}", e),
       OpError::Query(e) => write!(f, "{:?}", e),
       OpError::Reindex(e) => write!(f, "{}", e),
       OpError::Journal(e) => write!(f, "{}", e),
@@ -259,6 +277,7 @@ impl OpError {
       OpError::Insert(e) => e.kind(),
       OpError::Update(e) => e.kind(),
       OpError::Delete(e) => e.kind(),
+      OpError::Upsert(e) => e.kind(),
       OpError::Journal(JournalError::NotFound { .. }) => "not_found",
       _ => "bad_request",
     }
@@ -269,6 +288,7 @@ impl OpError {
       OpError::Insert(e) => e.field(),
       OpError::Update(e) => e.field(),
       OpError::Delete(e) => e.field(),
+      OpError::Upsert(e) => e.field(),
       _ => None,
     }
   }
@@ -311,6 +331,10 @@ pub fn execute_op(db: &MarciDB, op: &Value) -> Result<Value, OpError> {
       db.update_item(entity, &id, &update_op).map_err(OpError::Update)?;
       Ok(Value::Null)
     },
+    "upsert" => {
+      let id = db.upsert_item(entity, op_field(obj, "key")?, op_field(obj, "data")?, obj.get("onInsert")).map_err(OpError::Upsert)?;
+      Ok(json_value(decode_id(&id, entity, &db.schema)))
+    },
     "updateMany" => {
       let query_json = filter_query(op_field(obj, "query")?);
       let query = parse_query(&db.schema, entity, &query_json).map_err(op_parse_err)?;
@@ -320,8 +344,8 @@ pub fn execute_op(db: &MarciDB, op: &Value) -> Result<Value, OpError> {
     },
     "delete" => {
       let id = parse_id(&db.schema, entity, op_field(obj, "id")?).map_err(op_parse_err)?;
-      let deleted = db.delete_item(entity, &id).map_err(OpError::Delete)?;
-      Ok(Value::Bool(deleted))
+      db.delete_item(entity, &id).map_err(OpError::Delete)?;
+      Ok(Value::Null)
     },
     "deleteMany" => {
       let query_json = filter_query(op_field(obj, "query")?);
