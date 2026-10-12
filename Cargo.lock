@@ -676,9 +676,11 @@ dependencies = [
  "marci_fulltext_index",
  "marci_vector_index",
  "marcidb",
+ "marcidb-http",
  "marcidb-schema",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -715,8 +717,6 @@ version = "0.15.0"
 name = "marcidb-server"
 version = "0.15.0"
 dependencies = [
- "hyper",
- "hyper-util",
  "marcidb-http",
  "tokio",
 ]

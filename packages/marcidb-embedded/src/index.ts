@@ -50,6 +50,28 @@ export interface BackupInfo {
   createdAt: string;
 }
 
+export interface ListenOptions {
+  /** TCP port; 0 picks a free one (read it back from `port`). */
+  port: number;
+  /** Bind address. Default `127.0.0.1`. Any non-loopback host requires `token`. */
+  host?: string;
+  /** Bearer token every request must carry (`GET /$health` excepted). */
+  token?: string;
+  /** Database name in the URL (`/<name>/…`). Default: the basename of the database directory. */
+  name?: string;
+}
+
+/** A running maintenance port (see `EmbeddedDatabase.listen`). */
+export interface MaintenanceServer {
+  readonly port: number;
+  readonly host: string;
+  /** `http://<host>:<port>/<name>` — what `marcidb(url)` takes; the CLI takes `--url http://<host>:<port>` and `<name>`. */
+  readonly url: string;
+  /** Stops the port (idempotent): no new connections, in-flight requests get up to 5 s. Blocks meanwhile.
+   *  `db.close()` does this too. */
+  close(): void;
+}
+
 export interface RestoreOptions extends EmbeddedOptions {
   /** Replace the database already in `dir` (it must be closed). Without it, a non-empty `dir` is refused. */
   overwrite?: boolean;
@@ -85,6 +107,13 @@ export interface EmbeddedDatabase extends MarciTransport {
    * backup — schema changes included; it keeps seeing its own snapshot.
    */
   backup(path: string): Promise<BackupInfo>;
+  /**
+   * Serves the HTTP API of `marcidb-server` for this database on a local port — the maintenance port: cron
+   * backups (`marcidb backup`), maintenance scripts (`marcidb(url)`) and the CLI reach the live database
+   * through it. It refuses what would replace or drop the database (`$restore`, `DELETE`): the app owns it.
+   * Synchronous — the port is bound when this returns. One port per database.
+   */
+  listen(options: ListenOptions): MaintenanceServer;
   /** Close and release the database. Idempotent. Waits for running backups; their promises still settle. */
   close(): void;
   readonly closed: boolean;
@@ -130,7 +159,7 @@ export function openDatabase(dir: string, options: EmbeddedOptions = {}): Embedd
   if (!handle) {
     throw new MarciEmbeddedError(ffi.lastError() ?? `failed to open database at '${dir}'`, "internal");
   }
-  return wrapHandle(handle);
+  return wrapHandle(handle, dir);
 }
 
 /**
@@ -145,7 +174,7 @@ export function restoreDatabase(dir: string, backupPath: string, options: Restor
   if (!handle) {
     throw new MarciEmbeddedError(ffi.lastError() ?? `failed to restore '${backupPath}' into '${dir}'`, "internal");
   }
-  return wrapHandle(handle);
+  return wrapHandle(handle, dir);
 }
 
 /** How often a running backup is polled. */
@@ -156,8 +185,18 @@ function sleepSync(ms: number) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** A database name as the server's URLs take it. */
+const DB_NAME = /^[A-Za-z0-9_-]+$/;
+
+/** The host part of a URL that reaches `host`: a wildcard bind is reached on loopback; IPv6 gets brackets. */
+function urlHost(host: string): string {
+  if (host === "0.0.0.0") return "127.0.0.1";
+  if (host === "::") return "[::1]";
+  return host.includes(":") ? `[${host}]` : host;
+}
+
 /** The `EmbeddedDatabase` object over a native handle (shared by `openDatabase` and `restoreDatabase`). */
-function wrapHandle(handle: unknown): EmbeddedDatabase {
+function wrapHandle(handle: unknown, dir: string): EmbeddedDatabase {
   let closed = false;
   /** Backups not yet settled, by job id: the poll loop and `close()` settle them. */
   const pending = new Map<number, { resolve: (info: BackupInfo) => void; reject: (e: unknown) => void }>();
@@ -256,9 +295,33 @@ function wrapHandle(handle: unknown): EmbeddedDatabase {
         setTimeout(tick, BACKUP_POLL_MS);
       });
     },
+    listen(options: ListenOptions): MaintenanceServer {
+      ensureOpen();
+      const name = options.name ?? path.basename(path.resolve(dir));
+      if (!DB_NAME.test(name)) {
+        throw new MarciEmbeddedError(
+          `'${name}' cannot be the database name in a URL (A-Z a-z 0-9 _ -) — pass listen({ name })`,
+          "bad_request",
+        );
+      }
+      const started = unwrap(ffi.listen(handle, JSON.stringify({ port: options.port, host: options.host, token: options.token, name })));
+      let stopped = false;
+      return {
+        port: started.port,
+        host: started.host,
+        url: `http://${urlHost(started.host)}:${started.port}/${name}`,
+        close() {
+          if (stopped) return;
+          stopped = true;
+          // A closed database has stopped its port already (and the handle is gone).
+          if (!closed) unwrap(ffi.listenStop(handle));
+        },
+      };
+    },
     close() {
       if (closed) return;
       closed = true;
+      // The native close stops the maintenance port first.
       // The handle is freed below, so running backups are polled to the end here (the native close would
       // wait for them anyway) and every pending promise settles with its real outcome.
       for (const job of [...pending.keys()]) {

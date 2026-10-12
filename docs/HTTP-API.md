@@ -294,6 +294,21 @@ A database directory that no process has open can also be backed up, restored an
 without a server: `marci-migrate backup <db-dir> <out>`, `marci-migrate restore <db-dir> <file> [--overwrite]`,
 `marci-migrate inspect <file | db-dir>` (`marcidb inspect` runs the latter).
 
+## Embedded maintenance port
+
+An app that embeds MarciDB (`marcidb-embedded`) can serve this same API for its one database from inside
+its process: `db.listen({ port, token })` — see [Maintenance port](../packages/marcidb-embedded/README.md#maintenance-port).
+Everything above applies to `/<name>/…` on that port, except:
+
+| Request | Answer |
+|---|---|
+| `POST /<name>/$restore` (also `?into=`) | `400` — restore at startup with `restoreDatabase()` in the app |
+| `DELETE /<name>` | `400` — the app owns the database |
+| any other database name | `404` — `$migrate` / `$sync` do not create databases there |
+
+`$migrate` and `$sync` on the port's own database work as on a server. The port listens on `127.0.0.1` by
+default; any other host requires a token.
+
 ## Errors
 
 An error answers with a JSON body and the status its kind means:

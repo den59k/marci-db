@@ -188,6 +188,65 @@ trees, `--tree User` the rows.
 
 ---
 
+## Maintenance port
+
+An embedded database lives inside your app's process, and its directory is locked for as long as the app
+has it open: no other process can open it. So a cron backup, a maintenance script or a `marcidb` command
+cannot reach a running app's data — unless the app lets them in. `db.listen()` does that: the app serves
+**the same HTTP API as `marcidb-server`**, for this one database, on a local port.
+
+```ts
+const db = openDatabase("./data");
+await db.migrate("./migrations");
+
+const port = db.listen({ port: 3999, token: process.env.MARCI_TOKEN });
+console.log(port.url); // http://127.0.0.1:3999/data
+```
+
+`listen({ port, host?, token?, name? })` returns `{ port, host, url, close() }`:
+
+- `port` — `0` picks a free one (read it back from `port`).
+- `host` — `127.0.0.1` by default. Any other (`0.0.0.0`, a LAN address) **requires a `token`**.
+- `token` — every request must carry `Authorization: Bearer <token>`; `GET /$health` stays open.
+- `name` — the database name in the URL (`/<name>/…`); defaults to the directory's basename
+  (`openDatabase("./data")` → `data`). The CLI and the HTTP client need it, so it is in `url`.
+
+It is synchronous (the port is bound when it returns), one port per database. `port.close()` stops it;
+`db.close()` does too. Both block the JS thread while in-flight requests finish — at most 5 s, then the
+rest are aborted; idle connections close at once. Requests are served on native threads beside the app's
+own calls, over the same database: what a script writes through the port, the app reads at once.
+
+From outside the process, everything works as against a server:
+
+```sh
+# crontab: a nightly backup of the running app
+0 3 * * * npx marcidb backup data --url http://127.0.0.1:3999 --token "$MARCI_TOKEN" --out /var/backups/app/
+npx marcidb migrate check data --url http://127.0.0.1:3999 --token "$MARCI_TOKEN"
+```
+
+```ts
+// scripts/fix-names.ts — a one-off maintenance script against the live app (a loopback port without a token)
+import { marcidb } from "../src/db/index.js";
+
+const db = marcidb("http://127.0.0.1:3999/data");
+const fixed = await db.user.where({ name: "" }).updateMany({ name: "anonymous" });
+console.log(`${fixed} users renamed`);
+```
+
+The typed HTTP client does not send a token yet: against a port with a `token`, use the `marcidb` CLI or
+`fetch` with an `Authorization` header.
+
+**What the port refuses**, with a `400` that says why: `$restore` (in place or `?into=`) and
+`DELETE /<name>` — the app process owns the database, and replacing it under the app at runtime is not
+something the port does; restore at startup with [`restoreDatabase`](#backups). Any other database name
+is a `404`. Schema changes (`$migrate`, `$sync`) **are** allowed and change the schema the app sees at
+once — the app's generated client may then be behind the database, as with a server.
+
+**Security**: the port gives full read and write access to the database. Keep it on loopback (the
+default), and set a `token` for anything else.
+
+---
+
 ## Reading a schema file portably
 
 `openTestDatabase(schema)` / `$sync(schema)` take the schema **text**. Read it with `fs` so it works
@@ -223,7 +282,10 @@ Node doesn't support text import attributes.
 - `reindexAll()` — rebuild every model's `@custom` (vector / full-text) indexes.
 - `backup(path)` — consistent backup to a `.marcibin` file on a native thread; resolves to
   `{ bytes, trees, entries, schemaVersion, createdAt }` (see [Backups](#backups)).
-- `close()` — release the database (idempotent; waits for running backups). `closed` — boolean.
+- `listen({ port, host?, token?, name? })` — serve the server's HTTP API for this database on a local
+  port; returns `{ port, host, url, close() }` (see [Maintenance port](#maintenance-port)).
+- `close()` — release the database (idempotent; stops the maintenance port, waits for running backups).
+  `closed` — boolean.
 
 `restoreDatabase(dir, backupPath, options?)` → `EmbeddedDatabase` — restore a backup into `dir` and open it;
 `options`: `{ disableFsync?, overwrite? }`.
@@ -234,8 +296,8 @@ Notes:
 - Always `await` `$sync` / `$migrate` — they return promises; an un-awaited rejection on error is
   silent.
 - Data crosses the FFI boundary as JSON. Use a handle from the thread that opened it — don't share it
-  across Worker threads (calls from one runtime's event loop are already serialized). Backups run on
-  their own native thread and need nothing from you.
+  across Worker threads (calls from one runtime's event loop are already serialized). Backups and the
+  maintenance port run on their own native threads and need nothing from you.
 
 ---
 

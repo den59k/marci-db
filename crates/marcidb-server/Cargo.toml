@@ -4,11 +4,9 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-# The HTTP API itself (routing, handlers, backups); this binary is config, banner and the accept loop.
+# The HTTP API itself (routing, handlers, backups, the accept loop); this binary is config and banner.
 marcidb-http = { path = "../marcidb-http" }
-hyper = "1.7.0"
 tokio = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1.17", features = ["http1", "server", "tokio"] }
 
 [features]
 # Enable `@custom(vector, …)` indexes: `cargo run -p marcidb-server --features vector`

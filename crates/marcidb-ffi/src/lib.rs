@@ -15,6 +15,9 @@
 //!   writes and schema changes all continue meanwhile — the lock is held only while the snapshot is taken,
 //!   the copy itself holds nothing but its storage snapshot. [`marci_close`] waits for running backups,
 //!   so a closed handle leaves complete files and releases the storage lock synchronously.
+//! * [`marci_listen`] serves the server's HTTP API for this one database on a local port (the maintenance
+//!   port, `port.rs`; cargo feature `http`, on by default). Its requests share the handle's lock with the
+//!   FFI calls. [`marci_listen_stop`] and [`marci_close`] stop it, blocking for at most the grace period.
 
 // Every entry point takes pointers from a C caller, who owns the contract above (a live handle or NULL,
 // NUL-terminated strings); marking `extern "C"` functions `unsafe fn` would change nothing for that caller.
@@ -29,6 +32,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use marcidb::{
     BackupInfo, MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
@@ -37,6 +41,9 @@ use marcidb::{
 };
 use serde_json::{Value, json};
 
+#[cfg(feature = "http")]
+mod port;
+
 /// Opaque handle to an open embedded database. Created by [`marci_open`] / [`marci_restore`], freed by
 /// [`marci_close`]. The database is shared with backup threads, hence the `Arc<RwLock<…>>`.
 pub struct DbHandle {
@@ -44,11 +51,33 @@ pub struct DbHandle {
     /// Backups started by [`marci_backup_start`] and not yet reported done by [`marci_backup_poll`].
     jobs: Mutex<HashMap<u64, JoinHandle<Result<BackupInfo, String>>>>,
     next_job: AtomicU64,
+    /// The maintenance port started by [`marci_listen`], if one runs (at most one per database).
+    #[cfg(feature = "http")]
+    listener: Mutex<Option<port::Listener>>,
 }
 
 impl DbHandle {
     fn new(db: MarciDB) -> Self {
-        DbHandle { db: Arc::new(RwLock::new(db)), jobs: Mutex::new(HashMap::new()), next_job: AtomicU64::new(1) }
+        DbHandle {
+            db: Arc::new(RwLock::new(db)),
+            jobs: Mutex::new(HashMap::new()),
+            next_job: AtomicU64::new(1),
+            #[cfg(feature = "http")]
+            listener: Mutex::new(None),
+        }
+    }
+
+    /// Stops the maintenance port if one runs (see [`port::Listener::stop`]); true when there was one.
+    fn stop_listener(&self) -> bool {
+        #[cfg(feature = "http")]
+        {
+            let running = self.listener.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(listener) = running {
+                listener.stop();
+                return true;
+            }
+        }
+        false
     }
 
     /// The database for a data operation. A panic in an earlier call (caught at the boundary) may have
@@ -170,7 +199,7 @@ fn build_providers() -> Arc<ProviderRegistry> {
 /// the product/package version** — bump it only when that contract changes incompatibly (a new/renamed
 /// symbol, or a [`BINARY_VERSION`](marcidb::BINARY_VERSION) bump). The loader reads this at open and refuses
 /// a mismatched native library with a clear message, instead of a cryptic missing-symbol `dlopen` failure.
-pub const MARCI_ABI_VERSION: u32 = 2;
+pub const MARCI_ABI_VERSION: u32 = 3;
 
 /// Returns [`MARCI_ABI_VERSION`]. The first symbol the loader binds — its absence marks a pre-handshake
 /// (too old) library.
@@ -227,8 +256,13 @@ fn parse_options(s: &str) -> Result<OpenOptions, Fault> {
     Ok(opts)
 }
 
-/// Closes and frees a handle (releasing the underlying storage lock). Waits for running backups first, so
-/// their files are complete and the last reference to the database goes away here. NULL is a no-op.
+/// How long [`marci_close`] waits for work that still holds the database (a request the port's blocking
+/// pool was running when the port stopped) before dropping its own reference regardless.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
+
+/// Closes and frees a handle (releasing the underlying storage lock). Stops the maintenance port first (its
+/// grace period included), then waits for running backups, so their files are complete and the last
+/// reference to the database goes away here. NULL is a no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_close(handle: *mut DbHandle) {
     if handle.is_null() {
@@ -236,9 +270,14 @@ pub extern "C" fn marci_close(handle: *mut DbHandle) {
     }
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let handle = unsafe { Box::from_raw(handle) };
+        handle.stop_listener();
         let jobs: Vec<_> = handle.jobs.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
         for (_, job) in jobs {
             let _ = job.join();
+        }
+        let deadline = Instant::now() + CLOSE_WAIT;
+        while Arc::strong_count(&handle.db) > 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
         }
         drop(handle);
     }));
@@ -603,6 +642,52 @@ fn restore_inner(dir: *const c_char, backup_path: *const c_char, options_json: *
     let (db, _) = MarciDB::restore_from_file(dir, backup_path, &options)
         .map_err(|e| Fault::internal(format!("cannot restore '{}' into '{}': {}", backup_path, dir, e)))?;
     Ok(DbHandle::new(db.with_providers(build_providers())))
+}
+
+// ───────────────────────────────── maintenance port ─────────────────────────────────
+
+/// Serves the server's HTTP API for this database on a local port: `/<name>/…` answers every route but the
+/// ones that would create, drop or replace a database (those are 400 — the app owns this one). `options_json`:
+/// `{ "port": u16, "host"?: string, "token"?: string, "name": string, "logRequests"?: bool }`; port 0 picks
+/// a free one. The host defaults to `127.0.0.1`; any non-loopback host needs a token. Binds before
+/// returning `{ "port": <bound>, "host": "<ip>" }`; a bind failure, a second listen on the same handle or a
+/// library built without the `http` feature is a `bad_request`.
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_listen(handle: *mut DbHandle, options_json: *const c_char) -> *mut c_char {
+    run(|| {
+        let h = unsafe { handle_ref(handle) }?;
+        let options = unsafe { req_str(options_json, "options_json") }?;
+        listen(h, options)
+    })
+}
+
+#[cfg(feature = "http")]
+fn listen(h: &DbHandle, options: &str) -> Result<Value, Fault> {
+    let options = port::parse_options(options)?;
+    let mut slot = h.listener.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(running) = slot.as_ref() {
+        return Err(Fault::bad_request(format!("this database already listens on port {} — one port per database; stop it first", running.port)));
+    }
+    let host = options.host;
+    let listener = port::Listener::start(Arc::clone(&h.db), options)?;
+    let data = json!({ "port": listener.port, "host": host.to_string() });
+    *slot = Some(listener);
+    Ok(data)
+}
+
+#[cfg(not(feature = "http"))]
+fn listen(_: &DbHandle, _: &str) -> Result<Value, Fault> {
+    Err(Fault::bad_request("this library was built without http (the `http` feature of marcidb-ffi) — no maintenance port"))
+}
+
+/// Stops the port started by [`marci_listen`]: no new connections, in-flight requests get the grace period
+/// (5 s), then the rest are aborted. Blocks meanwhile. Returns `{ "stopped": bool }` (false when none ran).
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_listen_stop(handle: *mut DbHandle) -> *mut c_char {
+    run(|| {
+        let h = unsafe { handle_ref(handle) }?;
+        Ok(json!({ "stopped": h.stop_listener() }))
+    })
 }
 
 fn migrate_fault(e: MigrateApplyError) -> Fault {

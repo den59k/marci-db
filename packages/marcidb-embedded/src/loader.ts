@@ -30,6 +30,10 @@ export interface Ffi {
   backupPoll(handle: Ptr, job: number): string | null;
   /** Restores a `.marcibin` file into `dir` and opens it; null on failure (see `lastError`). */
   restore(dir: string, backupPath: string, opts: string | null): Ptr | null;
+  /** Starts the maintenance port; the envelope's data is `{ port, host }`. */
+  listen(handle: Ptr, options: string): string | null;
+  /** Stops it; the envelope's data is `{ stopped }`. Blocks for at most the grace period. */
+  listenStop(handle: Ptr): string | null;
 }
 
 // `<platform>-<arch>` → native filename. Extend as more prebuilt targets are published.
@@ -61,7 +65,7 @@ export function resolveLibPath(): string {
 const isBun = typeof (globalThis as any).Bun !== "undefined";
 
 /** ABI contract this package speaks; must equal the native lib's `marci_abi_version()`. See marcidb-ffi. */
-const EXPECTED_ABI = 2;
+const EXPECTED_ABI = 3;
 
 function abiMismatch(libPath: string, got: number): Error {
   return new Error(
@@ -117,6 +121,8 @@ async function bunBackend(libPath: string): Promise<Ffi> {
     marci_backup_start: { args: [P, P], returns: P },
     marci_backup_poll: { args: [P, FFIType.u64], returns: P },
     marci_restore: { args: [P, P, P], returns: P },
+    marci_listen: { args: [P, P], returns: P },
+    marci_listen_stop: { args: [P], returns: P },
   });
 
   const enc = new TextEncoder();
@@ -158,6 +164,8 @@ async function bunBackend(libPath: string): Promise<Ffi> {
     backupStart: (h, p) => readFree(s.marci_backup_start(h, cstr(p))),
     backupPoll: (h, job) => readFree(s.marci_backup_poll(h, job)),
     restore: (dir, file, opts) => s.marci_restore(cstr(dir), cstr(file), opts == null ? null : cstr(opts)) || null,
+    listen: (h, opts) => readFree(s.marci_listen(h, cstr(opts))),
+    listenStop: (h) => readFree(s.marci_listen_stop(h)),
   };
 }
 
@@ -194,6 +202,8 @@ async function nodeBackend(libPath: string): Promise<Ffi> {
   const backupStart = lib.func("void* marci_backup_start(void*, str)");
   const backupPoll = lib.func("void* marci_backup_poll(void*, uint64_t)");
   const restore = lib.func("void* marci_restore(str, str, str)");
+  const listen = lib.func("void* marci_listen(void*, str)");
+  const listenStop = lib.func("void* marci_listen_stop(void*)");
 
   const readString = (p: any): string | null => (p ? koffi.decode(p, "char", -1) : null);
   const readFree = (p: any): string | null => {
@@ -228,5 +238,7 @@ async function nodeBackend(libPath: string): Promise<Ffi> {
     backupStart: (h, p) => readFree(backupStart(h, p)),
     backupPoll: (h, job) => readFree(backupPoll(h, job)),
     restore: (dir, file, opts) => restore(dir, file, opts ?? null) || null,
+    listen: (h, opts) => readFree(listen(h, opts)),
+    listenStop: (h) => readFree(listenStop(h)),
   };
 }

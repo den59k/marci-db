@@ -1,8 +1,6 @@
 use std::{net::{IpAddr, SocketAddr}, path::PathBuf, sync::Arc};
 
-use hyper::{server::conn::http1, service::service_fn};
-use hyper_util::rt::TokioIo;
-use marcidb_http::{ServerContext, handle, list_databases};
+use marcidb_http::{ServerContext, list_databases, serve};
 use tokio::{fs, net::TcpListener};
 
 /// Resolved server configuration. Precedence: CLI flag > environment variable > built-in default.
@@ -100,7 +98,7 @@ async fn main() {
         std::process::exit(1);
     }
     let root = PathBuf::from(&cfg.data_dir);
-    let ctx: Arc<ServerContext> = Arc::new(ServerContext::new(root.clone(), cfg.token.clone()));
+    let ctx: Arc<ServerContext> = Arc::new(ServerContext::directory(root.clone(), cfg.token.clone()));
 
     let addr = SocketAddr::new(cfg.host, cfg.port);
     let listener = match TcpListener::bind(addr).await {
@@ -113,32 +111,10 @@ async fn main() {
 
     print_banner(&addr, &root, &list_databases(&root), cfg.token.is_some());
 
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = match accepted {
-                    Ok(conn) => conn,
-                    Err(e) => { eprintln!("  accept error: {}", e); continue; }
-                };
-                let io = TokioIo::new(stream);
-                let ctx = ctx.clone();
-
-                tokio::task::spawn(async move {
-                    let resp = http1::Builder::new()
-                        .serve_connection(io, service_fn(move |req| { handle(req, ctx.clone()) }))
-                        .await;
-
-                    if let Err(err) = resp {
-                        eprintln!("  connection error: {}", err);
-                    }
-                });
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n  Shutting down MarciDB Server. Bye!");
-                break;
-            }
-        }
-    }
+    serve(listener, ctx, async {
+        let _ = tokio::signal::ctrl_c().await;
+        println!("\n  Shutting down MarciDB Server. Bye!");
+    }).await;
 }
 
 /// Startup banner: version, where to reach it, and what's already on disk

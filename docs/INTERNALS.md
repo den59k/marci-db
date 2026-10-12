@@ -72,6 +72,18 @@ Three binding kinds, chosen at schema resolution:
 
 Reverse dependencies (`rev_dependencies`) drive cascades and `SetNull` on delete.
 
+## Crates and hosts
+
+The HTTP API lives in the `marcidb-http` library: routing, handlers, errors, the backup routes and `serve`,
+the accept loop with graceful shutdown. Two hosts embed it. `marcidb-server` is a thin binary (config,
+banner, `serve` until Ctrl+C) over a **Directory** context: many databases under one root, opened lazily,
+created by `$migrate`/`$sync`, swapped by `$restore`. `marcidb-ffi` builds a **Single** context for an
+embedded app's maintenance port (`marci_listen`): the one `Arc<RwLock<MarciDB>>` the app's handle already
+holds, under a fixed name. Every handler goes through `ServerContext::get_db`, so one implementation serves
+both; what a Single context cannot do — create, drop or replace a database — answers `400`, and other names
+`404`. The port runs on a tokio runtime of its own inside the app; its requests and the app's FFI calls meet
+only at the database's `RwLock`.
+
 ## Backup format
 
 Everything a database holds lives in canopydb trees: rows, secondary and unique-group indexes, relation

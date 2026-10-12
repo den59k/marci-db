@@ -20,11 +20,16 @@ serde_json = "1.0.145"
 # pulls in `marci_vector`, which needs nightly (portable_simd); build `--no-default-features` for a stable core.
 marci_vector_index = { path = "../marci-vector-index", optional = true }
 marci_fulltext_index = { path = "../marci-fulltext-index", optional = true }
+# The maintenance port (`marci_listen`): the server's HTTP API served from inside the app process.
+marcidb-http = { path = "../marcidb-http", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time"], optional = true }
 
 [features]
-default = ["vector", "fulltext"]
+default = ["vector", "fulltext", "http"]
 vector = ["dep:marci_vector_index"]
 fulltext = ["dep:marci_fulltext_index"]
+# Adds tokio + hyper to the library; without it `marci_listen` answers "built without http".
+http = ["dep:marcidb-http", "dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"

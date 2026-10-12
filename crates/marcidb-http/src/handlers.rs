@@ -76,6 +76,8 @@ pub async fn handle_sync_plan(req: Request<hyper::body::Incoming>, ctx: Arc<Serv
     let schema_text = parse_text_body(req).await?;
 
     let json = blocking(move || {
+        // Planned against an empty schema is what `$sync` would create — which a maintenance port never does.
+        ctx.ensure_served(&db_name)?;
         let mut new_schema = marcidb::try_parse_schema(&schema_text)
             .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
         let empty = marcidb::Schema { models: Vec::new() };
@@ -389,6 +391,9 @@ fn journal_error(e: JournalError) -> ApiError {
     }
 }
 
+/// How often a waiting journal read looks whether the server is stopping.
+const JOURNAL_STOP_CHECK: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(crate) fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
     query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| v))
 }
@@ -441,11 +446,12 @@ pub async fn handle_journal_read(req: Request<hyper::body::Incoming>, ctx: Arc<S
                 Ok((signal, seen, entries))
             })?;
 
+            // A stopping server answers now rather than hold its shutdown for the rest of the wait.
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if !entries.is_empty() || left.is_zero() {
+            if !entries.is_empty() || left.is_zero() || ctx.is_stopping() {
                 return Ok(entries);
             }
-            signal.wait(seen, left);
+            signal.wait(seen, left.min(JOURNAL_STOP_CHECK));
         }
     }).await?;
 

@@ -146,9 +146,10 @@ pub async fn handle_restore(req: Request<hyper::body::Incoming>, ctx: Arc<Server
         }
     }
     let guard = ctx.begin_restore(&target)?;
+    let root = ctx.restore_root()?.to_path_buf();
 
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let upload = Upload(ctx.root.join(format!(".upload-{}-{}.marcibin", target, nanos)));
+    let upload = Upload(root.join(format!(".upload-{}-{}.marcibin", target, nanos)));
     receive(req, &upload.0).await?;
 
     // The upload and the guard move into the blocking task: they are released when the restore is over,
@@ -158,7 +159,7 @@ pub async fn handle_restore(req: Request<hyper::body::Incoming>, ctx: Arc<Server
         let _guard = guard;
         let file = std::fs::File::open(&upload.0).map_err(|e| ApiError::Internal(format!("cannot read the upload: {}", e)))?;
         let options = RestoreOptions { overwrite: true, open: OpenOptions::default() };
-        let staged = MarciDB::restore_prepare(&ctx.root.join(&restored).to_string_lossy(), file, &options)?;
+        let staged = MarciDB::restore_prepare(&root.join(&restored).to_string_lossy(), file, &options)?;
         ctx.replace_db(&restored, staged)
     }).await?;
 

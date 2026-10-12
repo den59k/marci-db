@@ -7,7 +7,7 @@ use std::ptr;
 
 use marcidb_ffi::{
     DbHandle, marci_backup_poll, marci_backup_start, marci_close, marci_exec, marci_free_string, marci_last_error,
-    marci_migrate_apply, marci_open, marci_restore, marci_snapshot, marci_sync,
+    marci_listen, marci_listen_stop, marci_migrate_apply, marci_open, marci_restore, marci_snapshot, marci_sync,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -434,5 +434,140 @@ fn backup_errors_are_envelopes() {
     assert_eq!(failed["ok"], json!(false), "{}", failed);
     assert_eq!(failed["kind"], json!("internal"));
 
+    marci_close(handle);
+}
+
+// ───────────────────────────────── maintenance port ─────────────────────────────────
+
+fn listen(handle: *mut DbHandle, options: Value) -> Value {
+    let c = CString::new(options.to_string()).unwrap();
+    take(marci_listen(handle, c.as_ptr()))
+}
+
+/// One HTTP/1.1 exchange over `std::net` (`Connection: close`; a chunked body is decoded). Errors when
+/// nothing listens on the port.
+fn http(port: u16, method: &str, path: &str, body: &[u8], token: Option<&str>) -> std::io::Result<(u16, Vec<u8>)> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    let mut head = format!("{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n", method, path, body.len());
+    if let Some(token) = token {
+        head.push_str(&format!("Authorization: Bearer {}\r\n", token));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("a response head");
+    let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+    let status = head.split(' ').nth(1).and_then(|s| s.parse().ok()).expect("a status code");
+    let mut body = raw[split + 4..].to_vec();
+    if head.contains("transfer-encoding: chunked") {
+        let (mut rest, mut plain) = (&body[..], Vec::new());
+        loop {
+            let eol = rest.windows(2).position(|w| w == b"\r\n").expect("a chunk size line");
+            let size = usize::from_str_radix(std::str::from_utf8(&rest[..eol]).unwrap().trim(), 16).unwrap();
+            rest = &rest[eol + 2..];
+            if size == 0 { break; }
+            plain.extend_from_slice(&rest[..size]);
+            rest = &rest[size + 2..];
+        }
+        body = plain;
+    }
+    Ok((status, body))
+}
+
+fn http_json(port: u16, method: &str, path: &str, body: &Value) -> (u16, Value) {
+    let (status, bytes) = http(port, method, path, body.to_string().as_bytes(), None).unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[test]
+fn a_maintenance_port_serves_the_open_database() {
+    let dir = tempdir().unwrap();
+    let handle = open_synced(dir.path().join("db").to_str().unwrap());
+
+    let started = data(listen(handle, json!({ "port": 0, "name": "app" })));
+    let port = started["port"].as_u64().unwrap() as u16;
+    assert!(port > 0, "port 0 picks a free one: {}", started);
+    assert_eq!(started["host"], json!("127.0.0.1"));
+    assert_eq!(http(port, "GET", "/$health", b"", None).unwrap().0, 200);
+
+    // Written through FFI, read over HTTP — and the other way round.
+    data(exec(handle, &json!({ "model": "User", "action": "insert", "data": { "name": "ffi", "age": 1 } })));
+    assert_eq!(http_json(port, "POST", "/app/User/insert", &json!({ "name": "http", "age": 2 })).0, 200);
+    assert_eq!(http_json(port, "POST", "/app/User/count", &json!({})), (200, json!(2)));
+    assert_eq!(count_users(handle), json!(2));
+    let (_, names) = http_json(port, "POST", "/app/User/findMany", &json!({ "name": true }));
+    assert_eq!(names, json!([{ "name": "ffi" }, { "name": "http" }]));
+    assert_eq!(http_json(port, "POST", "/other/User/count", &json!({})).0, 404);
+    assert_eq!(http(port, "POST", "/app/$restore", b"x", None).unwrap().0, 400);
+
+    // A migration over the port is the app's schema too.
+    let (status, _) = http(port, "POST", "/app/$sync", b"model User {\n  name String\n  age  Int\n  email String?\n}", None).unwrap();
+    assert_eq!(status, 200);
+    assert!(data(take(marci_snapshot(handle))).as_str().unwrap().contains("email"));
+
+    // A backup over HTTP restores through FFI.
+    let (status, backup) = http(port, "GET", "/app/$backup", b"", None).unwrap();
+    assert_eq!(status, 200);
+    let file = dir.path().join("port.marcibin");
+    std::fs::write(&file, &backup).unwrap();
+    let restored = restore(&dir.path().join("restored"), &file, r#"{"disableFsync":true}"#);
+    assert!(!restored.is_null(), "restore failed: {}", last_error());
+    assert_eq!(count_users(restored), json!(2));
+    marci_close(restored);
+
+    // One port per database.
+    let again = listen(handle, json!({ "port": 0, "name": "app" }));
+    assert_eq!(again["kind"], json!("bad_request"), "{}", again);
+    assert!(again["error"].as_str().unwrap().contains("already listens"), "{}", again);
+
+    // Stopped: the port is closed, a second stop finds nothing, a new listen works.
+    assert_eq!(data(take(marci_listen_stop(handle))), json!({ "stopped": true }));
+    assert!(http(port, "GET", "/$health", b"", None).is_err(), "the port is closed after stop");
+    assert_eq!(data(take(marci_listen_stop(handle))), json!({ "stopped": false }));
+    let port = data(listen(handle, json!({ "port": 0, "name": "app" })))["port"].as_u64().unwrap() as u16;
+    assert_eq!(http(port, "GET", "/$health", b"", None).unwrap().0, 200);
+
+    // Closing the database stops its port, and releases the directory.
+    marci_close(handle);
+    assert!(http(port, "GET", "/$health", b"", None).is_err(), "the port is closed after marci_close");
+    let reopened = open_synced(dir.path().join("db").to_str().unwrap());
+    assert_eq!(count_users(reopened), json!(2));
+    marci_close(reopened);
+}
+
+#[test]
+fn a_maintenance_port_checks_its_options_and_the_token() {
+    let dir = tempdir().unwrap();
+    let handle = open_synced(dir.path().join("db").to_str().unwrap());
+
+    for (options, expected) in [
+        (json!({ "port": 0, "host": "0.0.0.0", "name": "app" }), "without authentication"),
+        (json!({ "port": 0, "name": "no/slash" }), "invalid database name"),
+        (json!({ "port": 0 }), "invalid database name"),
+        (json!({ "name": "app" }), "port"),
+        (json!({ "port": 70000, "name": "app" }), "port"),
+        (json!({ "port": 0, "host": "nowhere", "name": "app" }), "invalid host"),
+    ] {
+        let refused = listen(handle, options.clone());
+        assert_eq!(refused["kind"], json!("bad_request"), "{} → {}", options, refused);
+        assert!(refused["error"].as_str().unwrap().contains(expected), "{} → {}", options, refused);
+    }
+
+    // A port in use: the OS message comes back.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = listen(handle, json!({ "port": taken.local_addr().unwrap().port(), "name": "app" }));
+    assert_eq!(busy["kind"], json!("bad_request"), "{}", busy);
+    assert!(busy["error"].as_str().unwrap().contains("cannot listen on"), "{}", busy);
+
+    // With a token, every route but the health check wants it.
+    let port = data(listen(handle, json!({ "port": 0, "name": "app", "token": "s3cret" })))["port"].as_u64().unwrap() as u16;
+    assert_eq!(http(port, "GET", "/$health", b"", None).unwrap().0, 200);
+    assert_eq!(http(port, "POST", "/app/User/count", b"{}", None).unwrap().0, 401);
+    assert_eq!(http(port, "POST", "/app/User/count", b"{}", Some("wrong")).unwrap().0, 401);
+    assert_eq!(http(port, "POST", "/app/User/count", b"{}", Some("s3cret")).unwrap(), (200, b"0".to_vec()));
     marci_close(handle);
 }

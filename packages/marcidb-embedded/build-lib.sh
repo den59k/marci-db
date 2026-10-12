@@ -1,6 +1,7 @@
 #!/bin/bash
-# Builds the marcidb-ffi native library (full variant: vector + fulltext, needs nightly) for one platform
-# and stages it under packages/marcidb-embedded/native/ with the name the loader expects.
+# Builds the marcidb-ffi native library (full variant: vector + fulltext + the http maintenance port; needs
+# nightly) for one platform and stages it under packages/marcidb-embedded/native/ with the name the loader
+# expects.
 #
 # Usage: ./build-lib.sh [linux|mac|win]
 set -e

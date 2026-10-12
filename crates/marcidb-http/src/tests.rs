@@ -1,37 +1,32 @@
 //! HTTP-level tests: the server runs on an ephemeral port in-process and is driven with hyper's client.
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::{Arc, RwLock}, time::{Duration, Instant}};
 
 use http_body_util::{BodyExt, Full};
 use hyper::{HeaderMap, Method, Request, StatusCode, body::Bytes, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use marcidb::{BackupReader, MarciDB, OpenOptions, RestoreOptions};
 use serde_json::{Value, json};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{net::{TcpListener, TcpStream}, sync::oneshot};
 
-use crate::{ServerContext, Slot, errors::ApiError, handle};
+use crate::{SHUTDOWN_GRACE, ServerContext, Slot, errors::ApiError, serve, serve_with_grace};
 
 struct TestServer {
     addr: SocketAddr,
     dir: tempfile::TempDir,
 }
 
-async fn start(token: Option<&str>) -> TestServer {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = Arc::new(ServerContext::new(dir.path().to_path_buf(), token.map(str::to_string)));
+/// Serves `ctx` on an ephemeral port until the test ends.
+async fn listen(ctx: ServerContext) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
-            let ctx = ctx.clone();
-            tokio::spawn(async move {
-                let _ = http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service_fn(move |req| handle(req, ctx.clone())))
-                    .await;
-            });
-        }
-    });
+    tokio::spawn(serve(listener, Arc::new(ctx.log_requests(false)), std::future::pending()));
+    addr
+}
+
+async fn start(token: Option<&str>) -> TestServer {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = listen(ServerContext::directory(dir.path().to_path_buf(), token.map(str::to_string))).await;
     TestServer { addr, dir }
 }
 
@@ -48,8 +43,13 @@ impl Reply {
 }
 
 async fn request(server: &TestServer, method: Method, path: &str, body: impl Into<Bytes>, token: Option<&str>) -> Reply {
-    let stream = TcpStream::connect(server.addr).await.unwrap();
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+    try_request(server.addr, method, path, body, token).await.unwrap_or_else(|e| panic!("{}", e))
+}
+
+/// A request whose connection may be cut (the server aborting it).
+async fn try_request(addr: SocketAddr, method: Method, path: &str, body: impl Into<Bytes>, token: Option<&str>) -> Result<Reply, hyper::Error> {
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(async move {
         let _ = conn.await;
     });
@@ -57,9 +57,9 @@ async fn request(server: &TestServer, method: Method, path: &str, body: impl Int
     if let Some(token) = token {
         req = req.header("authorization", format!("Bearer {}", token));
     }
-    let res = sender.send_request(req.body(Full::new(body.into())).unwrap()).await.unwrap();
+    let res = sender.send_request(req.body(Full::new(body.into())).unwrap()).await?;
     let (parts, body) = res.into_parts();
-    Reply { status: parts.status, headers: parts.headers, body: body.collect().await.expect("a complete body").to_bytes() }
+    Ok(Reply { status: parts.status, headers: parts.headers, body: body.collect().await?.to_bytes() })
 }
 
 async fn post(server: &TestServer, path: &str, body: impl Into<Bytes>) -> Reply {
@@ -218,7 +218,7 @@ async fn a_failed_stream_aborts_the_response() {
 #[test]
 fn a_restore_gives_up_on_a_database_that_stays_busy() {
     let dir = tempfile::tempdir().unwrap();
-    let ctx = Arc::new(ServerContext::new(dir.path().to_path_buf(), None));
+    let ctx = Arc::new(ServerContext::directory(dir.path().to_path_buf(), None));
     let db = ctx.get_db("app", true).unwrap();
     {
         let mut db = db.write().unwrap();
@@ -255,4 +255,162 @@ fn a_restore_gives_up_on_a_database_that_stays_busy() {
     assert!(matches!(ctx.begin_restore("app"), Err(ApiError::Unavailable(_))));
     drop(first);
     ctx.begin_restore("app").unwrap();
+}
+
+// ───────────────────────────────── maintenance port (`ServerContext::single`) ─────────────────────────────────
+
+const USER: &str = "model User {\n  name String\n}";
+
+/// An embedded app's database: open in-process, the handle shared with the port.
+fn app_db(dir: &tempfile::TempDir) -> Arc<RwLock<MarciDB>> {
+    Arc::new(RwLock::new(MarciDB::new(USER, dir.path().to_str().unwrap())))
+}
+
+fn app_count(db: &RwLock<MarciDB>) -> u64 {
+    let db = db.read().unwrap();
+    db.count(db.get_model("User").unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_maintenance_port_serves_its_one_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = app_db(&dir);
+    let addr = listen(ServerContext::single("app".to_string(), db.clone(), None)).await;
+    let server = TestServer { addr, dir };
+
+    // What is written over HTTP is the app's data, and the other way round.
+    assert_eq!(post(&server, "/app/User/insert", json!({ "name": "ann" }).to_string()).await.status, StatusCode::OK);
+    assert_eq!(app_count(&db), 1);
+    {
+        let db = db.read().unwrap();
+        let user = db.get_model("User").unwrap();
+        db.insert_item(user, &marcidb::parse_insert(&db.schema, user, &json!({ "name": "bob" })).unwrap()).unwrap();
+    }
+    assert_eq!(count(&server, "app").await, json!(2));
+
+    let backup = request(&server, Method::GET, "/app/$backup", Bytes::new(), None).await;
+    assert_eq!(backup.status, StatusCode::OK);
+    BackupReader::open(&backup.body[..]).unwrap().finish().unwrap();
+    assert_eq!(request(&server, Method::GET, "/$health", Bytes::new(), None).await.status, StatusCode::OK);
+
+    // No other database is here — not even to be created.
+    for (method, path, body) in [
+        (Method::POST, "/other/User/count", "{}"),
+        (Method::POST, "/other/$sync", USER),
+        (Method::POST, "/other/$sync?plan=1", USER),
+        (Method::POST, "/other/$migrate", "create entity Thing"),
+        (Method::GET, "/other/$snapshot", ""),
+        (Method::GET, "/other/$backup", ""),
+    ] {
+        let reply = request(&server, method.clone(), path, body, None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{} {}", method, path);
+        assert!(reply.json()["error"].as_str().unwrap().contains("serves only database 'app'"), "{} {}: {:?}", method, path, reply.body);
+    }
+
+    // Replacing or dropping the database is the app's business, not the port's.
+    for (method, path) in [
+        (Method::POST, "/app/$restore"),
+        (Method::POST, "/app/$restore?into=copy"),
+        (Method::POST, "/other/$restore"),
+        (Method::DELETE, "/app"),
+        (Method::DELETE, "/other"),
+    ] {
+        let reply = request(&server, method.clone(), path, backup.body.clone(), None).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{} {}", method, path);
+        let error = reply.json()["error"].as_str().unwrap().to_string();
+        assert!(error.contains("not available on an embedded maintenance port"), "{} {}: {}", method, path, error);
+        if path.contains("$restore") {
+            assert!(error.contains("restoreDatabase"), "{}", error);
+        }
+    }
+    assert_eq!(app_count(&db), 2);
+
+    // A migration over the port changes the schema the app sees: it is the same handle.
+    let synced = post(&server, "/app/$sync", "model User {\n  name String\n  age  UInt?\n}").await;
+    assert_eq!(synced.status, StatusCode::OK, "{:?}", synced.body);
+    assert!(db.read().unwrap().get_model("User").unwrap().fields.iter().any(|f| f.name == "age"));
+    assert_eq!(app_count(&db), 2);
+}
+
+/// Holds `db`'s write lock on another thread for `hold`: a request against the database waits that long.
+fn hold_write(db: Arc<RwLock<MarciDB>>, hold: Duration) -> std::thread::JoinHandle<()> {
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = db.write().unwrap();
+        held_tx.send(()).unwrap();
+        std::thread::sleep(hold);
+    });
+    held_rx.recv().unwrap();
+    holder
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_in_flight_finishes_then_the_port_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = app_db(&dir);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let ctx = Arc::new(ServerContext::single("app".to_string(), db.clone(), None).log_requests(false));
+    let served = tokio::spawn(serve(listener, ctx, async { let _ = stopped.await; }));
+
+    let holder = hold_write(db.clone(), Duration::from_millis(500));
+    let slow = tokio::spawn(try_request(addr, Method::POST, "/app/User/insert", json!({ "name": "slow" }).to_string(), None));
+    tokio::time::sleep(Duration::from_millis(150)).await; // the insert is in, waiting for the lock
+
+    let started = Instant::now();
+    stop.send(()).unwrap();
+    served.await.unwrap();
+    assert!(started.elapsed() < SHUTDOWN_GRACE, "took {:?}", started.elapsed());
+    assert_eq!(slow.await.unwrap().expect("the request in flight is answered").status, StatusCode::OK);
+    assert!(TcpStream::connect(addr).await.is_err(), "the port is closed once serve returns");
+    holder.join().unwrap();
+    assert_eq!(app_count(&db), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_that_outlives_the_grace_period_is_aborted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = app_db(&dir);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let ctx = Arc::new(ServerContext::single("app".to_string(), db.clone(), None).log_requests(false));
+    let served = tokio::spawn(serve_with_grace(listener, ctx, async { let _ = stopped.await; }, Duration::from_millis(200)));
+
+    let holder = hold_write(db.clone(), Duration::from_millis(1500));
+    let slow = tokio::spawn(try_request(addr, Method::POST, "/app/User/insert", json!({ "name": "slow" }).to_string(), None));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let started = Instant::now();
+    stop.send(()).unwrap();
+    served.await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(1000), "took {:?}", started.elapsed());
+    assert!(slow.await.unwrap().is_err(), "the aborted request gets no answer");
+    holder.join().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_journal_read_does_not_hold_the_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = app_db(&dir);
+    {
+        let db = db.read().unwrap();
+        db.journal_open(db.get_model("User").unwrap(), "j", &["delete".to_string()]).unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let ctx = Arc::new(ServerContext::single("app".to_string(), db, None).log_requests(false));
+    let served = tokio::spawn(serve(listener, ctx, async { let _ = stopped.await; }));
+
+    let waiting = tokio::spawn(try_request(addr, Method::GET, "/app/User/$journal/j?wait=30", Bytes::new(), None));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let started = Instant::now();
+    stop.send(()).unwrap();
+    served.await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+    let reply = waiting.await.unwrap().expect("the waiting read is answered");
+    assert_eq!((reply.status, reply.json()), (StatusCode::OK, json!([])));
 }
