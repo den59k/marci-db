@@ -42,11 +42,36 @@ pub struct Entity {
     /// still hold dead bytes there). Kept in the snapshot as `@retired(N)` lines; `payload_offset` (the
     /// high-water mark) accounts for them so new fields always get a fresh slot above any retired one.
     pub retired_slots: Vec<usize>,
+    /// The composite unique indexes: the fields carrying `@unique(<name>)`, grouped by name (a cache
+    /// rebuilt from the attributes — `resolve_indexes`).
+    pub unique_groups: Vec<UniqueGroup>,
 }
 
 impl Entity {
     pub fn new(name: String, fields: Vec<Field>) -> Self {
-        Entity { name, fields, payload_offset: 0, autoinsert: false, rev_dependencies: vec![], retired_slots: vec![] }
+        Entity { name, fields, payload_offset: 0, autoinsert: false, rev_dependencies: vec![], retired_slots: vec![], unique_groups: vec![] }
+    }
+}
+
+/// A composite unique index over several fields of one model (`user User @unique(pair)`, `post Post
+/// @unique(pair)`): one tree, keyed by each part encoded as that field's value index would encode it, then
+/// the row id. A row with a null part has no entry — nulls never collide, as in SQL.
+#[derive(Debug, Clone)]
+pub struct UniqueGroup {
+    pub name: String,
+    pub tree_name: String,
+    /// (field index, how that field's value is encoded in the key), in field order
+    pub parts: Vec<(usize, FieldIndex)>,
+}
+
+impl UniqueGroup {
+    /// `Like.user, Like.post` — what an error names.
+    pub fn fields_text(&self, entity: &Entity) -> String {
+        self.parts.iter().map(|(fi, _)| entity.fields[*fi].full_name.as_str()).collect::<Vec<_>>().join(", ")
+    }
+    /// The parts' field names, in order (a migration's signature).
+    pub fn field_names(&self, entity: &Entity) -> Vec<String> {
+        self.parts.iter().map(|(fi, _)| entity.fields[*fi].name.clone()).collect()
     }
 }
 

@@ -170,7 +170,7 @@ fn summarize(ops: &[MigrateOp]) -> String {
       MigrateOp::AddField { .. } => af += 1,
       MigrateOp::DropField { .. } => df += 1,
       MigrateOp::AlterField { .. } => alf += 1,
-      MigrateOp::AddIndex { .. } | MigrateOp::DropIndex { .. } => idx += 1,
+      MigrateOp::AddIndex { .. } | MigrateOp::DropIndex { .. } | MigrateOp::AddUniqueGroup { .. } | MigrateOp::DropUniqueGroup { .. } => idx += 1,
     }
   }
   [

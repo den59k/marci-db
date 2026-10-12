@@ -109,6 +109,8 @@ fn plan_to_json(ops: &[marcidb::MigrateOp]) -> Value {
         AlterField { entity, field } => serde_json::json!({ "op": "alterField", "entity": entity, "field": field, "destructive": false, "text": format!("alter field {}.{}", entity, field) }),
         AddIndex { entity, field, unique } => serde_json::json!({ "op": "addIndex", "entity": entity, "field": field, "unique": unique, "destructive": false, "text": format!("add {} {}.{}", if *unique { "unique" } else { "index" }, entity, field) }),
         DropIndex { entity, field, unique } => serde_json::json!({ "op": "dropIndex", "entity": entity, "field": field, "unique": unique, "destructive": false, "text": format!("drop {} {}.{}", if *unique { "unique" } else { "index" }, entity, field) }),
+        AddUniqueGroup { entity, name, fields } => serde_json::json!({ "op": "addUniqueGroup", "entity": entity, "name": name, "fields": fields, "destructive": false, "text": format!("add unique_group {}.{}({})", entity, name, fields.join(", ")) }),
+        DropUniqueGroup { entity, name } => serde_json::json!({ "op": "dropUniqueGroup", "entity": entity, "name": name, "destructive": false, "text": format!("drop unique_group {}.{}", entity, name) }),
     }).collect();
     let destructive = items.iter().any(|i| i["destructive"] == Value::Bool(true));
     serde_json::json!({ "ops": items, "destructive": destructive })

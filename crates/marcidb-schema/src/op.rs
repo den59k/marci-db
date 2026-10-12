@@ -13,6 +13,10 @@ pub enum MigrateOp {
     AlterField { entity: String, field: String },
     AddIndex { entity: String, field: String, unique: bool },
     DropIndex { entity: String, field: String, unique: bool },
+    /// A composite unique index (`@unique(<name>)` on `fields`): built from the existing rows, which must
+    /// not collide.
+    AddUniqueGroup { entity: String, name: String, fields: Vec<String> },
+    DropUniqueGroup { entity: String, name: String },
 }
 
 #[derive(Debug, PartialEq)]

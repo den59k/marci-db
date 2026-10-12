@@ -49,6 +49,9 @@ pub fn collect_indexes_to_delete<'a>(schema: &'a Schema, entity: &'a Entity, id:
       FieldLocation::Virtual => {},
     }
   }
+  for group in entity.unique_groups.iter() {
+    indexes_to_delete.push(DeleteIndex::UniqueGroup { group });
+  }
 
   return indexes_to_delete;
 }

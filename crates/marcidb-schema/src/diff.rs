@@ -32,6 +32,21 @@ pub fn diff(old: &Schema, new: &Schema) -> Result<Vec<MigrateOp>, MigrateError> 
             }
         };
         diff_fields(old, new, &e.name, old_fields, &e.fields, &mut ops)?;
+
+        // Composite unique indexes: a group whose name or fields changed is dropped and built anew. After
+        // the field ops, so a build reads fields that exist and a drop of a member's field precedes nothing.
+        let old_groups = old_by.get(e.name.as_str()).map(|o| group_sigs(o)).unwrap_or_default();
+        let new_groups = group_sigs(e);
+        for (name, fields) in old_groups.iter() {
+            if new_groups.iter().find(|(n, _)| n == name).map(|(_, f)| f) != Some(fields) {
+                ops.push(MigrateOp::DropUniqueGroup { entity: e.name.clone(), name: name.clone() });
+            }
+        }
+        for (name, fields) in new_groups.iter() {
+            if old_groups.iter().find(|(n, _)| n == name).map(|(_, f)| f) != Some(fields) {
+                ops.push(MigrateOp::AddUniqueGroup { entity: e.name.clone(), name: name.clone(), fields: fields.clone() });
+            }
+        }
     }
 
     // Removed entities
@@ -42,6 +57,11 @@ pub fn diff(old: &Schema, new: &Schema) -> Result<Vec<MigrateOp>, MigrateError> 
     }
 
     Ok(ops)
+}
+
+/// (name, the parts' field names) of every unique group — what a migration compares.
+fn group_sigs(entity: &Entity) -> Vec<(String, Vec<String>)> {
+    entity.unique_groups.iter().map(|g| (g.name.clone(), g.field_names(entity))).collect()
 }
 
 fn diff_fields(

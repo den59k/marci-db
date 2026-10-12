@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, StorageError, delete_op::process_delete, id_text, json_parsers::{EncodeError, parse_update, decode_id}, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{ListOp, UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, decode_primitive_list, encode_id_list, encode_primitive_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
+use crate::{Field, MarciDB, StorageError, delete_op::process_delete, id_text, json_parsers::{EncodeError, parse_update, decode_id}, error::RequireTree, index_provider::{RowRef, on_field_update}, index_utils::{encode_full_index, encode_index, encode_unique_group}, schema::{Entity, FieldIndex, FieldLocation, RefBinding, RefInfo, Schema}, update_op::{ListOp, UpdateError, UpdateField, UpdateOp, UpdateRelationOp, UpdateValue}, utils::{check_exists_condition, decode_id_list, decode_primitive_list, encode_id_list, encode_primitive_list, get_body_data, get_data, get_end, get_end_optimized, get_offset, move_offsets, move_offsets_left, row_header_len}, write_op::{delete_ref_indexes, process_write, write_ref_indexes}};
 
 pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update: &UpdateOp, db: &MarciDB) -> Result<bool, UpdateError> { 
 
@@ -46,9 +46,30 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
     Ok(())
   })?;
 
-  if let Some(new_data) = resp {
+  if let Some(new_data) = &resp {
     let mut tree = tx.require_tree(entity.name.as_bytes())?;
-    tree.insert(id, &new_data)?;
+    tree.insert(id, new_data)?;
+  }
+
+  // The composite unique indexes: a group whose key changed moves its entry; a taken key is a violation
+  // naming the group's fields and the row holding it (a part gone null drops the entry, as on insert).
+  if let Some(new_data) = &resp {
+    for group in entity.unique_groups.iter() {
+      let old_key = encode_unique_group(entity, group, id, &data, &db.schema);
+      let new_key = encode_unique_group(entity, group, id, new_data, &db.schema);
+      if old_key == new_key { continue }
+      let mut tree = tx.require_tree(group.tree_name.as_bytes())?;
+      if let Some(old_key) = old_key {
+        tree.delete(&[ old_key.as_slice(), id ].concat())?;
+      }
+      if let Some(new_key) = new_key {
+        if let Some(exists) = tree.prefix_keys(&new_key.as_slice())?.next() {
+          let exists_id = exists?[new_key.len()..].to_vec();
+          return Err(UpdateError::UniqueViolation(group.fields_text(entity), id_text(&exists_id, entity, &db.schema)));
+        }
+        tree.insert(&[ new_key.as_slice(), id ].concat(), &[])?;
+      }
+    }
   }
 
   for update_ref in update.update_refs.iter() {

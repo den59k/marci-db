@@ -2,7 +2,7 @@ use std::{sync::atomic::Ordering};
 
 use canopydb::{Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, id_text, update_op::{UpdateError, process_update::{bound_child_field, relink_children}}, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
+use crate::{Field, MarciDB, ProviderError, StorageError, error::RequireTree, id_text, index_utils::encode_unique_group, update_op::{UpdateError, process_update::{bound_child_field, relink_children}}, index_provider::{RowRef, on_row_insert}, schema::{Entity, FieldDefault, FieldType, RefBinding, RefInfo, Schema}, utils::move_offsets, write_op::{WriteDefault, WriteDefaultInsert, WriteIndex, WriteOp, WriteRelation}};
 
 #[derive(Debug,PartialEq)]
 pub enum InsertError {
@@ -108,6 +108,18 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
         tree.insert(&val, &[])?;
       }
     }
+  }
+
+  // The composite unique indexes: one entry per group the row has every part of; a taken key is a
+  // violation naming the group's fields and the row holding it.
+  for group in entity.unique_groups.iter() {
+    let Some(key) = encode_unique_group(entity, group, &write_id, data, &db.schema) else { continue };
+    let mut tree = tx.require_tree(group.tree_name.as_bytes())?;
+    if let Some(exists) = tree.prefix_keys(&key.as_slice())?.next() {
+      let exists_id = exists?[key.len()..].to_vec();
+      return Err(InsertError::UniqueViolation(group.fields_text(entity), id_text(&exists_id, entity, &db.schema)));
+    }
+    tree.insert(&[ key.as_slice(), write_id.as_slice() ].concat(), &[])?;
   }
 
   // Live `@custom` index maintenance: feed the new row to any provider that opts into incremental upkeep

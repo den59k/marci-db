@@ -57,6 +57,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 
 - `@id` — primary key field (composite keys: several `@id` fields)
 - `@unique` — unique secondary index on a scalar; on a relation field it is the one-to-one constraint
+- `@unique(<name>)` — a composite unique index: the same name on two or more fields of a model makes one index over them (`user User @unique(pair)` + `post Post @unique(pair)` = one like per user and post), the way several `@id` make one key. A row with a null part is not constrained. A violation names the fields: `Like.user, Like.post: the value is already taken (by the row with id 7)`
 - `@index` — secondary index on a scalar/enum/list (used by `$where`, `$order` and aggregations). **Not** valid on a relation field — index a relation through its reverse collection (`@bind`) instead
 - `@default(value)` — also `autoincrement()`, `now()`
 - `@bind(Model.field)` — declares the reverse side of a relation

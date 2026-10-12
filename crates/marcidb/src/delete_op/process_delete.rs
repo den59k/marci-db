@@ -1,6 +1,6 @@
 use canopydb::{Transaction, Tree, WriteTransaction};
 
-use crate::{Field, MarciDB, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete, on_field_update}, index_utils::{encode_full_index, increase_bit}, schema::{Entity, FieldIndex, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset, move_offsets_left, row_header_len}};
+use crate::{Field, MarciDB, delete_op::{DeleteError, DeleteIndex, DeleteOp, DependencyAction, DependencyActionType, RefToDelete}, error::RequireTree, index_provider::{RowRef, on_field_delete, on_field_update}, index_utils::{encode_full_index, encode_unique_group, increase_bit}, schema::{Entity, FieldIndex, RefBinding, Schema}, utils::{get_body_data, get_data, get_end_optimized, get_offset, move_offsets_left, row_header_len}};
 
 pub fn process_delete<'a>(
   tx: &'a WriteTransaction,
@@ -60,6 +60,12 @@ pub fn process_delete<'a>(
         };
         let mut tree = tx.require_tree(index.tree_name())?;
         tree.delete(&encode_full_index(field, index, id, value))?;
+      },
+      DeleteIndex::UniqueGroup { group } => {
+        if let Some(key) = encode_unique_group(entity, group, id, body_value.as_ref().unwrap(), schema) {
+          let mut tree = tx.require_tree(group.tree_name.as_bytes())?;
+          tree.delete(&[ key.as_slice(), id ].concat())?;
+        }
       },
       DeleteIndex::Custom { field } => {
         // The old field value lives in the body; `is_body_need()` guaranteed it was read above.

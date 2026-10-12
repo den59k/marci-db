@@ -28,6 +28,7 @@ pub mod journal_tests;
 pub mod foreign_key_tests;
 pub mod error_text_tests;
 pub mod bind_list_tests;
+pub mod unique_group_tests;
 
 use std::str::FromStr;
 

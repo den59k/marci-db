@@ -143,6 +143,7 @@ fn serialize_attr(attr: &Attribute) -> Option<String> {
   Some(match attr {
     Attribute::Id | Attribute::BindUnresolved(_) | Attribute::List => return None,
     Attribute::Unique => "@unique".to_string(),
+    Attribute::UniqueGroup(name) => format!("@unique({})", name),
     Attribute::Index => "@index".to_string(),
     Attribute::Default(s) => format!("@default({})", s),
     Attribute::Format(FieldCustomFormat::Uuid) => "@format(uuid)".to_string(),
@@ -452,6 +453,8 @@ fn apply_attr_token(sf: &mut SnapField, token: &str) -> Result<(), SchemaError> 
     _ => {
       if let Some(n) = inside(token, "slot") {
         sf.location = FieldLocation::Body { offset_pos: n.parse().map_err(|_| SchemaError(format!("snapshot: bad slot: {}", token)))? };
+      } else if let Some(name) = inside(token, "unique") {
+        sf.attributes.push(Attribute::UniqueGroup(name));
       } else if let Some(t) = inside(token, "index_tree") {
         sf.binding = Some(RefBinding::IndexTree(t));
       } else if let Some(t) = inside(token, "id_list") {

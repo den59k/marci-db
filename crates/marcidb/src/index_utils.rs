@@ -1,6 +1,19 @@
 use smallvec::SmallVec;
 
-use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema}, utils::get_data};
+use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema, UniqueGroup}, utils::get_data};
+
+/// A row's key in a unique group's tree, without the row id: each part encoded as that field's value index
+/// encodes it (fixed-size parts as they are, variable ones with a terminator), in field order. None when a
+/// part is null — such a row has no entry, so nulls never collide.
+pub fn encode_unique_group(entity: &Entity, group: &UniqueGroup, id: &[u8], body: &[u8], schema: &Schema) -> Option<Vec<u8>> {
+  let mut key = Vec::new();
+  for (fi, part) in group.parts.iter() {
+    let field = &entity.fields[*fi];
+    let value = get_data(entity, field, id, body, schema)?;
+    key.extend(encode_index(field, part, value));
+  }
+  Some(key)
+}
 
 /// Increments the buffer by one bit
 pub fn increase_bit(start: &[u8]) -> Option<Vec<u8>> {

@@ -1,6 +1,6 @@
 use std::{collections::HashMap};
 
-use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, SchemaError, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}, schema_resolve_bindings::{resolve_bind_refs, resolve_ref_bindings}}};
+use crate::{schema::{Entity, EntityDependency, FieldIndex, RefInfo, Schema, SchemaError, UniqueGroup, schema_attributes::{Attribute, DeleteConstraint}, schema_default_value::{FieldDefault, resolve_default_value}, schema_enum::{EnumDef, parse_enum_block}, schema_field::{EnumInfo, Field, FieldExistsCondition, FieldLocation, FieldType, RefBinding, parse_field_raw}, schema_resolve_bindings::{resolve_bind_refs, resolve_ref_bindings}}};
 
 /// Parses schema text into raw blocks (models/structs/enums) BEFORE resolving refs,
 /// offsets, indexes, etc. Used by both `parse_schema` and the migration engine (the diff
@@ -448,7 +448,53 @@ fn get_delete_constraint(attributes: &[Attribute]) -> Option<&DeleteConstraint> 
     })
 }
 
+/// `@unique(<name>)` on two or more fields of a model is one composite unique index (`UniqueGroup`): the
+/// parts in field order, each encoded as its own value index would be. A list, a back-reference or a struct
+/// cannot be a part; a group of one field is a mistake (that is plain `@unique`).
+fn resolve_unique_groups(model: &mut Entity) -> Result<(), SchemaError> {
+    model.unique_groups.clear();
+    let mut groups: Vec<(String, Vec<usize>)> = vec![];
+    for (fi, field) in model.fields.iter().enumerate() {
+        for attr in field.attributes.iter() {
+            if let Attribute::UniqueGroup(name) = attr {
+                match groups.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, fields)) => fields.push(fi),
+                    None => groups.push((name.clone(), vec![fi])),
+                }
+            }
+        }
+    }
+    for (name, fields) in groups {
+        if fields.len() < 2 {
+            return Err(SchemaError(format!(
+                "@unique({}) on {}: a unique group needs the same name on two or more fields — one field alone is `@unique`",
+                name, model.fields[fields[0]].full_name
+            )));
+        }
+        let tree_name = format!("unique_{}.{}", model.name, name);
+        let mut parts = Vec::with_capacity(fields.len());
+        for fi in fields {
+            let field = &model.fields[fi];
+            if matches!(field.location, FieldLocation::Virtual) {
+                return Err(SchemaError(format!("@unique({}) on {}: a back-reference stores nothing and cannot be part of a unique group", name, field.full_name)));
+            }
+            let part = match &field.ty {
+                FieldType::Primitive(ty) => match ty.get_num_type() {
+                    Some(ty) => FieldIndex::Number { tree_name: tree_name.clone(), unique: true, ty },
+                    None => FieldIndex::Value { tree_name: tree_name.clone(), unique: true },
+                },
+                FieldType::Enum(_) | FieldType::Ref(_) => FieldIndex::Value { tree_name: tree_name.clone(), unique: true },
+                _ => return Err(SchemaError(format!("@unique({}) on {}: a list cannot be part of a unique group", name, field.full_name))),
+            };
+            parts.push((fi, part));
+        }
+        model.unique_groups.push(UniqueGroup { name, tree_name, parts });
+    }
+    Ok(())
+}
+
 fn resolve_indexes(model: &mut Entity) -> Result<(), SchemaError> {
+    resolve_unique_groups(model)?;
     for field in model.fields.iter_mut() {
         let mut has_index = false;
         let mut unique = false;

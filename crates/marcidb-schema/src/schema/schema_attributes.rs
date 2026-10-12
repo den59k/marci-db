@@ -8,6 +8,9 @@ pub enum Attribute {
     Id,
     Default(String),
     Unique,
+    /// `@unique(<name>)`: the field is part of the composite unique index `<name>` of its model — the same
+    /// name on two or more fields makes one index over them (materialized into [`super::UniqueGroup`]).
+    UniqueGroup(String),
     /// A module-provided index, e.g. `@custom(vector, cosine)` or `@custom(fulltext, english)`.
     /// `name` selects the index provider; `args` is the raw remainder, parsed by the provider itself
     /// (the schema layer stays provider-agnostic). Materialized into [`super::FieldIndex::Custom`].
@@ -38,6 +41,14 @@ pub enum DeleteConstraint {
 pub fn parse_attribute(s: &str) -> Result<Attribute, SchemaError> {
     if s.starts_with("index") {
         return Ok(Attribute::Index)
+    }
+
+    if let Some(inside) = s.strip_prefix("unique(").and_then(|x| x.strip_suffix(')')) {
+        let name = inside.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err(SchemaError(format!("@unique(<name>) needs a name — a word that marks the fields of one composite unique index: {}", s)));
+        }
+        return Ok(Attribute::UniqueGroup(name.to_string()))
     }
 
     if s.starts_with("unique") {

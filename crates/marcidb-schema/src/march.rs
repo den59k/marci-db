@@ -23,6 +23,8 @@ fn serialize_op(op: &MigrateOp, schema: &Schema) -> String {
         MigrateOp::DropField { entity, field } => format!("drop field {}.{}", entity, field),
         MigrateOp::AddIndex { entity, field, unique } => format!("add {} {}.{}", index_kw(*unique), entity, field),
         MigrateOp::DropIndex { entity, field, unique } => format!("drop {} {}.{}", index_kw(*unique), entity, field),
+        MigrateOp::AddUniqueGroup { entity, name, fields } => format!("add unique_group {}.{}({})", entity, name, fields.join(", ")),
+        MigrateOp::DropUniqueGroup { entity, name } => format!("drop unique_group {}.{}", entity, name),
     }
 }
 
@@ -57,6 +59,8 @@ enum FileOp {
     DropField { entity: String, field: String },
     AddIndex { entity: String, field: String, unique: bool },
     DropIndex { entity: String, field: String, unique: bool },
+    AddUniqueGroup { entity: String, name: String, fields: Vec<String> },
+    DropUniqueGroup { entity: String, name: String },
 }
 
 impl FileOp {
@@ -70,6 +74,8 @@ impl FileOp {
             FileOp::DropField { entity, field } => MigrateOp::DropField { entity: entity.clone(), field: field.clone() },
             FileOp::AddIndex { entity, field, unique } => MigrateOp::AddIndex { entity: entity.clone(), field: field.clone(), unique: *unique },
             FileOp::DropIndex { entity, field, unique } => MigrateOp::DropIndex { entity: entity.clone(), field: field.clone(), unique: *unique },
+            FileOp::AddUniqueGroup { entity, name, fields } => MigrateOp::AddUniqueGroup { entity: entity.clone(), name: name.clone(), fields: fields.clone() },
+            FileOp::DropUniqueGroup { entity, name } => MigrateOp::DropUniqueGroup { entity: entity.clone(), name: name.clone() },
         }
     }
 }
@@ -141,6 +147,32 @@ fn apply_file_op(blocks: &mut Vec<(String, Vec<String>)>, op: FileOp) -> Result<
         }
         FileOp::AddIndex { entity, field, unique } => set_field_index(blocks, &entity, &field, Some(unique))?,
         FileOp::DropIndex { entity, field, .. } => set_field_index(blocks, &entity, &field, None)?,
+        FileOp::AddUniqueGroup { entity, name, fields } => {
+            set_unique_group(blocks, &entity, &name, None)?;
+            set_unique_group(blocks, &entity, &name, Some(&fields))?;
+        }
+        FileOp::DropUniqueGroup { entity, name } => set_unique_group(blocks, &entity, &name, None)?,
+    }
+    Ok(())
+}
+
+/// Puts `@unique(<name>)` on exactly the given fields' lines (None — on none: the group is dropped).
+fn set_unique_group(blocks: &mut [(String, Vec<String>)], entity: &str, name: &str, fields: Option<&[String]>) -> Result<(), SchemaError> {
+    let block = blocks.iter_mut().find(|(n, _)| n == entity)
+        .ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
+    let token = format!("@unique({})", name);
+    if let Some(fields) = fields {
+        for field in fields {
+            if !block.1.iter().any(|l| field_name_of(l) == field) {
+                return Err(SchemaError(format!("evolve: unknown field {}.{} in unique group {}", entity, field, name)));
+            }
+        }
+    }
+    for line in block.1.iter_mut() {
+        let keep = fields.is_some_and(|fields| fields.iter().any(|f| f == field_name_of(line)));
+        let mut toks: Vec<&str> = line.split_whitespace().filter(|t| *t != token).collect();
+        if keep { toks.push(&token); }
+        *line = toks.join(" ");
     }
     Ok(())
 }
@@ -300,6 +332,17 @@ fn parse_line_op(line: &str) -> Result<FileOp, SchemaError> {
     if let Some(rest) = line.strip_prefix("drop field ") {
         let (entity, field) = split_path(rest.trim())?;
         return Ok(FileOp::DropField { entity, field });
+    }
+    if let Some(rest) = line.strip_prefix("add unique_group ") {
+        let (path, fields) = rest.trim().strip_suffix(')').and_then(|r| r.split_once('('))
+            .ok_or_else(|| SchemaError(format!("add unique_group: expected Entity.name(field, field): {}", line)))?;
+        let (entity, name) = split_path(path.trim())?;
+        let fields: Vec<String> = fields.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect();
+        return Ok(FileOp::AddUniqueGroup { entity, name, fields });
+    }
+    if let Some(rest) = line.strip_prefix("drop unique_group ") {
+        let (entity, name) = split_path(rest.trim())?;
+        return Ok(FileOp::DropUniqueGroup { entity, name });
     }
     for (kw, unique) in [("add unique ", true), ("add index ", false)] {
         if let Some(rest) = line.strip_prefix(kw) {

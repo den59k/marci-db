@@ -6,7 +6,7 @@
 
 use canopydb::WriteTransaction;
 
-use crate::index_utils::{encode_full_index, encode_index};
+use crate::index_utils::{encode_full_index, encode_index, encode_unique_group};
 use crate::schema::{Entity, Field, FieldIndex, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
 use crate::utils::get_data;
 use crate::StorageError;
@@ -96,6 +96,12 @@ pub fn apply(tx: &WriteTransaction, old: &Schema, new: &Schema, ops: &[MigrateOp
       MigrateOp::AlterField { .. } => {}
       MigrateOp::AddIndex { entity, field, .. } => build_index(tx, new, entity, field)?,
       MigrateOp::DropIndex { entity, field, .. } => drop_index(tx, old, entity, field)?,
+      MigrateOp::AddUniqueGroup { entity, name, .. } => build_unique_group(tx, new, entity, name)?,
+      MigrateOp::DropUniqueGroup { entity, name } => {
+        if let Some(group) = find_entity(old, entity).unique_groups.iter().find(|g| &g.name == name) {
+          tx.delete_tree(group.tree_name.as_bytes())?;
+        }
+      }
       MigrateOp::CreateEntity { name } => create_entity_trees(tx, find_entity(new, name))?,
       MigrateOp::DropEntity { name } => drop_entity_trees(tx, find_entity(old, name))?,
       MigrateOp::DropField { entity, field } => {
@@ -134,6 +140,9 @@ pub fn create_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(),
       tx.get_or_create_tree(index.tree_name())?;
     }
   }
+  for group in entity.unique_groups.iter() {
+    tx.get_or_create_tree(group.tree_name.as_bytes())?;
+  }
   Ok(())
 }
 
@@ -154,7 +163,28 @@ fn drop_entity_trees(tx: &WriteTransaction, entity: &Entity) -> Result<(), canop
       tx.delete_tree(index.tree_name())?;
     }
   }
+  for group in entity.unique_groups.iter() {
+    tx.delete_tree(group.tree_name.as_bytes())?;
+  }
   tx.delete_tree(entity.name.as_bytes())?;
+  Ok(())
+}
+
+/// Builds a composite unique index from the existing rows; two rows with the same parts refuse the migration.
+fn build_unique_group(tx: &WriteTransaction, schema: &Schema, entity: &str, name: &str) -> Result<(), MigrateApplyError> {
+  let entity = find_entity(schema, entity);
+  let group = entity.unique_groups.iter().find(|g| g.name == name)
+    .unwrap_or_else(|| panic!("unique group {}.{} not found", entity.name, name));
+  let mut tree = tx.get_or_create_tree(group.tree_name.as_bytes())?;
+  let model_tree = tx.require_tree(entity.name.as_bytes())?;
+  for row in model_tree.iter()? {
+    let (id, body) = row?;
+    let Some(key) = encode_unique_group(entity, group, &id, &body, schema) else { continue };
+    if tree.prefix_keys(&key.as_slice())?.next().transpose()?.is_some() {
+      return Err(MigrateApplyError::UniqueViolation { field: group.fields_text(entity) });
+    }
+    tree.insert(&[ key.as_slice(), id.as_ref() ].concat(), &[])?;
+  }
   Ok(())
 }
 

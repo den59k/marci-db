@@ -4,7 +4,7 @@ mod prepare_delete_op;
 pub use process_delete::{process_delete};
 pub use prepare_delete_op::prepare_delete;
 
-use crate::{Field, ProviderError, StorageError, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding}};
+use crate::{Field, ProviderError, StorageError, json_parsers::EncodeError, schema::{Entity, FieldIndex, RefBinding, UniqueGroup}};
 
 #[derive(Debug)]
 pub struct DeleteOp<'a> {
@@ -17,7 +17,7 @@ impl DeleteOp<'_> {
   pub fn is_body_need(&self) -> bool {
     // A `Custom` entry needs the old field value, which is read from the body — so force the body read too.
     // A `@list` id array (own field or a dependency's forward binding) is likewise read from the body.
-    return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. } | DeleteIndex::Custom { .. })) ||
+    return self.indexes_to_delete.iter().any(|f| matches!(f, DeleteIndex::BodyValue { .. } | DeleteIndex::Custom { .. } | DeleteIndex::UniqueGroup { .. })) ||
       self.dependencies.iter().any(|f| matches!(f.binding, Some((_, RefBinding::FieldValue)) | Some((_, RefBinding::IdList { .. })))) ||
       self.refs_to_delete.iter().any(|f| matches!(f, RefToDelete::IdListRev { .. }))
   }
@@ -34,6 +34,8 @@ pub enum DeleteIndex<'a> {
   /// A live `@custom` (module) index on `field`: its `on_delete` hook is dispatched with the old field value
   /// read from the row body. One entry per indexed field; the provider iterates the field's custom indexes.
   Custom { field: &'a Field },
+  /// A composite unique index: the entry is recomputed from the key and the body (`encode_unique_group`).
+  UniqueGroup { group: &'a UniqueGroup },
 }
 
 #[derive(Debug)]
