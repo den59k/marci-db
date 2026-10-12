@@ -33,10 +33,22 @@ async function failure(res: Response): Promise<MarciError> {
   return new MarciError(res.status, text || `HTTP ${res.status}`, kindOfStatus(res.status));
 }
 
-export async function request(method: string, url: string, body?: any): Promise<any> {
+/** Options of the HTTP transport — the second argument of `marcidb(url, options)`. */
+export interface HttpOptions {
+  /** Sent as `Authorization: Bearer <token>` on every request: for a server started with `--token`, or an
+   *  embedded app's maintenance port opened with one (`db.listen({ token })`). */
+  token?: string;
+}
+
+/** The headers `options` add to every request of the HTTP transport (none without options). */
+function optionHeaders(options?: HttpOptions): Record<string, string> {
+  return options?.token ? { Authorization: `Bearer ${options.token}` } : {};
+}
+
+export async function request(method: string, url: string, body?: any, options?: HttpOptions): Promise<any> {
   const res = await fetch(url, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...optionHeaders(options) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
@@ -62,13 +74,14 @@ const BINARY_MEDIA_TYPE = "application/x-marcidb-rows";
  *     schema/shape mismatch — so it sent the normal JSON body; no second round-trip needed).
  * A single request handles both outcomes; `run()` in the generated client branches on the return shape.
  */
-export async function requestBinary(url: string, body: any, schemaHash: string): Promise<Uint8Array | { json: any }> {
+export async function requestBinary(url: string, body: any, schemaHash: string, options?: HttpOptions): Promise<Uint8Array | { json: any }> {
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: `${BINARY_MEDIA_TYPE}, application/json`,
       "X-Marci-Schema": schemaHash,
+      ...optionHeaders(options),
     },
     body: JSON.stringify(body ?? {}),
   });

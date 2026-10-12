@@ -16,50 +16,54 @@ const SCHEMA_HASH = /* generated_schema_hash */
 // server's REST routes. This is the default when `marcidb()` is given a URL string. Behavior is identical
 // to the original per-action helpers — the embedded transport (marcidb-embedded) implements the same
 // `{ exec, batch }` interface against the native FFI instead, plus an optional `queryBinary` fast path.
-function httpTransport(url) {
+function httpTransport(url, options) {
+  // Every request carries the transport's options (a bearer token) — see `HttpOptions` in the runtime.
+  const send = (method, route, body) => request(method, route, body, options);
   return {
     exec(op) {
       switch (op.action) {
-        case "findMany":  return request("POST", `${url}/${op.model}/findMany`, op.query);
-        case "findFirst": return request("POST", `${url}/${op.model}/findFirst`, op.query);
-        case "insert":    return request("POST", `${url}/${op.model}/insert`, op.data);
-        case "update":    return request("POST", `${url}/${op.model}/update/${encodeId(op.id)}`, op.data);
-        case "upsert":    return request("POST", `${url}/${op.model}/upsert`, { key: op.key, data: op.data, ...(op.onInsert !== undefined ? { onInsert: op.onInsert } : {}) });
+        case "findMany":  return send("POST", `${url}/${op.model}/findMany`, op.query);
+        case "findFirst": return send("POST", `${url}/${op.model}/findFirst`, op.query);
+        case "insert":    return send("POST", `${url}/${op.model}/insert`, op.data);
+        case "update":    return send("POST", `${url}/${op.model}/update/${encodeId(op.id)}`, op.data);
+        case "upsert":    return send("POST", `${url}/${op.model}/upsert`, { key: op.key, data: op.data, ...(op.onInsert !== undefined ? { onInsert: op.onInsert } : {}) });
         // No id in the path — the filter and the payload travel together in the body
-        case "updateMany": return request("POST", `${url}/${op.model}/updateMany`, { ...(op.query ?? {}), data: op.data });
-        case "delete":    return request("POST", `${url}/${op.model}/delete/${encodeId(op.id)}`);
-        case "deleteMany": return request("POST", `${url}/${op.model}/deleteMany`, op.query ?? {});
-        case "count":     return request("POST", `${url}/${op.model}/count`, op.query ?? {});
-        case "aggregate": return request("POST", `${url}/${op.model}/aggregate`, op.query);
-        case "$reindex":  return request("POST", `${url}/${op.model}/$reindex`);
+        case "updateMany": return send("POST", `${url}/${op.model}/updateMany`, { ...(op.query ?? {}), data: op.data });
+        case "delete":    return send("POST", `${url}/${op.model}/delete/${encodeId(op.id)}`);
+        case "deleteMany": return send("POST", `${url}/${op.model}/deleteMany`, op.query ?? {});
+        case "count":     return send("POST", `${url}/${op.model}/count`, op.query ?? {});
+        case "aggregate": return send("POST", `${url}/${op.model}/aggregate`, op.query);
+        case "$reindex":  return send("POST", `${url}/${op.model}/$reindex`);
         // A journal of the model's changes: create, read (`after` confirms), drop
-        case "$journalOpen": return request("POST", `${url}/${op.model}/$journal/${op.journal.name}`, { on: op.journal.on });
+        case "$journalOpen": return send("POST", `${url}/${op.model}/$journal/${op.journal.name}`, { on: op.journal.on });
         case "$journalRead": {
           const { name, after, limit, wait } = op.journal;
           const params = [after !== undefined && `after=${after}`, limit !== undefined && `limit=${limit}`, wait && `wait=${wait}`].filter(Boolean).join("&");
-          return request("GET", `${url}/${op.model}/$journal/${name}${params ? "?" + params : ""}`);
+          return send("GET", `${url}/${op.model}/$journal/${name}${params ? "?" + params : ""}`);
         }
-        case "$journalDrop": return request("DELETE", `${url}/${op.model}/$journal/${op.journal.name}`);
+        case "$journalDrop": return send("DELETE", `${url}/${op.model}/$journal/${op.journal.name}`);
         default: throw new Error(`marcidb: unknown action '${op.action}'`);
       }
     },
     batch(ops) {
-      return request("POST", `${url}/$transaction`, ops);
+      return send("POST", `${url}/$transaction`, ops);
     },
     // Binary read fast path over HTTP: one request that advertises `Accept: <binary>, json` + the schema
     // fingerprint. The server replies binary (→ Uint8Array) when it agrees on schema + shape, else JSON
     // (→ `{ json }`, already parsed). No fallback round-trip; `run()` handles both. Reads only.
     queryBinary(op) {
       const path = op.action === "findFirst" ? "findFirst" : "findMany";
-      return requestBinary(`${url}/${op.model}/${path}`, op.query, SCHEMA_HASH);
+      return requestBinary(`${url}/${op.model}/${path}`, op.query, SCHEMA_HASH, options);
     },
   };
 }
 
-export function marcidb(transport) {
-  // Backward compatible: a URL string selects the HTTP transport. An object is used as-is and must
-  // implement { exec(op), batch(ops) } — this is how marcidb-embedded plugs in the in-process FFI.
-  if (typeof transport === "string") transport = httpTransport(transport);
+export function marcidb(transport, options) {
+  // A URL string selects the HTTP transport, configured by `options` ({ token }). An object is used as-is and
+  // must implement { exec(op), batch(ops) } — this is how marcidb-embedded plugs in the in-process FFI; it
+  // carries its own configuration, so options next to it are a mistake.
+  if (typeof transport === "string") transport = httpTransport(transport, options);
+  else if (options !== undefined) throw new TypeError("marcidb: options configure the HTTP transport — pass them with a URL, not with a transport object");
 
   // Binary read fast path: a transport that exposes `queryBinary` (the embedded FFI) returns query results
   // as a compact binary buffer, decoded here by a shape-specialized, cached decoder — no JSON tax. The

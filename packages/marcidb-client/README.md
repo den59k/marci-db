@@ -34,12 +34,15 @@ marcidb generate
 marcidb generate schema.marci node_modules/.marcidb/client
 ```
 
-3. Start your MarciDB server and connect:
+3. Start your MarciDB server and connect — the database name is the last segment of the URL:
 
 ```typescript
 import { marcidb } from "marcidb-client";
 
-const db = marcidb("http://localhost:3000");
+const db = marcidb("http://localhost:3000/myapp");
+
+// a server started with --token (or an embedded app's maintenance port opened with one)
+const secured = marcidb("http://localhost:3000/myapp", { token: process.env.MARCI_TOKEN });
 ```
 
 ## Usage
@@ -47,7 +50,7 @@ const db = marcidb("http://localhost:3000");
 ```typescript
 import { marcidb } from "marcidb-client";
 
-const db = marcidb("http://localhost:3000");
+const db = marcidb("http://localhost:3000/myapp");
 
 // Find — a chainable query; no select = id + every scalar
 const users = await db.user.where({ name: { $startsWith: "A" } }).order("id", "desc").limit(20);

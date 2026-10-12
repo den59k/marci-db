@@ -22,6 +22,9 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-serv
 
 `--help` / `--version` print and exit. Each database is stored under `<data>/<db>`.
 
+With `--token`, clients send the token: the typed client as `marcidb(url, { token })`, the `marcidb` CLI as
+`--token` (or `MARCI_TOKEN`), anything else as the `Authorization: Bearer <TOKEN>` header.
+
 `GET /$health` → `{"ok":true,"version":"0.11.4"}` — liveness probe (docker healthcheck), never authenticated; `version` since 0.11.4 (hosts use it to know `$sync?plan=1` exists).
 `DELETE /:db` → drops a database: closes the handle and removes its directory (`404` if absent). Meant for hosts that own many databases (per-tenant / per-environment DBs); there is no undo.
 

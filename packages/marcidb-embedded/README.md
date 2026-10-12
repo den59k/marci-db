@@ -225,16 +225,15 @@ npx marcidb migrate check data --url http://127.0.0.1:3999 --token "$MARCI_TOKEN
 ```
 
 ```ts
-// scripts/fix-names.ts — a one-off maintenance script against the live app (a loopback port without a token)
+// scripts/fix-names.ts — a one-off maintenance script against the live app
 import { marcidb } from "../src/db/index.js";
 
-const db = marcidb("http://127.0.0.1:3999/data");
+const db = marcidb("http://127.0.0.1:3999/data", { token: process.env.MARCI_TOKEN });
 const fixed = await db.user.where({ name: "" }).updateMany({ name: "anonymous" });
 console.log(`${fixed} users renamed`);
 ```
 
-The typed HTTP client does not send a token yet: against a port with a `token`, use the `marcidb` CLI or
-`fetch` with an `Authorization` header.
+The typed client sends `token` on every request; leave it out for a port opened without one.
 
 **What the port refuses**, with a `400` that says why: `$restore` (in place or `?into=`) and
 `DELETE /<name>` — the app process owns the database, and replacing it under the app at runtime is not

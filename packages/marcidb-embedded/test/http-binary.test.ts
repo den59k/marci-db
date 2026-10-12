@@ -8,14 +8,14 @@
 //   2. Negotiation — the server returns binary only for `Accept: <binary>` + a matching `X-Marci-Schema`;
 //      a stale/absent hash, or no Accept (curl), falls back to JSON, still correct.
 //   3. Handshake agreement — the hash the client bakes in equals the server's fingerprint of the same schema.
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync, spawn, type ChildProcess } from "node:child_process";
 
 import { generateClient, schemaPath, clientSchemaHash } from "./helpers.ts";
-import { requestBinary } from "../../marcidb-client/runtime/index.js";
+import { MarciError, requestBinary } from "../../marcidb-client/runtime/index.js";
 
 const REPO = path.resolve(import.meta.dir, "..", "..", "..");
 const DB = "parity";
@@ -179,4 +179,48 @@ test("curl smoke: no Accept header → JSON, never binary", async () => {
   expect(res.headers.get("content-type") ?? "").not.toContain(BINARY_MEDIA_TYPE);
   const body = await res.json();
   expect(body).toBeInstanceOf(Array);
+});
+
+// ── a server started with --token ─────────────────────────────────────────────────────────────
+
+describe("a server started with --token", () => {
+  const TOKEN = "s3cret";
+  let tokenServer: ChildProcess;
+  let tokenDir: string;
+  let tokenBase: string;
+
+  beforeAll(async () => {
+    const exe = path.join(REPO, "target", "debug", process.platform === "win32" ? "marcidb-server.exe" : "marcidb-server");
+    tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), "marci-http-token-"));
+    tokenServer = spawn(exe, ["--host", "127.0.0.1", "--port", String(PORT + 1), "--data", tokenDir, "--token", TOKEN], { stdio: "ignore" });
+    const origin = `http://127.0.0.1:${PORT + 1}`;
+    tokenBase = `${origin}/${DB}`;
+    for (let i = 0; i < 200; i++) {
+      try { await fetch(`${origin}/$health`); break; } catch { await Bun.sleep(50); }
+      if (i === 199) throw new Error("token server did not become ready");
+    }
+    const schema = fs.readFileSync(schemaPath("parity.marci"), "utf8");
+    const sync = await fetch(`${tokenBase}/$sync`, { method: "POST", body: schema, headers: { Authorization: `Bearer ${TOKEN}` } });
+    if (!sync.ok) throw new Error(`$sync failed: ${sync.status} ${await sync.text()}`);
+  });
+
+  afterAll(() => {
+    tokenServer?.kill();
+    if (tokenDir) try { fs.rmSync(tokenDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  test("the typed client carries its token, the binary read path included", async () => {
+    const { marcidb } = await generateClient(schemaPath("parity.marci"));
+    const client = marcidb(tokenBase, { token: TOKEN });
+    await client.user.insert({ name: "Tia", age: 7, score: 1, active: true });
+    expect(await client.user.findMany({ name: true, age: true })).toEqual([{ name: "Tia", age: 7 }]);
+
+    const binary = await requestBinary(`${tokenBase}/User/findMany`, { name: true, age: true }, serverHash, { token: TOKEN });
+    expect(binary).toBeInstanceOf(Uint8Array);
+
+    const err = await marcidb(tokenBase).user.findMany({ name: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MarciError);
+    expect((err as MarciError).kind).toBe("unauthorized");
+    expect((err as MarciError).message).toBe("missing or invalid bearer token");
+  });
 });

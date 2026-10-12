@@ -517,7 +517,15 @@ import { marcidb } from "marcidb-client"
 
 // the database name is the last path segment of the URL
 const db = marcidb("http://localhost:3000/myapp")
+
+// a server started with --token (or a maintenance port opened with a token): the client sends it on every request
+const secured = marcidb("http://localhost:3000/myapp", { token: process.env.MARCI_TOKEN })
 ```
+
+The second argument configures the HTTP transport; `token` is needed whenever the server requires
+`Authorization: Bearer …` — `marcidb-server --token`, or an embedded app's `db.listen({ token })`. Without it
+such a server answers `401` and the call rejects with a `MarciError` of `kind: "unauthorized"`.
+`marcidb(db)` with an embedded database takes no options.
 
 `npx marcidb generate` produces both the typed client (from `schema.marci`) and a `.march` migration file (a reviewable action list + a snapshot of the resulting schema); `npx marcidb migrate push myapp` ships your migration files and the server applies the new ones (creating the database on first push). The client talks to the server over the [HTTP API](HTTP-API.md). Every model gets the same query root:
 

@@ -6,7 +6,8 @@ import path from "node:path";
 import fs from "node:fs";
 
 import { openTestDatabase, restoreDatabase, MarciEmbeddedError } from "../dist/index.js";
-import { generateClient, schemaPath } from "./helpers.ts";
+import { MarciError } from "../../marcidb-client/runtime/index.js";
+import { clientSchemaHash, generateClient, schemaPath } from "./helpers.ts";
 
 const SCHEMA = fs.readFileSync(schemaPath("schema.marci"), "utf8");
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "marci-listen-"));
@@ -115,6 +116,78 @@ test("listen checks its options, and a token guards every route but the health c
     const authed = await fetch(`${srv.url}/User/count`, { method: "POST", body: "{}", headers: { Authorization: "Bearer s3cret" } });
     expect(await authed.json()).toBe(0);
     srv.close();
+  } finally {
+    db.close();
+  }
+});
+
+/** Records every request's headers and its response's content type, until `restore()`. */
+function spyFetch() {
+  const original = globalThis.fetch;
+  const seen: { url: string; headers: Record<string, string>; contentType: string }[] = [];
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const res = await original(input, init);
+    seen.push({ url: String(input), headers: { ...(init?.headers ?? {}) }, contentType: res.headers.get("content-type") ?? "" });
+    return res;
+  }) as typeof fetch;
+  return { seen, restore: () => { globalThis.fetch = original; } };
+}
+
+/** The headers the HTTP transport sends without options — unchanged by the token option. */
+const JSON_HEADERS = { "Content-Type": "application/json" };
+const binaryHeaders = () => ({
+  "Content-Type": "application/json",
+  Accept: "application/x-marcidb-rows, application/json",
+  "X-Marci-Schema": clientSchemaHash(schemaPath("schema.marci")),
+});
+
+test("marcidb(url, { token }) sends the token on the JSON and the binary path; without it, nothing changes", async () => {
+  const db = await openTestDatabase(SCHEMA);
+  const srv = db.listen({ port: 0, name: "t", token: "s3cret" });
+  const spy = spyFetch();
+  try {
+    const client = mod.marcidb(srv.url, { token: "s3cret" });
+    await client.user.insert({ name: "Ann", age: 30 });
+    expect(await client.user.findMany({ name: true, age: true })).toEqual([{ name: "Ann", age: 30 }]);
+
+    const [insert, read] = spy.seen;
+    expect(insert!.headers).toEqual({ ...JSON_HEADERS, Authorization: "Bearer s3cret" });
+    expect(read!.headers).toEqual({ ...binaryHeaders(), Authorization: "Bearer s3cret" });
+    expect(read!.contentType).toBe("application/x-marcidb-rows"); // the select really took the binary path
+
+    // No token, or a wrong one: the server's refusal, typed — on either path.
+    for (const refused of [mod.marcidb(srv.url), mod.marcidb(srv.url, { token: "wrong" })]) {
+      for (const call of [() => refused.user.insert({ name: "Eve", age: 1 }), () => refused.user.findMany({ name: true, age: true })]) {
+        const err = await call().catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(MarciError);
+        expect((err as MarciError).kind).toBe("unauthorized");
+        expect((err as MarciError).status).toBe(401);
+        expect((err as MarciError).message).toBe("missing or invalid bearer token");
+      }
+    }
+    expect(await db.exec(count)).toBe(1);
+    srv.close();
+
+    // Without a token the requests are exactly what they were before the option existed.
+    const open = db.listen({ port: 0, name: "t" });
+    spy.seen.length = 0;
+    const plain = mod.marcidb(open.url);
+    await plain.user.insert({ name: "Bob", age: 40 });
+    expect((await plain.user.findMany({ name: true })).length).toBe(2);
+    expect(spy.seen.map((r) => r.headers)).toEqual([JSON_HEADERS, binaryHeaders()]);
+    open.close();
+  } finally {
+    spy.restore();
+    srv.close();
+    db.close();
+  }
+});
+
+test("options with a transport object are refused", async () => {
+  const db = await openTestDatabase(SCHEMA);
+  try {
+    expect(() => mod.marcidb(db, { token: "s3cret" })).toThrow(TypeError);
+    expect(() => mod.marcidb(db)).not.toThrow();
   } finally {
     db.close();
   }
