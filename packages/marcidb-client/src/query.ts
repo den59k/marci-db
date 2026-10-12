@@ -232,9 +232,11 @@ export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends Promise
   readonly [__sel]: Effective<T, Sel>
   /** Filter (marcidb `$where`). Repeated calls are ANDed. */
   where(where: T["where"]): Query<T, Sel>
-  /** Sort by one field: `order("age", "desc")` or `order({ age: "desc" })`. */
+  /** Sort: `order("age", "desc")` or `order({ age: "desc" })`. A second `order()` adds the next key — ties on
+   *  the first are broken by it (`order("createdAt", "desc").order("id")`); the keys may also come as an array
+   *  in one call. Several keys sort in memory. */
   order(field: keyof T["order"] & string, direction?: "asc" | "desc"): Query<T, Sel>
-  order(order: T["order"]): Query<T, Sel>
+  order(order: T["order"] | T["order"][]): Query<T, Sel>
   limit(n: number): Query<T, Sel>
   skip(n: number): Query<T, Sel>
   /** Keyset cursor: rows strictly after this id in the current order (`$cursor`). */
@@ -451,7 +453,15 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
         finally: (onFinally?: any) => run(findMany()).finally(onFinally),
 
         where: (where: any) => make({ ...st, where: and(st.where, where) }),
-        order: (field: any, direction?: "asc" | "desc") => make({ ...st, order: typeof field === "string" ? { [field]: direction ?? "asc" } : field }),
+        order: (field: any, direction?: "asc" | "desc") => {
+          // one key per entry; an object with several keys is read in its key order
+          const given: any[] = typeof field === "string" ? [{ [field]: direction ?? "asc" }]
+            : Array.isArray(field) ? field
+            : Object.entries(field).map(([k, v]) => ({ [k]: v }));
+          const prev: any[] = st.order === undefined ? [] : Array.isArray(st.order) ? st.order : [st.order];
+          const keys = [...prev, ...given];
+          return make({ ...st, order: keys.length === 1 ? keys[0] : keys });
+        },
         limit: (n: number) => make({ ...st, limit: n }),
         skip: (n: number) => make({ ...st, skip: n }),
         after: (id: any) => make({ ...st, cursor: idObject(model, id) }),

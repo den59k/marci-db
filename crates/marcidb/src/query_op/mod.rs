@@ -20,6 +20,9 @@ pub struct QueryOp<'a> {
   pub mask: BitVec,
   pub entity: &'a Entity,
   pub sort: Option<Sort<'a>>,
+  /// The keys after the first (`$order: [{ a: "desc" }, { b: "asc" }]`): ties on the first key are broken
+  /// by them, in order. Any second key means a sort in memory over the composite key (`post_sort`).
+  pub sort_rest: Vec<Sort<'a>>,
   pub filter: Option<Where<'a>>,
   pub limit: Option<usize>,
   pub skip: Option<usize>,
@@ -112,6 +115,7 @@ impl<'a> QueryOp<'a> {
       mask,
       entity,
       sort: None,
+      sort_rest: vec![],
       filter: None,
       limit: None,
       skip: None,

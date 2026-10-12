@@ -359,3 +359,52 @@ fn find_first_order_test() {
     assert_eq!(resp, json!({ "name": "Dave" }));
   }
 }
+
+/// `$order: [{ a }, { b }]`: ties on the first key are broken by the next, each in its own direction;
+/// `$cursor` pages through the composite order; nulls keep their place per key.
+#[test]
+fn order_by_several_fields_test() {
+  let dir = tempdir().unwrap();
+  let db = create_db(&dir);
+  // ties on age with Bob (20) and Dave (25): Erin 25, Fay 20; a null rating among the 25s
+  insert_data(&db, "User", json!({ "name": "Erin", "age": 25, "rating": 1 }));
+  insert_data(&db, "User", json!({ "name": "Fay", "age": 20, "rating": 7 }));
+  insert_data(&db, "User", json!({ "name": "Gus", "age": 25 }));
+
+  // age desc, then name asc
+  let resp = get_data(&db, "User", json!({ "name": true, "age": true, "$order": [{ "age": "desc" }, { "name": "asc" }] }));
+  assert_eq!(resp.as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap()).collect::<Vec<_>>(),
+    vec!["Carol", "Alice", "Dave", "Erin", "Gus", "Bob", "Fay"]);
+
+  // age asc, then rating desc — null last within the age (desc puts null first in a single-key sort; here
+  // the direction is the key's own, so the null rating is first among the 25s)
+  let resp = get_data(&db, "User", json!({ "name": true, "$order": [{ "age": "asc" }, { "rating": "desc" }] }));
+  assert_eq!(resp.as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap()).collect::<Vec<_>>(),
+    vec!["Fay", "Bob", "Gus", "Dave", "Erin", "Alice", "Carol"]);
+
+  // the same with a $where: the filter path is kept, the order is the composite one
+  let resp = get_data(&db, "User", json!({ "name": true, "$where": { "age": { "$lte": 25 } }, "$order": [{ "age": "desc" }, { "name": "desc" }] }));
+  assert_eq!(resp.as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap()).collect::<Vec<_>>(),
+    vec!["Gus", "Erin", "Dave", "Fay", "Bob"]);
+
+  // keyset paging through ties: two rows a page, the cursor is the last row's id
+  let order = json!([{ "age": "desc" }, { "name": "asc" }]);
+  let mut names = vec![];
+  let mut cursor: Option<serde_json::Value> = None;
+  loop {
+    let mut q = json!({ "id": true, "name": true, "$order": order, "$limit": 2 });
+    if let Some(c) = &cursor { q["$cursor"] = c.clone(); }
+    let page = get_data(&db, "User", q);
+    let page = page.as_array().unwrap();
+    if page.is_empty() { break }
+    for u in page { names.push(u["name"].as_str().unwrap().to_string()); }
+    cursor = Some(json!({ "id": page.last().unwrap()["id"] }));
+  }
+  assert_eq!(names, vec!["Carol", "Alice", "Dave", "Erin", "Gus", "Bob", "Fay"]);
+
+  // an array of one key is the object form; the first row by the composite order
+  let one = get_data(&db, "User", json!({ "name": true, "$order": [{ "age": "asc" }] }));
+  let same = get_data(&db, "User", json!({ "name": true, "$order": { "age": "asc" } }));
+  assert_eq!(one, same);
+  assert_eq!(get_data_one(&db, "User", json!({ "name": true, "$order": [{ "age": "desc" }, { "name": "desc" }] }))["name"], json!("Carol"));
+}

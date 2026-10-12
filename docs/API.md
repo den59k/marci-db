@@ -300,7 +300,7 @@ To compare against the **whole** value instead of a path, put a `$`-operator (or
 
 ### `$order`, `$limit`, `$skip`, `$cursor`
 
-- `$order: { field: "asc" | "desc" }` — single field. Indexed non-nullable fields are served by an index scan; everything else is sorted in memory. Nulls go last for `asc`, first for `desc`.
+- `$order: { field: "asc" | "desc" }` — one field; several as an array, in order: `$order: [{ createdAt: "desc" }, { id: "asc" }]` (ties on the first key are broken by the next; an object's key order is not something JSON promises, hence the array). In the builder a second `.order()` adds the next key: `db.post.order("createdAt", "desc").order("id")`. One indexed non-nullable field is served by an index scan; everything else — a nullable field, several keys — is sorted in memory. Nulls go last for `asc`, first for `desc`, per key.
 - `$limit` / `$skip` — applied after filtering. `$skip` is O(n); prefer `$cursor` for pagination.
 - `$cursor: { id }` — **exclusive** keyset cursor: results strictly after the row with this id, in the current `$order`. Without `$order` the order is fixed to primary-key order. Take the id from the last row of the previous page. If the cursor row was deleted: id-ordered queries continue seamlessly; value-ordered queries return an empty page.
 

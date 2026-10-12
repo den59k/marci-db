@@ -34,9 +34,13 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     }
   }
 
-  let sort = match json_val.get("$order") {
-    Some(order_value) => Some(parse_order(entity, order_value)?),
-    None => None
+  let (sort, sort_rest) = match json_val.get("$order") {
+    Some(order_value) => {
+      let mut keys = parse_order_keys(entity, order_value)?;
+      let first = keys.remove(0);
+      (Some(first), keys)
+    },
+    None => (None, vec![])
   };
   let limit = parse_service_number(json_val, "$limit")?;
   let skip = parse_service_number(json_val, "$skip")?;
@@ -87,7 +91,7 @@ pub fn parse_query_internal<'a>(schema: &'a Schema, entity: &'a Entity, json_val
     mask = QueryOp::all(entity).mask;
   }
 
-  Ok(QueryOp { mask, entity, sort, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false, search })
+  Ok(QueryOp { mask, entity, sort, sort_rest, filter, prefix_key, includes, limit, skip, cursor, reverse: false, post_sort: false, search })
 }
 
 /// Lifts a single module-index search (`$near`/`$search`) out of the where tree, returning the residual
@@ -180,13 +184,35 @@ fn parse_service_number(json_val: &Map<String,Value>, key: &str) -> Result<Optio
   Ok(Some(number as usize))
 }
 
-/// Parses $order: { field: "asc" | "desc" }. A single field is supported
+/// Parses `$order`: `{ field: "asc" | "desc" }` for one key, `[{ a: "desc" }, { b: "asc" }]` for several —
+/// an array, because a JSON object's key order is not something the wire promises. A field named twice
+/// is a mistake.
+fn parse_order_keys<'a>(entity: &'a Entity, order_value: &Value) -> Result<Vec<Sort<'a>>, ParseError> {
+  let items: Vec<&Value> = match order_value {
+    Value::Array(items) => items.iter().collect(),
+    other => vec![other],
+  };
+  if items.is_empty() {
+    return Err(ParseError::WrongServiceValue("$order".to_string(), "at least one { field: \"asc\" | \"desc\" }".to_string()));
+  }
+  let mut keys: Vec<Sort<'a>> = Vec::with_capacity(items.len());
+  for item in items {
+    let key = parse_order(entity, item)?;
+    if keys.iter().any(|k| std::ptr::eq(k.field(), key.field())) {
+      return Err(ParseError::WrongServiceValue("$order".to_string(), format!("each field once — {} is named twice", key.field().full_name)));
+    }
+    keys.push(key);
+  }
+  Ok(keys)
+}
+
+/// One key of `$order`: `{ field: "asc" | "desc" }`
 fn parse_order<'a>(entity: &'a Entity, order_value: &Value) -> Result<Sort<'a>, ParseError> {
   let Some(obj) = order_value.as_object() else {
-    return Err(ParseError::WrongServiceValue("$order".to_string(), "object".to_string()));
+    return Err(ParseError::WrongServiceValue("$order".to_string(), "{ field: \"asc\" | \"desc\" }, or an array of them".to_string()));
   };
   if obj.len() != 1 {
-    return Err(ParseError::WrongServiceValue("$order".to_string(), "exactly one field".to_string()));
+    return Err(ParseError::WrongServiceValue("$order".to_string(), "one field per { field: direction } — several keys go in an array, in order".to_string()));
   }
   let (field_name, direction) = obj.iter().next().unwrap();
 
@@ -217,6 +243,13 @@ fn parse_order<'a>(entity: &'a Entity, order_value: &Value) -> Result<Sort<'a>, 
 pub fn resolve_sort_plan(query: &mut QueryOp) {
   query.reverse = false;
   query.post_sort = false;
+
+  // Several keys: no tree is in that order — the rows are sorted in memory over the composite key (the
+  // directions are folded into the key, so the scan runs forward whatever `$where` chose as its path).
+  if !query.sort_rest.is_empty() {
+    query.post_sort = true;
+    return;
+  }
 
   // `@list` include: the scan follows the parent's id array, which is its own order — no tree order
   // to reuse (even for `id`), so any explicit $order sorts in memory. Without $order the array
@@ -618,6 +651,22 @@ mod tests {
       assert!(q.reverse);
       assert!(!q.post_sort);
     }
+
+    // Several keys: in memory, forward scan; the first key is `sort`, the rest `sort_rest`
+    {
+      let q = parse_query(&schema, user_model, &json!({ "name": true, "$order": [{ "age": "desc" }, { "name": "asc" }] })).unwrap();
+      assert!(q.post_sort);
+      assert!(!q.reverse);
+      assert_eq!(q.sort.as_ref().unwrap().field().name, "age");
+      assert_eq!(q.sort_rest.iter().map(|s| (s.field().name.as_str(), s.is_desc())).collect::<Vec<_>>(), vec![("name", false)]);
+      // an array of one is the object form
+      let q = parse_query(&schema, user_model, &json!({ "name": true, "$order": [{ "age": "desc" }] })).unwrap();
+      assert!(q.reverse && !q.post_sort && q.sort_rest.is_empty());
+    }
+    // what is refused: an empty array, a field twice, several keys in one object
+    assert!(parse_query(&schema, user_model, &json!({ "$order": [] })).is_err());
+    assert!(parse_query(&schema, user_model, &json!({ "$order": [{ "age": "desc" }, { "age": "asc" }] })).is_err());
+    assert!(parse_query(&schema, user_model, &json!({ "$order": { "age": "desc", "name": "asc" } })).is_err());
   }
 
 }

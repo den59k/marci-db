@@ -1,4 +1,13 @@
-use crate::{StorageError, index_utils::{make_index_cursor_key, make_sort_key}, query_op::{DecodeCtx, PrefixKey, QueryOp, TransationContext, process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, maybe_rev, range_keys_iter}, process_where::process_where}, utils::{decode_id_list, get_data}};
+use crate::{StorageError, index_utils::{make_composite_sort_key, make_index_cursor_key, make_sort_key}, query_op::{DecodeCtx, PrefixKey, QueryOp, Sort, TransationContext, process_query::{ParentData, decode_row, get_id_from_index_key, get_prefix, maybe_rev, range_keys_iter}, process_where::process_where}, utils::{decode_id_list, get_data}};
+
+/// All the `$order` keys, first to last — present when there is more than one (`sort_rest` non-empty).
+fn composite_keys<'a>(query: &'a QueryOp) -> Option<Vec<&'a Sort<'a>>> {
+  if query.sort_rest.is_empty() { return None }
+  let mut keys: Vec<&Sort> = Vec::with_capacity(1 + query.sort_rest.len());
+  keys.push(query.sort.as_ref()?);
+  keys.extend(query.sort_rest.iter());
+  Some(keys)
+}
 
 pub fn process_query_many<'a, U, F>
   (query: &'a QueryOp, ctx: &mut TransationContext<'a, U, F>, parent: Option<ParentData>) -> Result<Vec<U>, StorageError>
@@ -20,7 +29,10 @@ pub fn process_query_many_limited<'a, U, F>
       let tree = ctx.get_tree(&query.entity.name)?;
       // The cursor row was deleted — its position in sort order is unknown
       let Some(row) = tree.get(cursor_id)? else { return Ok(vec![]) };
-      cursor_gate = Some(make_sort_key(query.entity, sort.field(), cursor_id, &row, ctx.schema));
+      cursor_gate = Some(match composite_keys(query) {
+        Some(keys) => make_composite_sort_key(query.entity, &keys, cursor_id, &row, ctx.schema),
+        None => make_sort_key(query.entity, sort.field(), cursor_id, &row, ctx.schema),
+      });
     } else {
       cursor_gate = Some(cursor_id.clone());
     }
@@ -157,6 +169,10 @@ fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F
 
   if query.post_sort && let Some(sort) = &query.sort {
     let sort_field = sort.field();
+    // Several keys: the composite key carries every direction, so the sorted rows are read forward;
+    // one key: the plain key, read backwards for desc
+    let composite = composite_keys(query);
+    let desc = composite.is_none() && sort.is_desc();
 
     // Collect rows that passed the filter together with their sort key
     let mut rows: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = vec![];
@@ -166,10 +182,13 @@ fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F
       if let Some(where_op) = &query.filter && !process_where(id, data, ctx, query.entity, where_op)? {
         continue;
       }
-      let key = make_sort_key(query.entity, sort_field, id, data, ctx.schema);
+      let key = match &composite {
+        Some(keys) => make_composite_sort_key(query.entity, keys, id, data, ctx.schema),
+        None => make_sort_key(query.entity, sort_field, id, data, ctx.schema),
+      };
       // Keep only rows strictly after the cursor position in sort order
       if let Some(gate) = &cursor_gate {
-        let after_cursor = if sort.is_desc() { &key < gate } else { &key > gate };
+        let after_cursor = if desc { &key < gate } else { &key > gate };
         if !after_cursor { continue; }
       }
       rows.push((key, id.to_vec(), data.to_vec()));
@@ -177,7 +196,7 @@ fn collect_rows<'a, U, F, I, A, B>(iter: I, ctx: &mut TransationContext<'a, U, F
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut results = Vec::new();
-    for (_, id, data) in maybe_rev(rows.iter(), sort.is_desc()).skip(skip).take(limit) {
+    for (_, id, data) in maybe_rev(rows.iter(), desc).skip(skip).take(limit) {
       results.push(decode_row(id, data, ctx, query)?);
     }
     return Ok(results);

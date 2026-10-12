@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, FieldCompareRef, PrefixKey, Where}, schema::{FieldIndex, FieldIndexNum, Schema, UniqueGroup}, utils::get_data};
+use crate::{Entity, Field, FieldLocation, FieldType, num_utils::NumberValue, query_op::{FieldCompare, FieldCompareRef, PrefixKey, Sort, Where}, schema::{FieldIndex, FieldIndexNum, Schema, UniqueGroup}, utils::get_data};
 
 /// A row's key in a unique group's tree, without the row id: each part encoded as that field's value index
 /// encodes it (fixed-size parts as they are, variable ones with a terminator), in field order. None when a
@@ -187,6 +187,30 @@ pub fn make_index_cursor_key(field: &Field, value: &[u8], id: &[u8]) -> Vec<u8> 
     // Strings get a null terminator (as in indexes), everything else is compared as is
     _ => encode_index_data(field, value)
   };
+  key.extend_from_slice(id);
+  key
+}
+
+/// In-memory sort key over several `$order` keys: one part per key — a null marker (0x00 a value, 0xFF
+/// null) and the value as its index encodes it (a terminator closes a variable-length one), every byte
+/// inverted for a `desc` key, so one forward byte comparison sorts by all keys in their directions, with
+/// nulls last for `asc` and first for `desc` as for a single key — then the id as the final tie-break.
+pub fn make_composite_sort_key(entity: &Entity, keys: &[&Sort], id: &[u8], data: &[u8], schema: &Schema) -> Vec<u8> {
+  let mut key = Vec::new();
+  for sort in keys {
+    let field = sort.field();
+    let start = key.len();
+    match get_data(entity, field, id, data, schema) {
+      Some(value) => {
+        key.push(0x00);
+        key.extend(make_index_cursor_key(field, value, &[]));
+      }
+      None => key.push(0xFF),
+    }
+    if sort.is_desc() {
+      for b in key[start..].iter_mut() { *b = !*b; }
+    }
+  }
   key.extend_from_slice(id);
   key
 }
