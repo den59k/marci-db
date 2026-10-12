@@ -76,9 +76,10 @@ fn parse_default_value_list(ty: &PrimitiveFieldType, value: &str, fixed_size: Op
     let is_dynamic_items = matches!(ty, PrimitiveFieldType::String);
 
     let mut buf = vec![];
-    let splited = value.split(',');
-
-    let count = splited.clone().count();
+    // `[]` is the empty list — not one empty item, which is what splitting "" would give; items are trimmed
+    // so `[1, 2]` parses like `[1,2]`
+    let items: Vec<&str> = if value.trim().is_empty() { vec![] } else { value.split(',').map(str::trim).collect() };
+    let count = items.len();
 
     if let Some(fixed_size) = fixed_size && count != fixed_size {
         return Err(SchemaError(format!("Failed to parse default value: Wrong size, expected: {}. Field: {}", fixed_size, field.full_name)));
@@ -92,7 +93,7 @@ fn parse_default_value_list(ty: &PrimitiveFieldType, value: &str, fixed_size: Op
         buf.resize(buf.len() + count*4 + 4, 0);
     }
 
-    for item in splited {
+    for item in items {
         let FieldDefault::Value(binary) = parse_default_value(ty, item, field)? else {
             return Err(SchemaError(format!("Failed to parse default value {}. Field: {}", item, field.full_name)));
         };
@@ -143,6 +144,24 @@ mod tests {
         b'a', b'r', b'p', b'a', b'i', b'd',
     ];
     assert_eq!(features_field.default_value, Some(FieldDefault::Value(expected)));
+  }
+
+  #[test]
+  fn an_empty_list_default_is_empty_and_items_may_carry_spaces() {
+    let schema = parse_schema("
+        model Post {
+            tags    String[]  @default([])
+            marks   Int[]     @default([1, 2])
+            flags   Bool[]    @default([ ])
+        }
+    ");
+    // String[]: count 0, then the one (end) offset — no item
+    assert_eq!(schema.models[0].fields[1].default_value, Some(FieldDefault::Value(vec![0, 0, 0, 0,  0, 0, 0, 8])));
+    let mut marks = 2u32.to_be_bytes().to_vec();
+    marks.extend(1i64.to_be_bytes());
+    marks.extend(2i64.to_be_bytes());
+    assert_eq!(schema.models[0].fields[2].default_value, Some(FieldDefault::Value(marks)));
+    assert_eq!(schema.models[0].fields[3].default_value, Some(FieldDefault::Value(vec![0, 0, 0, 0])));
   }
 
 }
