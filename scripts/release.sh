@@ -7,7 +7,7 @@
 #   ./scripts/release.sh <version> [--push] [--no-verify]
 #
 #   --push        also push the commit + tag (triggers the release CI). Without it, you push manually.
-#   --no-verify   skip the local `cargo check` pre-flight.
+#   --no-verify   skip the local `cargo check` pre-flight (which needs the nightly toolchain installed).
 set -euo pipefail
 
 # This script lives in scripts/; everything below operates on repo-root-relative paths.
@@ -58,8 +58,11 @@ echo "▶ Syncing Cargo.lock"
 cargo update --workspace
 
 if [ "$VERIFY" = 1 ]; then
-  echo "▶ Pre-flight: cargo check --workspace"
-  cargo check --workspace
+  # Same toolchains as CI: the vector module (kmeans, portable_simd) and marcidb-ffi, which enables it by
+  # default, only build on nightly; everything else must keep building on stable.
+  echo "▶ Pre-flight: cargo check (stable) + cargo +nightly check -p marcidb-ffi"
+  cargo check --workspace --exclude marcidb-ffi --exclude marci_vector --exclude marci_vector_index
+  cargo +nightly check -p marcidb-ffi
 fi
 
 echo "▶ Committing + tagging v$VERSION"

@@ -125,7 +125,8 @@ omits `@slot(N)` would move the field's bytes and every stored row would then de
 offsets. `evolve` therefore refuses any action that changes a field's pinned physical identity — storage
 location, declared type, or relation binding — and refuses an `add field` claiming a slot that is already
 taken (live or `@retired`). `alter field` is for **metadata only**: nullable, `@default`, `@format`,
-`@onDelete`, added enum variants. Generate migrations with `marci-migrate generate`.
+`@onDelete`, added enum variants, and `@rev` (adding a `@bind` list also alters the reference it pairs
+with — that side writes the list). Generate migrations with `marci-migrate generate`.
 
 ## Artifacts
 
@@ -224,7 +225,7 @@ rebuilds the computed caches (default bytes, index trees, counters, reverse-depe
 | `CreateEntity` | create the entity tree + its index/relation trees | no (empty) | no |
 | `DropEntity` | delete the entity tree + its index/relation trees | no | **yes** |
 | `AddField` | nothing (slot is in `new`; default-on-read) | **no** | no |
-| `AlterField` | nothing (nullable/default/format/`@onDelete`/added enum variants — metadata) | no | no |
+| `AlterField` | nothing (nullable/default/format/`@onDelete`/added enum variants/`@rev` — metadata) | no | no |
 | `DropField` | nothing — the slot is **retired** (`@retired(N)` in the snapshot); old rows keep dead bytes, new rows skip it. Relation/key drops are rejected. | no | **yes** |
 | `AddIndex` / `DropIndex` | build the index tree from existing rows / delete it | scan / no | no |
 

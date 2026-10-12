@@ -457,6 +457,39 @@ mod tests {
             "policy did not reach the loaded schema: {:?}", loaded.models[class_idx].rev_dependencies);
     }
 
+    /// Adding a `@bind` list to an existing reference: the migration must carry the reference's new `@rev`
+    /// too, or the replayed snapshot differs from the schema and the engine never writes the list.
+    #[test]
+    fn back_reference_survives_generate_then_migrate() {
+        let v0 = parse_schema("model Post {\n  author User\n}\nmodel User {\n  name String\n}");
+        let snap0 = evolve("", &serialize_migration(&diff(&parse_schema(""), &v0).unwrap(), &v0)).unwrap();
+
+        let mut v1 = parse_schema("model Post {\n  author User\n}\nmodel User {\n  name String\n  posts Post[] @bind(Post.author)\n}");
+        let prev: Schema = parse_snapshot(&snap0).unwrap();
+        reconcile(&mut v1, &prev);
+        let m1 = serialize_migration(&diff(&prev, &v1).unwrap(), &v1);
+        assert!(m1.contains("alter field Post.author User @slot(4) @field_value @rev(posts)"), "m1:\n{}", m1);
+
+        // The holder's alter comes first, before the list it names exists — evolve resolves names only at the end
+        let snap1 = evolve(&snap0, &m1).unwrap();
+        assert_eq!(canon(&snap1), serialize_snapshot(&v1));
+    }
+
+    /// History generated before the fix has the list without the holder's `@rev`; the next `generate`
+    /// must notice and emit the missing alter, so such databases heal with an ordinary migration.
+    #[test]
+    fn missing_rev_in_history_is_generated() {
+        let v0 = parse_schema("model Post {\n  author User\n}\nmodel User {\n  name String\n}");
+        let snap0 = evolve("", &serialize_migration(&diff(&parse_schema(""), &v0).unwrap(), &v0)).unwrap();
+        let broken = evolve(&snap0,
+            "add field User.posts Post[] @nullable @virtual @index_tree(User.posts->Post) @rev(author)").unwrap();
+
+        let prev: Schema = parse_snapshot(&broken).unwrap();
+        let mut v1 = parse_schema("model Post {\n  author User\n}\nmodel User {\n  name String\n  posts Post[] @bind(Post.author)\n}");
+        reconcile(&mut v1, &prev);
+        assert_eq!(diff(&prev, &v1).unwrap(), vec![MigrateOp::AlterField { entity: "Post".into(), field: "author".into() }]);
+    }
+
     /// `alter field` replaces the WHOLE line, so an action that forgets `@slot(N)` used to move the field to
     /// slot 0 — accepted silently, after which every stored row decoded from the wrong offsets. Layout is
     /// history: an alter that changes it must be refused before anything is written.

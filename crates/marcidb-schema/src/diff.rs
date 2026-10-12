@@ -119,12 +119,14 @@ fn diff_fields(
             });
         }
 
-        // Metadata: nullable / default / format / onDelete. `@onDelete` is metadata like the rest — it
-        // changes no bytes on disk — but it MUST produce an op: the policy only reaches a `$migrate`d
-        // database through the `.march` history, so a diff blind to it means dev/CI run with referential
-        // constraints that production silently doesn't have.
+        // Metadata: nullable / default / format / onDelete / the paired back-reference (`@rev`). None of it
+        // changes bytes on disk, but each MUST produce an op: it only reaches a `$migrate`d database through
+        // the `.march` history. A diff blind to `@onDelete` meant prod ran without the constraints dev had;
+        // one blind to `@rev` meant a `@bind` list added later was never written to — the holding side is
+        // what maintains the list's tree, and only the list's own line made it into the migration.
         if old_f.nullable != f.nullable || default_attr(old_f) != default_attr(f)
-            || format_attr(old_f) != format_attr(f) || on_delete_attr(old_f) != on_delete_attr(f) {
+            || format_attr(old_f) != format_attr(f) || on_delete_attr(old_f) != on_delete_attr(f)
+            || rev_name(old_schema, old_f) != rev_name(new_schema, f) {
             needs_alter = true;
         }
         if needs_alter {
@@ -365,6 +367,15 @@ fn ref_binding(field: &Field) -> Option<&RefBinding> {
     }
 }
 
+/// The field on the other side a relation is paired with (`@rev`), by name — indices differ between schemas.
+fn rev_name<'a>(schema: &'a Schema, field: &Field) -> Option<&'a str> {
+    match &field.ty {
+        FieldType::Ref(ri) | FieldType::RefList(ri) =>
+            ri.rev_field_idx.map(|i| schema.models[ri.model_index].fields[i].name.as_str()),
+        _ => None,
+    }
+}
+
 fn binding_kind(binding: &RefBinding) -> &'static str {
     match binding {
         RefBinding::CurrentId => "current_id",
@@ -541,6 +552,19 @@ mod tests {
         assert_eq!(diff_text(restrict, cascade).unwrap(), alter, "swapping the policy must be a change");
         assert_eq!(diff_text(restrict, none).unwrap(), alter, "removing @onDelete falls back to the default — also a change");
         assert!(diff_text(restrict, restrict).unwrap().is_empty(), "an unchanged policy must stay quiet");
+    }
+
+    /// A `@bind` list added later pairs itself with the existing reference: the reference gains `@rev`, and
+    /// that must be an op of its own — the holding side is what writes the list's tree.
+    #[test]
+    fn diff_sees_new_back_reference() {
+        let old = "model Post {\n  author User\n}\nmodel User {\n  name String\n}";
+        let new = "model Post {\n  author User\n}\nmodel User {\n  name String\n  posts Post[] @bind(Post.author)\n}";
+        assert_eq!(diff_text(old, new).unwrap(), vec![
+            MigrateOp::AlterField { entity: "Post".into(), field: "author".into() },
+            MigrateOp::AddField { entity: "User".into(), field: "posts".into() },
+        ]);
+        assert!(diff_text(new, new).unwrap().is_empty());
     }
 
     /// Adding a `@list` relation field is a plain AddField; converting an existing tree-backed

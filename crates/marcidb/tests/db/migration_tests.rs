@@ -419,3 +419,44 @@ fn migrate_add_bound_list_creates_its_binding_tree() {
   db.delete_item(entity, &id).unwrap();
   assert_eq!(db.count(db.get_model("File").unwrap()).unwrap(), 0);
 }
+
+/// The same through a `.march` file — the path production takes. The holding side must gain `@rev` too:
+/// without it the old rows are backfilled into the list, but every row written after the migration is not.
+/// The holder is declared first so its `alter field` lands before the list's `add field`.
+#[test]
+fn migrate_file_add_bound_list_keeps_it_current() {
+  let before = "
+    model File {
+        name   String
+        post   Post?
+    }
+    model Post {
+        text   String
+    }
+  ";
+  let after = "
+    model File {
+        name   String
+        post   Post?
+    }
+    model Post {
+        text   String
+        files  File[] @bind(File.post)
+    }
+  ";
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+  let post = insert_data(&db, "Post", json!({ "text": "hi" }));
+  insert_data(&db, "File", json!({ "name": "old", "post": post }));
+
+  apply_migration(&mut db, &mig(before, after)).unwrap();
+  insert_data(&db, "File", json!({ "name": "new", "post": post }));
+
+  let expected = json!([{ "files": [{ "name": "old" }, { "name": "new" }] }]);
+  assert_eq!(get_data(&db, "Post", json!({ "files": { "name": true } })), expected);
+
+  // and after a reopen, which rebuilds the schema from the stored snapshot
+  drop(db);
+  let db = MarciDB::open(dir.path().to_str().unwrap());
+  assert_eq!(get_data(&db, "Post", json!({ "files": { "name": true } })), expected);
+}
