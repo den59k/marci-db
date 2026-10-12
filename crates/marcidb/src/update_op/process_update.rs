@@ -214,6 +214,17 @@ fn widen_row(source_data: &[u8], entity: &Entity) -> Option<Vec<u8>> {
   Some(buf)
 }
 
+/// The row grown to the current layout with `value` stored in the empty slot `offset_pos` — how an
+/// add-field migration writes the default into existing rows. `None` when the slot already holds a value.
+pub(crate) fn with_body_value(source_data: &[u8], entity: &Entity, offset_pos: usize, value: &[u8]) -> Option<Vec<u8>> {
+  let mut buf = widen_row(source_data, entity).unwrap_or_else(|| source_data.to_vec());
+  if get_offset(&buf, offset_pos) != 0 {
+    return None;
+  }
+  insert_data(&mut buf, value, entity, offset_pos);
+  Some(buf)
+}
+
 fn update_fields<F>(fields: &[UpdateField], id: &[u8], source_data: &[u8], entity: &Entity, schema: &Schema, on_change: F) -> Result<Option<Vec<u8>>,UpdateError>
   where F: Fn(&Field, Option<&[u8]>, Option<&[u8]>) -> Result<(),UpdateError> {
 

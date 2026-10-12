@@ -120,7 +120,7 @@ npx marcidb migrate push myapp --url http://localhost:3000
 
 ```
 # POST /myapp/$migrate   (Content-Type: text/plain — the planned actions)
-add field User.age UInt @slot(12)
+add field User.age UInt @slot(12) @default(0)
 add index User.email
 # → 200 OK
 ```
@@ -130,7 +130,7 @@ Properties:
 - **Idempotent & ordered — client-side** — `plan` only emits the unapplied tail, so re-pushing sends nothing; if the server's schema isn't a point in your history, `plan` reports drift.
 - **Survives restarts** — the materialized schema lives in the database, reconstructed on open.
 
-v1 actions cover creating/dropping entities, adding fields, and adding/dropping indexes; dropping a field, type changes, or removing an enum variant are rejected with `400`.
+v1 actions cover creating/dropping entities, adding fields, and adding/dropping indexes; dropping a field, type changes, removing an enum variant, or adding a required field (no `?`, no `@default`) to a model that has rows are rejected with `400`. An added field's `@default` is written into the existing rows.
 
 ### Checking for drift — `$snapshot`
 

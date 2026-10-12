@@ -7,8 +7,10 @@
 use canopydb::WriteTransaction;
 
 use crate::index_utils::{encode_full_index, encode_index, encode_unique_group};
+use crate::json_parsers::default_bytes;
 use crate::schema::{Entity, Field, FieldIndex, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
-use crate::utils::get_data;
+use crate::update_op::process_update::with_body_value;
+use crate::utils::{check_exists_condition, get_data};
 use crate::StorageError;
 use crate::error::RequireTree;
 
@@ -27,6 +29,8 @@ pub enum MigrateApplyError {
   Unsupported(&'static str),
   /// `add unique` found duplicates in existing data
   UniqueViolation { field: String },
+  /// A required field (no `?`, no `@default`) added to a model that has rows: they'd have no value.
+  RequiredField { field: String },
   /// A `@custom` (module) index names a provider that isn't registered — module not compiled in, or a typo.
   /// Caught at migration time so a broken schema fails fast rather than at the first reindex/query.
   NoProvider { provider: String, field: String },
@@ -44,6 +48,7 @@ impl std::fmt::Display for MigrateApplyError {
     match self {
       MigrateApplyError::Unsupported(s) => write!(f, "{}", s),
       MigrateApplyError::UniqueViolation { field } => write!(f, "unique violation on {} in existing data", field),
+      MigrateApplyError::RequiredField { field } => write!(f, "{} can't be added as required: existing rows would have no value — give it a @default or make it optional (?)", field),
       MigrateApplyError::NoProvider { provider, field } => write!(f, "no index provider registered for '@{}' (on field '{}') — the module is not compiled in, or the attribute is a typo", provider, field),
       MigrateApplyError::InvalidIndex { field, detail } => write!(f, "invalid index on '{}': {}", field, detail),
       MigrateApplyError::Diff(e) => write!(f, "{}", e),
@@ -59,17 +64,21 @@ impl From<SchemaError> for MigrateApplyError { fn from(e: SchemaError) -> Self {
 impl From<MigrateError> for MigrateApplyError { fn from(e: MigrateError) -> Self { MigrateApplyError::Diff(e) } }
 
 /// Executes the physical migration operations in an open write transaction.
-/// add/alter field — metadata only (v2 format, no row rewriting); add index — builds
-/// the tree from existing rows; drop index — deletes the tree; create/drop entity — the entity's trees.
+/// add field — writes its `@default` into existing rows, refuses a required field when there are rows
+/// (otherwise metadata only); alter field —
+/// metadata only; add index — builds the tree from existing rows; drop index — deletes the tree;
+/// create/drop entity — the entity's trees.
 /// A slot shift is already rejected in `diff` (`UnsupportedLayoutChange`), so we don't check for it here.
 pub fn apply(tx: &WriteTransaction, old: &Schema, new: &Schema, ops: &[MigrateOp]) -> Result<(), MigrateApplyError> {
   for op in ops {
     match op {
-      // Metadata: the new slot is already in `new`, old rows are read by the forward-compatible reader.
-      // A `@list` relation field additionally needs its reverse tree to exist before the first write
-      // (existing rows simply have an empty array).
+      // The new slot is already in `new`; old rows are read by the forward-compatible reader, and a
+      // `@default` is written into them (a required field is refused instead). A `@list` relation field additionally needs its reverse tree to
+      // exist before the first write (existing rows simply have an empty array).
       MigrateOp::AddField { entity, field } => {
-        let f = find_field(find_entity(new, entity), field);
+        let e = find_entity(new, entity);
+        let f = find_field(e, field);
+        fill_added_field(tx, new, e, f)?;
         if let FieldType::RefList(ref_info) = &f.ty && let RefBinding::IdList { rev_tree } = &ref_info.binding {
           tx.get_or_create_tree(rev_tree.as_bytes())?;
         }
@@ -196,8 +205,8 @@ fn find_field<'a>(entity: &'a Entity, name: &str) -> &'a Field {
   entity.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("field {}.{} not found", entity.name, name))
 }
 
-/// Builds a field's index tree from all existing rows of the entity (backfill).
-/// For a just-added field, old rows yield `None` (the field is absent) — which is correct
+/// Builds a field's index tree from all existing rows of the entity (backfill). A just-added field
+/// already holds its default in old rows (AddField precedes AddIndex); without one, they're skipped.
 fn build_index(tx: &WriteTransaction, schema: &Schema, entity: &str, field_name: &str) -> Result<(), MigrateApplyError> {
   let entity = find_entity(schema, entity);
   let field = find_field(entity, field_name);
@@ -234,6 +243,48 @@ fn build_index(tx: &WriteTransaction, schema: &Schema, entity: &str, field_name:
         }
       }
       index_tree.insert(&encode_full_index(field, index, &id, value), &[])?;
+    }
+  }
+  Ok(())
+}
+
+/// Existing rows and an added field, as in SQL's ADD COLUMN. A `@default` is written into every row, as
+/// an insert would have: from then on it's a stored value like any other — for reads, filters and the
+/// indexes built after this; a later change of `@default` leaves these rows alone, and `now()` stamps
+/// them with the migration time. A required field (no `?`, no default) is refused while there are rows:
+/// they would read `null` for a type that promises a value.
+fn fill_added_field(tx: &WriteTransaction, schema: &Schema, entity: &Entity, field: &Field) -> Result<(), MigrateApplyError> {
+  let FieldLocation::Body { offset_pos } = field.location else { return Ok(()) };
+  let value = field.default_value.as_ref().and_then(default_bytes);
+  // An absent list reads as `[]`, so only a scalar, enum or reference needs a value.
+  let required = !field.nullable && field.default_value.is_none() && !matches!(field.ty, FieldType::PrimitiveList(..));
+  if value.is_none() && !required {
+    return Ok(());
+  }
+  // A new entity gets its tree from CreateEntity — and has no rows yet.
+  let Some(mut tree) = tx.get_tree(entity.name.as_bytes())? else { return Ok(()) };
+
+  let mut ids = vec![];
+  for row in tree.iter()? {
+    let (id, body) = row?;
+    // An enum-variant field exists only on rows of its variant.
+    if !check_exists_condition(entity, &field.condition, &id, &body, schema) {
+      continue;
+    }
+    if required {
+      return Err(MigrateApplyError::RequiredField { field: field.full_name.clone() });
+    }
+    ids.push(id.to_vec());
+  }
+  let Some(value) = value else { return Ok(()) };
+  for id in ids {
+    // The read borrows the tree's page; it must be gone before the write.
+    let filled = match tree.get(&id)? {
+      Some(body) => with_body_value(&body, entity, offset_pos, &value),
+      None => None,
+    };
+    if let Some(body) = filled {
+      tree.insert(&id, &body)?;
     }
   }
   Ok(())

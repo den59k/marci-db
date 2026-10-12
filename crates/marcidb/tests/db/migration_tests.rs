@@ -36,8 +36,8 @@ fn mig(prev: &str, new: &str) -> String {
   serialize_migration(&ops, &new_schema)
 }
 
-/// add field on existing data: old rows are read (field is absent),
-/// new rows are written with the field — without rewriting old rows (v2 format)
+/// add an optional field on existing data: old rows read it as absent (null), new rows are written with
+/// the field — without rewriting old rows (v2 format)
 #[test]
 fn migrate_add_field() {
   let dir = tempdir().unwrap();
@@ -46,9 +46,9 @@ fn migrate_add_field() {
   insert_data(&db, "User", json!({ "name": "Alice" }));
   insert_data(&db, "User", json!({ "name": "Bob" }));
 
-  migrate_to(&mut db,"model User {\n  name String\n  age  UInt\n}").unwrap();
+  migrate_to(&mut db,"model User {\n  name String\n  age  UInt?\n}").unwrap();
 
-  assert_eq!(get_data(&db, "User", json!({ "name": true })), json!([{ "name": "Alice" }, { "name": "Bob" }]));
+  assert_eq!(get_data(&db, "User", json!({ "name": true, "age": true })), json!([{ "name": "Alice", "age": null }, { "name": "Bob", "age": null }]));
 
   insert_data(&db, "User", json!({ "name": "Carol", "age": 30 }));
   assert_eq!(
@@ -129,7 +129,7 @@ fn migrate_persists_across_reopen() {
   {
     let mut db = MarciDB::new("model User {\n  name String\n}", &path);
     insert_data(&db, "User", json!({ "name": "Alice" }));
-    migrate_to(&mut db,"model User {\n  name String\n  age  UInt\n}").unwrap();
+    migrate_to(&mut db,"model User {\n  name String\n  age  UInt?\n}").unwrap();
     insert_data(&db, "User", json!({ "name": "Bob", "age": 5 }));
   } // DB is closed
 
@@ -150,7 +150,7 @@ fn migrate_insert_field_in_middle_carries_slots() {
   let mut db = MarciDB::new("model M {\n  a String\n  b String\n}", dir.path().to_str().unwrap());
   insert_data(&db, "M", json!({ "a": "a1", "b": "b1" }));
 
-  migrate_to(&mut db,"model M {\n  a String\n  c String\n  b String\n}").unwrap();
+  migrate_to(&mut db,"model M {\n  a String\n  c String?\n  b String\n}").unwrap();
 
   // The old row reads correctly (a/b on their slots, c absent → null)
   assert_eq!(get_data(&db, "M", json!({ "a": true, "b": true, "c": true })), json!([{ "a": "a1", "b": "b1", "c": null }]));
@@ -176,7 +176,7 @@ fn migrate_drop_field_retires_slot() {
   assert!(marcidb::serialize_snapshot(&db.schema).contains("@retired(8)"), "slot 8 must be retired");
 
   // add d — it must land ABOVE the retired slot, not reuse slot 8
-  migrate_to(&mut db, "model M {\n  a String\n  d String\n}").unwrap();
+  migrate_to(&mut db, "model M {\n  a String\n  d String?\n}").unwrap();
   // the pre-existing row (which has "b1" sitting at slot 8) must read d as null — proves no slot reuse
   assert_eq!(get_data(&db, "M", json!({ "a": true, "d": true })), json!([{ "a": "a1", "d": null }]));
 
@@ -200,7 +200,7 @@ fn migrate_drop_field_retirement_persists_across_reopen() {
   }
   let mut db = MarciDB::open(&path);
   assert!(marcidb::serialize_snapshot(&db.schema).contains("@retired(8)"), "retirement must survive reopen");
-  migrate_to(&mut db, "model M {\n  a String\n  e String\n}").unwrap();  // add e
+  migrate_to(&mut db, "model M {\n  a String\n  e String?\n}").unwrap();  // add e
   assert_eq!(get_data(&db, "M", json!({ "a": true, "e": true })), json!([{ "a": "a1", "e": null }]));
 }
 
@@ -216,7 +216,7 @@ fn migrate_drop_field_via_migrate_path() {
   assert!(marcidb::serialize_snapshot(&db.schema).contains("@retired(8)"));
 
   // generate would compute slot 12 here (next free above the retired 8); the action carries it
-  apply_migration(&mut db, "add field M.d String @slot(12)").unwrap();
+  apply_migration(&mut db, "add field M.d String @nullable @slot(12)").unwrap();
   assert_eq!(get_data(&db, "M", json!({ "a": true, "d": true })), json!([{ "a": "a1", "d": null }]));
 }
 
@@ -248,7 +248,7 @@ fn migrate_apply_sequential() {
   let mut db = MarciDB::open(dir.path().to_str().unwrap());
 
   let v0 = "model User {\n  name String\n}";
-  let v1 = "model User {\n  name String\n  age UInt\n}";
+  let v1 = "model User {\n  name String\n  age UInt?\n}";
   apply_migration(&mut db,&mig("", v0)).unwrap();
   insert_data(&db, "User", json!({ "name": "Alice" }));
 
@@ -459,4 +459,109 @@ fn migrate_file_add_bound_list_keeps_it_current() {
   drop(db);
   let db = MarciDB::open(dir.path().to_str().unwrap());
   assert_eq!(get_data(&db, "Post", json!({ "files": { "name": true } })), expected);
+}
+
+/// add field with `@default` writes the default into existing rows, as SQL's ADD COLUMN … DEFAULT does:
+/// reads, filters and later updates see it like a value the row was inserted with. Several fields added
+/// at once (fixed and variable size) land in slot order, so the row's other fields stay intact.
+#[test]
+fn migrate_add_field_with_default_fills_existing_rows() {
+  let before = "model User {\n  name String\n}";
+  let after = "model User {\n  name String\n  active Bool @default(false)\n  nick String @default(\"anon\")\n  score Int @default(7)\n}";
+  let fields = json!({ "name": true, "active": true, "nick": true, "score": true });
+  let filled = json!([
+    { "name": "Alice", "active": false, "nick": "anon", "score": 7 },
+    { "name": "Bob", "active": false, "nick": "anon", "score": 7 },
+  ]);
+
+  // Both frontends: `$sync` (diff) and a `.march` file (evolve)
+  for via_file in [false, true] {
+    let dir = tempdir().unwrap();
+    let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+    let alice = insert_data(&db, "User", json!({ "name": "Alice" }));
+    insert_data(&db, "User", json!({ "name": "Bob" }));
+
+    if via_file { apply_migration(&mut db, &mig(before, after)).unwrap() } else { migrate_to(&mut db, after).unwrap() }
+
+    assert_eq!(get_data(&db, "User", fields.clone()), filled);
+    assert_eq!(get_data(&db, "User", json!({ "name": true, "$where": { "active": false } })).as_array().unwrap().len(), 2);
+    assert_eq!(get_data(&db, "User", json!({ "name": true, "$where": { "active": null } })), json!([]));
+
+    // Another field's update keeps the defaults (the row is already in the current layout)
+    update_data(&db, "User", &alice, json!({ "name": "Alicia", "score": 9 }));
+    assert_eq!(
+      get_data_one(&db, "User", json!({ "name": true, "active": true, "nick": true, "score": true, "$where": { "name": "Alicia" } })),
+      json!({ "name": "Alicia", "active": false, "nick": "anon", "score": 9 })
+    );
+
+    drop(db);
+    let db = MarciDB::open(dir.path().to_str().unwrap());
+    assert_eq!(get_data(&db, "User", json!({ "nick": true, "$where": { "name": "Bob" } })), json!([{ "nick": "anon" }]));
+  }
+}
+
+/// The default is in the rows before the field's index is built, so an index lookup finds old rows.
+#[test]
+fn migrate_add_indexed_field_with_default_indexes_existing_rows() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new("model User {\n  name String\n}", dir.path().to_str().unwrap());
+  insert_data(&db, "User", json!({ "name": "Alice" }));
+
+  migrate_to(&mut db, "model User {\n  name String\n  level Int @default(1) @index\n}").unwrap();
+  insert_data(&db, "User", json!({ "name": "Bob" }));
+
+  assert_eq!(
+    get_data(&db, "User", json!({ "name": true, "$where": { "level": 1 } })),
+    json!([{ "name": "Alice" }, { "name": "Bob" }])
+  );
+}
+
+/// SQL semantics around defaults: a nullable field added with a default is filled too, `now()` stamps
+/// old rows with the migration time, and a default added later by `alter` leaves existing nulls alone.
+#[test]
+fn migrate_default_semantics_follow_sql() {
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new("model Post {\n  title String\n}", dir.path().to_str().unwrap());
+  insert_data(&db, "Post", json!({ "title": "old" }));
+  let before = chrono::Utc::now().timestamp_millis();
+
+  migrate_to(&mut db, "model Post {\n  title String\n  tag String? @default(\"misc\")\n  seenAt DateTime @default(now())\n  note String?\n}").unwrap();
+  migrate_to(&mut db, "model Post {\n  title String\n  tag String? @default(\"misc\")\n  seenAt DateTime @default(now())\n  note String? @default(\"x\")\n}").unwrap();
+
+  let row = get_data_one(&db, "Post", json!({ "tag": true, "seenAt": true, "note": true, "$where": { "title": "old" } }));
+  assert_eq!(row["tag"], json!("misc"));
+  assert_eq!(row["note"], json!(null));
+  let seen_at = row["seenAt"].as_i64().unwrap();
+  assert!(seen_at >= before - 1000, "seenAt {} vs migration at {}", seen_at, before);
+}
+
+/// A required field (no `?`, no `@default`) can't be added to a model with rows — they'd read `null` for
+/// a type that promises a value (SQL's ADD COLUMN … NOT NULL refuses the same way). Nothing is applied.
+/// On an empty model it's fine, and so is a list: an absent one reads as `[]`.
+#[test]
+fn migrate_add_required_field_refused_when_rows_exist() {
+  let before = "model User {\n  name String\n}";
+  let after = "model User {\n  name String\n  age UInt\n}";
+
+  for via_file in [false, true] {
+    let dir = tempdir().unwrap();
+    let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+    insert_data(&db, "User", json!({ "name": "Alice" }));
+
+    let result = if via_file { apply_migration(&mut db, &mig(before, after)) } else { migrate_to(&mut db, after) };
+    match result {
+      Err(MigrateApplyError::RequiredField { field }) => assert_eq!(field, "User.age"),
+      other => panic!("expected RequiredField, got {:?}", other),
+    }
+    // Rolled back: the schema is unchanged and the model takes writes as before
+    assert!(!serialize_snapshot(&db.schema).contains("age"));
+    insert_data(&db, "User", json!({ "name": "Bob" }));
+  }
+
+  let dir = tempdir().unwrap();
+  let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+  migrate_to(&mut db, after).unwrap();
+  insert_data(&db, "User", json!({ "name": "Carol", "age": 3 }));
+  migrate_to(&mut db, "model User {\n  name String\n  age UInt\n  tags String[]\n}").unwrap();
+  assert_eq!(get_data(&db, "User", json!({ "tags": true })), json!([{ "tags": [] }]));
 }

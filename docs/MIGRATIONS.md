@@ -126,7 +126,8 @@ offsets. `evolve` therefore refuses any action that changes a field's pinned phy
 location, declared type, or relation binding — and refuses an `add field` claiming a slot that is already
 taken (live or `@retired`). `alter field` is for **metadata only**: nullable, `@default`, `@format`,
 `@onDelete`, added enum variants, and `@rev` (adding a `@bind` list also alters the reference it pairs
-with — that side writes the list). Generate migrations with `marci-migrate generate`.
+with — that side writes the list). A changed `@default` applies to rows written from then on; existing
+rows keep what they hold. Generate migrations with `marci-migrate generate`.
 
 ## Artifacts
 
@@ -165,8 +166,9 @@ A row is `[ version:u8 | reserved:u8 | header_len:u16 | offset_table | payload ]
 **fixed byte slot** in the offset table (`offset_pos`); the header length is stored per row.
 
 - Reading field at `offset_pos`: if `offset_pos + 4 > header_len` the field was added after this row was
-  written → treated as **absent** (resolves to `@default` if present, else `null` — *default-on-read*, no
-  backfill). Otherwise the offset gives the payload start; the end is the next non-zero slot.
+  written → **absent** (`null`). A field added with `@default` never gets there: the migration writes the
+  default into existing rows (see the table below). Otherwise the offset gives the payload start; the end
+  is the next non-zero slot.
 - **Invariant:** Body fields are laid out in slot order. The writer writes them in array order and the
   reader derives a field's end from the next slot, so the entity's field array must keep Body fields in
   `offset_pos` order. `reconcile` enforces this via `canonicalize_field_order`.
@@ -175,8 +177,8 @@ What this buys (assuming the engine never reuses a retired slot):
 
 | Migration | Cost |
 |---|---|
-| add nullable field | **O(1)** — old rows read it as absent/null |
-| add field with `@default` | **O(1)** — default-on-read, no backfill |
+| add field without `@default` | **O(1)** — old rows read it as absent/null |
+| add field with `@default` | scan — the default is written into every existing row, as SQL's `ADD COLUMN … DEFAULT` |
 | reorder fields in `schema.marci` | **O(1)** — declaration order is cosmetic; slots are carried |
 | add index / unique | scan (backfill the index tree from existing rows) |
 
@@ -224,7 +226,7 @@ rebuilds the computed caches (default bytes, index trees, counters, reverse-depe
 |---|---|---|---|
 | `CreateEntity` | create the entity tree + its index/relation trees | no (empty) | no |
 | `DropEntity` | delete the entity tree + its index/relation trees | no | **yes** |
-| `AddField` | nothing (slot is in `new`; default-on-read) | **no** | no |
+| `AddField` | refuses a required field while the model has rows; writes the `@default` (if any) into existing rows — a value like any other from then on, for filters and the indexes built after it; `now()` stamps the migration time. Without a default, nothing (the slot is in `new`, old rows read it as absent) | with `@default` | no |
 | `AlterField` | nothing (nullable/default/format/`@onDelete`/added enum variants/`@rev` — metadata) | no | no |
 | `DropField` | nothing — the slot is **retired** (`@retired(N)` in the snapshot); old rows keep dead bytes, new rows skip it. Relation/key drops are rejected. | no | **yes** |
 | `AddIndex` / `DropIndex` | build the index tree from existing rows / delete it | scan / no | no |
@@ -236,6 +238,11 @@ reconciled (`UnsupportedLayoutChange`), removing or renumbering an enum variant
 (`UnsupportedBindingChange`) — e.g. adding `@bind` to a composite-key relation flips it from `index_tree`
 to `current_id`, which moves where the relation lives. These surface as an explicit error rather than a
 silent no-op; apply the schema to a fresh database via `$sync` instead.
+
+**Rejected by `apply`** (it depends on the data): a **required** field — no `?`, no `@default`, not a
+list — added to a model that already has rows (`RequiredField`): those rows would read `null` for a type
+that promises a value, the case SQL's `ADD COLUMN … NOT NULL` refuses too. Give it a `@default` (written
+into the existing rows) or make it optional. Nothing is applied: the migration runs in one transaction.
 
 ## Frontends
 

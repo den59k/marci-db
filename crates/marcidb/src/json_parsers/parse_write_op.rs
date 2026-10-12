@@ -273,16 +273,21 @@ fn parse_write_op<'a>(
 }
 
 
+/// The stored bytes of a default known before the write; `None` for a counter (filled in by the write).
+/// Shared with the migration that writes an added field's default into existing rows.
+pub(crate) fn default_bytes(default_value: &FieldDefault) -> Option<Vec<u8>> {
+    match default_value {
+        FieldDefault::Value(val) => Some(val.clone()),
+        FieldDefault::Now => Some(Local::now().timestamp_millis().to_be_bytes().to_vec()),
+        FieldDefault::Counter(_) => None,
+    }
+}
+
 /// Writes the default value. If the value is computed at write time, returns the offset
 fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
     match default_value {
-        FieldDefault::Value(val) => {
-            dst.extend_from_slice(val);
-            return Ok(None)
-        },
-        FieldDefault::Now => {
-            let now = Local::now().timestamp_millis();
-            dst.extend_from_slice(&now.to_be_bytes());
+        FieldDefault::Value(_) | FieldDefault::Now => {
+            dst.extend_from_slice(&default_bytes(default_value).unwrap());
             return Ok(None)
         },
         FieldDefault::Counter(_) => {
