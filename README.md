@@ -34,6 +34,7 @@ const posts = await db.post
 - **Migrations as files**: `marcidb generate` diffs the schema into a `.march` file (a reviewable action list + a snapshot of the resulting schema); `marcidb migrate push` ships your migrations and the server applies the new ones, tracking an applied ledger — adding fields and indexes without rewriting existing rows
 - **JSON fields**: a `Json` column stores any JSON value in a compact binary (JSONB-style) format — no fixed sub-schema — and filters by path: `$where: { meta: { "address.city": "Tokyo", "age": { $gt: 18 } } }`. Reads ride the binary transport like any other field
 - **Compact binary row format** with zero-copy field access — filters and aggregates read only the bytes they need
+- **Online backups**: `GET /:db/$backup` (or `npx marcidb backup myapp`, or `db.backup(path)` embedded) streams a consistent snapshot of the whole database — rows, indexes, relations, journals and the schema — while reads and writes go on; `$restore` swaps it back in place. Checksummed `.marcibin` files, readable offline with `npx marcidb inspect`. See [Backups](docs/HTTP-API.md#backups)
 - **Binary read transport**: `findMany`/`findFirst` results come back as a compact binary buffer instead of JSON — automatic in the embedded client, opt-in over HTTP (JSON stays the default for curl). It removes the serialize/parse tax on row-heavy reads: **~5–6× faster** large/nested reads embedded, **~1.4–1.6×** over HTTP (with a smaller payload). See [Benchmarks](docs/BENCHMARKS.md)
 
 ## Quick start
@@ -109,7 +110,7 @@ curl -X POST http://localhost:3000/myapp/\$sync --data-binary @schema.marci
 
 ## Status
 
-Experimental. The storage format is not stabilized yet — do not use for data you cannot regenerate. Migrations cover adding fields, adding/dropping indexes and creating/dropping models; dropping fields, renames and field reordering are not supported yet.
+Experimental. The storage format is not stabilized yet — a backup is a byte-exact copy of the storage, so it restores into an engine with the same format; keep that in mind across upgrades. Migrations cover adding and dropping fields, adding/dropping indexes and creating/dropping models, and field order is free; renames and dropping relation fields are not supported yet.
 
 ## License
 

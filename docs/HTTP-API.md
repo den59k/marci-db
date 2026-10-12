@@ -27,7 +27,7 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-serv
 
 ## Endpoints
 
-Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text, and the [journal](#journals) routes). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
+Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text, the [journal](#journals) routes, and the [backup](#backups) routes). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
 
 | Endpoint | Body | Response |
 |---|---|---|
@@ -48,6 +48,8 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | `POST /:db/:model/$journal/:name` | `{ "on": "delete" }` | `{ "created": bool }` — see [Journals](#journals) |
 | `GET /:db/:model/$journal/:name` | — (`?after=&limit=&wait=`) | JSON array of entries |
 | `DELETE /:db/:model/$journal/:name` | — | `{ "dropped": bool }` |
+| `GET /:db/$backup` | — | the database as a `.marcibin` file (`application/x-marcidb-backup`) — see [Backups](#backups) |
+| `POST /:db/$restore` | a `.marcibin` file (`?into=<name>` restores under another name) | `{ "restored", "bytes", "trees", "entries", "schemaVersion", "createdAt" }` — replaces the database |
 
 ### Examples
 
@@ -228,6 +230,70 @@ curl -X DELETE localhost:3000/myapp/File/\$journal/stored-files
 - `limit` defaults to 100 (at most 1000), `wait` is in seconds (at most 60). A waiting request holds no lock on the database.
 - Reading or confirming a journal that does not exist is a `404`.
 
+## Backups
+
+`GET /:db/$backup` streams a consistent copy of the whole database; `POST /:db/$restore` puts one back.
+From the command line, `marcidb backup` / `marcidb restore` wrap both (they send `--token` / `MARCI_TOKEN`
+as the bearer token, like every `marcidb` command):
+
+```bash
+npx marcidb backup myapp --url http://localhost:3000 --out backups/
+# → Backed up 'myapp' to backups/myapp-20261012-030000.marcibin (48213 bytes)
+
+npx marcidb restore myapp backups/myapp-20261012-030000.marcibin --into myapp_check   # a copy beside it
+npx marcidb restore myapp backups/myapp-20261012-030000.marcibin --yes                # replace myapp
+
+npx marcidb inspect backups/myapp-20261012-030000.marcibin        # header, schema, trees — offline
+```
+
+Over plain HTTP:
+
+```bash
+curl -fsS -H "Authorization: Bearer $MARCI_TOKEN" -o myapp.marcibin 'http://localhost:3000/myapp/$backup'
+curl -fsS -H "Authorization: Bearer $MARCI_TOKEN" --data-binary @myapp.marcibin 'http://localhost:3000/myapp/$restore'
+# → { "restored": "myapp", "bytes": 48213, "trees": 14, "entries": 1532, "schemaVersion": 7, "createdAt": "2026-10-12T03:00:00Z" }
+```
+
+**What is in a backup.** Everything the database stores, byte for byte: the rows, every index (including
+`@unique` and `@custom` ones), the relation trees, the journals with their unconfirmed entries, and the schema
+with its version. Ids continue where they stopped after a restore. The file is not compressed (`zstd` it if
+you need to); it is checksummed per tree and as a whole, so a damaged or truncated file is refused instead
+of half-restored. The response carries `Content-Disposition: attachment; filename="<db>-<YYYYMMDD-HHMMSS>.marcibin"`
+with the time of the snapshot.
+
+**Consistency.** The backup is one snapshot, taken when the request arrives: writes committed after that
+point are not in it, however long the download takes.
+
+**What waits.** Nothing: reads, writes and migrations of the same database all go on while a backup runs —
+the backup keeps seeing the snapshot it started from. A `$restore` of that database waits for the backup
+to finish (it counts as an in-flight request). During a long backup the data file can grow: pages freed by
+concurrent writes are kept for the snapshot and reused once it ends.
+
+**Restore** replaces the database in place. The upload is stored next to the databases and restored into a
+staging directory while the live database keeps serving — plan for free disk space of about twice the
+backup. Then the swap: requests to that database get `503` (`kind: "unavailable"`) for its duration;
+requests already running finish first (up to 30 s — otherwise the restore is abandoned with a `503` and
+nothing changes). A malformed or damaged file is a `400` and changes nothing. `?into=<name>` restores under
+another name instead — created if absent, replaced if it exists. The restored database is at the schema
+version of the backup; push your migrations afterwards (`marcidb migrate push`) to bring it forward.
+A second restore of the same name while one runs is a `503`. `DELETE /:db` is unaffected.
+
+**Scheduling.** The server has no scheduler of its own — run the CLI from cron, a systemd timer or a
+Kubernetes CronJob:
+
+```bash
+# crontab -e — 03:00 every night, keep 14 days
+MARCI_TOKEN=change-me
+0 3 * * * npx marcidb backup myapp --url http://localhost:3000 --out /var/backups/marcidb/ && find /var/backups/marcidb -name '*.marcibin' -mtime +14 -delete
+```
+
+`marcidb backup` writes to `<file>.tmp` and renames it only when the download is complete; a server-side
+failure mid-copy aborts the response, so a broken download never looks like a finished file.
+
+A database directory that no process has open can also be backed up, restored and inspected locally,
+without a server: `marci-migrate backup <db-dir> <out>`, `marci-migrate restore <db-dir> <file> [--overwrite]`,
+`marci-migrate inspect <file | db-dir>` (`marcidb inspect` runs the latter).
+
 ## Errors
 
 An error answers with a JSON body and the status its kind means:
@@ -245,6 +311,7 @@ An error answers with a JSON body and the status its kind means:
 | `not_found` | `404` | unknown database, model or action; the row to update or delete does not exist |
 | `bad_request` | `400` | invalid JSON, unknown or missing field, malformed query/insert/update, bad `:id` syntax, missing aggregate keys, unsupported or diverged migration |
 | `unauthorized` | `401` | the token is missing or wrong |
+| `unavailable` | `503` | the database is being restored, or stayed busy past the restore's wait — retry |
 | `internal` | `500` | a fault of the server |
 
 `kind` is what a client switches on; `error` is a message for a person; `field` is present when the failure is about

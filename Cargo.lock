@@ -476,6 +476,7 @@ dependencies = [
  "pin-project-lite",
  "smallvec 1.15.2",
  "tokio",
+ "want",
 ]
 
 [[package]]
@@ -659,11 +660,13 @@ dependencies = [
  "bitvec",
  "canopydb",
  "chrono",
+ "fslock",
  "marcidb-schema",
  "memchr",
  "serde_json",
  "smallvec 2.0.0-alpha.12",
  "tempfile",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -684,6 +687,7 @@ version = "0.15.0"
 dependencies = [
  "marcidb",
  "marcidb-schema",
+ "serde_json",
 ]
 
 [[package]]
@@ -703,6 +707,7 @@ dependencies = [
  "marcidb",
  "marcidb-schema",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1283,6 +1288,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
 
 [[package]]
+name = "try-lock"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1299,6 +1310,15 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "want"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
+dependencies = [
+ "try-lock",
+]
 
 [[package]]
 name = "wasi"

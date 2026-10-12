@@ -16,7 +16,7 @@ pub struct OpenOptions {
 
 /// Opens the underlying CanopyDB database for `path` with the given options. Both create and open paths
 /// funnel through here so option handling lives in one spot.
-fn open_database(path: &str, options: &OpenOptions) -> Result<Database, StorageError> {
+pub(crate) fn open_database(path: &str, options: &OpenOptions) -> Result<Database, StorageError> {
   let mut env_opts = canopydb::EnvOptions::new(path);
   env_opts.disable_fsync = options.disable_fsync;
   Ok(Database::with_options(env_opts, canopydb::DbOptions::default())?)
@@ -24,7 +24,7 @@ fn open_database(path: &str, options: &OpenOptions) -> Result<Database, StorageE
 
 pub struct MarciDB {
   pub schema: Schema,
-  db: Database,
+  pub(crate) db: Database,
   pub(crate) counters: Vec<Arc<AtomicU64>>,
   model_by_name: HashMap<String, usize>,
   /// Registered `@custom` index providers (vector, full-text, …). Empty by default; the host installs them

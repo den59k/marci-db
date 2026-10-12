@@ -24,6 +24,12 @@ export interface Ffi {
   migrateApply(handle: Ptr, migrationsJson: string): string | null;
   snapshot(handle: Ptr): string | null;
   reindexAll(handle: Ptr): string | null;
+  /** Starts a backup on a native thread; the envelope's data is `{ job }`. */
+  backupStart(handle: Ptr, path: string): string | null;
+  /** The envelope's data is `{ state: "running" }` or `{ state: "done", bytes, trees, entries, schemaVersion, createdAt }`. */
+  backupPoll(handle: Ptr, job: number): string | null;
+  /** Restores a `.marcibin` file into `dir` and opens it; null on failure (see `lastError`). */
+  restore(dir: string, backupPath: string, opts: string | null): Ptr | null;
 }
 
 // `<platform>-<arch>` → native filename. Extend as more prebuilt targets are published.
@@ -55,7 +61,7 @@ export function resolveLibPath(): string {
 const isBun = typeof (globalThis as any).Bun !== "undefined";
 
 /** ABI contract this package speaks; must equal the native lib's `marci_abi_version()`. See marcidb-ffi. */
-const EXPECTED_ABI = 1;
+const EXPECTED_ABI = 2;
 
 function abiMismatch(libPath: string, got: number): Error {
   return new Error(
@@ -108,6 +114,9 @@ async function bunBackend(libPath: string): Promise<Ffi> {
     marci_migrate_apply: { args: [P, P], returns: P },
     marci_snapshot: { args: [P], returns: P },
     marci_reindex_all: { args: [P], returns: P },
+    marci_backup_start: { args: [P, P], returns: P },
+    marci_backup_poll: { args: [P, FFIType.u64], returns: P },
+    marci_restore: { args: [P, P, P], returns: P },
   });
 
   const enc = new TextEncoder();
@@ -146,6 +155,9 @@ async function bunBackend(libPath: string): Promise<Ffi> {
     migrateApply: (h, json) => readFree(s.marci_migrate_apply(h, cstr(json))),
     snapshot: (h) => readFree(s.marci_snapshot(h)),
     reindexAll: (h) => readFree(s.marci_reindex_all(h)),
+    backupStart: (h, p) => readFree(s.marci_backup_start(h, cstr(p))),
+    backupPoll: (h, job) => readFree(s.marci_backup_poll(h, job)),
+    restore: (dir, file, opts) => s.marci_restore(cstr(dir), cstr(file), opts == null ? null : cstr(opts)) || null,
   };
 }
 
@@ -179,6 +191,9 @@ async function nodeBackend(libPath: string): Promise<Ffi> {
   const migrateApply = lib.func("void* marci_migrate_apply(void*, str)");
   const snapshot = lib.func("void* marci_snapshot(void*)");
   const reindexAll = lib.func("void* marci_reindex_all(void*)");
+  const backupStart = lib.func("void* marci_backup_start(void*, str)");
+  const backupPoll = lib.func("void* marci_backup_poll(void*, uint64_t)");
+  const restore = lib.func("void* marci_restore(str, str, str)");
 
   const readString = (p: any): string | null => (p ? koffi.decode(p, "char", -1) : null);
   const readFree = (p: any): string | null => {
@@ -210,5 +225,8 @@ async function nodeBackend(libPath: string): Promise<Ffi> {
     migrateApply: (h, json) => readFree(migrateApply(h, json)),
     snapshot: (h) => readFree(snapshot(h)),
     reindexAll: (h) => readFree(reindexAll(h)),
+    backupStart: (h, p) => readFree(backupStart(h, p)),
+    backupPoll: (h, job) => readFree(backupPoll(h, job)),
+    restore: (dir, file, opts) => restore(dir, file, opts ?? null) || null,
   };
 }

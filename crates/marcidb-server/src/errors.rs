@@ -1,6 +1,6 @@
 use http_body_util::Full;
 use hyper::{Response, StatusCode, body::Bytes, header};
-use marcidb::{BatchError, DeleteError, EncodeError, InsertError, OpError, UpdateError, UpsertError};
+use marcidb::{BackupError, BatchError, DeleteError, EncodeError, InsertError, OpError, UpdateError, UpsertError};
 
 // errors.rs
 /// What a request failed with. Every variant answers as JSON —
@@ -12,6 +12,8 @@ pub enum ApiError {
     NotFound(String),
     BadRequest(String),
     Internal(String),
+    /// The database is being restored, or stayed busy past the restore's wait (503): retry shortly.
+    Unavailable(String),
     /// A failure the engine classified itself (`OpError::kind`): a constraint — `unique`, `foreign_key`,
     /// `restrict`, `duplicate_id` (409) —, `not_found` (404), `bad_request` (400), `internal` (500).
     Engine { kind: &'static str, field: Option<String>, message: String },
@@ -25,6 +27,7 @@ impl ApiError {
             ApiError::NotFound(m) => ("not_found", None, m),
             ApiError::BadRequest(m) => ("bad_request", None, m),
             ApiError::Internal(m) => ("internal", None, m),
+            ApiError::Unavailable(m) => ("unavailable", None, m),
             ApiError::Engine { kind, field, message } => (kind, field, message),
         };
         let status = match kind {
@@ -32,6 +35,7 @@ impl ApiError {
             "not_found" => StatusCode::NOT_FOUND,
             "unauthorized" => StatusCode::UNAUTHORIZED,
             "bad_request" => StatusCode::BAD_REQUEST,
+            "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let mut body = serde_json::json!({ "error": message, "kind": kind });
@@ -74,4 +78,14 @@ impl From<BatchError> for ApiError {
 
 impl From<EncodeError> for ApiError {
     fn from(e: EncodeError) -> Self { ApiError::BadRequest(e.to_string()) }
+}
+
+/// A malformed or damaged upload is the client's (400); everything else is the server's (500).
+impl From<BackupError> for ApiError {
+    fn from(e: BackupError) -> Self {
+        match e {
+            BackupError::Format(_) => ApiError::BadRequest(e.to_string()),
+            _ => ApiError::Internal(e.to_string()),
+        }
+    }
 }

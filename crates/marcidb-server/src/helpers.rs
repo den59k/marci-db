@@ -1,4 +1,4 @@
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{Request, Response, body::Bytes, header};
 use serde_json::Value;
 
@@ -58,6 +58,17 @@ pub async fn parse_text_body(
 
     String::from_utf8(body.to_vec())
         .map_err(|e| ApiError::BadRequest(format!("Invalid UTF-8 body: {}", e)))
+}
+
+/// The error a streamed response body may end with: it aborts the connection instead of ending the body.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The body of every response the server sends: a buffered one (`Full`, every handler) or a stream (`$backup`).
+pub type ResponseBody = BoxBody<Bytes, BoxError>;
+
+/// A buffered response as a [`ResponseBody`] one.
+pub fn boxed(res: Response<Full<Bytes>>) -> Response<ResponseBody> {
+    res.map(|body| body.map_err(|never| match never {}).boxed())
 }
 
 /// Runs heavy work on the blocking pool

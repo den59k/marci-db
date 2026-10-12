@@ -138,6 +138,22 @@ pub fn decode_index_key_value(field: &Field, index: &FieldIndex, key: &[u8]) -> 
   }
 }
 
+/// Splits a Value/Number index key (`encoded_value ++ id`) into the field value — decoded, in the
+/// `get_data` format, ready for `decode_field_value` — and the row id. A dynamic-size value ends at its
+/// `\0` terminator, which belongs to neither part. For inspection tools; a key too short for the field's
+/// size yields what is there and an empty id.
+pub fn split_index_key(field: &Field, index: &FieldIndex, key: &[u8]) -> (Vec<u8>, Vec<u8>) {
+  if field.get_size().is_some_and(|size| key.len() < size) {
+    return (key.to_vec(), vec![]);
+  }
+  let value = decode_index_key_value(field, index, key);
+  let consumed = match field.get_size() {
+    Some(size) => size.min(key.len()),
+    None => (value.len() + 1).min(key.len()),
+  };
+  (value, key[consumed..].to_vec())
+}
+
 /// i64 be_bytes → lexicographically sortable bytes
 /// Flip only the most significant (sign) bit
 pub fn encode_i64(bytes: &[u8]) -> Vec<u8> {

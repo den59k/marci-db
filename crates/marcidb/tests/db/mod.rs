@@ -31,6 +31,7 @@ pub mod bind_list_tests;
 pub mod unique_group_tests;
 pub mod upsert_tests;
 pub mod default_list_tests;
+pub mod backup_tests;
 
 use std::str::FromStr;
 

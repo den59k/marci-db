@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{json_parsers::parse_aggregate_op::aggregate_to_json, query_op::{DecodeCtx, IncludeResult}, schema::{Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end_optimized, get_id_field_size, get_offset}};
+use crate::{json_parsers::parse_aggregate_op::aggregate_to_json, query_op::{DecodeCtx, IncludeResult, QueryOp}, schema::{Entity, Field, FieldCustomFormat, FieldLocation, FieldType, PrimitiveFieldType, Schema}, utils::{check_exists_condition, get_end_optimized, get_id_field_size, get_offset}};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -222,6 +222,14 @@ pub fn decode_document(ctx: DecodeCtx<String>) -> Result<String, DecodeError>  {
 
     return Ok(str);
     // return Ok(Value::Object(obj));
+}
+
+/// A stored row as JSON: every own field (as `QueryOp::all` selects them — relations are left out), no
+/// includes. For inspection tools that read raw trees (a backup, a closed database directory).
+pub fn decode_row_json(schema: &Schema, entity: &Entity, id: &[u8], body: &[u8]) -> Result<String, String> {
+    let query = QueryOp::all(entity);
+    decode_document(DecodeCtx { id, data: body, entity, mask: &query.mask, includes: vec![], schema })
+        .map_err(|e| format!("{:?}", e))
 }
 
 /// Decodes a single primitive field value into JSON (for min/max in aggregations)

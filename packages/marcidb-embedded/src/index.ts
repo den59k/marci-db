@@ -1,6 +1,7 @@
 // Public API for embedded MarciDB. `openDatabase` opens an in-process DB; the returned handle is itself a
 // transport, so `marcidb(db)` (from `marcidb-client`) gives you the typed client. `openTestDatabase` adds
-// an ephemeral temp-dir DB with fsync disabled and automatic cleanup on `close()`.
+// an ephemeral temp-dir DB with fsync disabled and automatic cleanup on `close()`. `restoreDatabase` opens
+// a database restored from a `.marcibin` backup (`db.backup(path)`).
 
 import os from "node:os";
 import path from "node:path";
@@ -35,6 +36,25 @@ export interface EmbeddedOptions {
   disableFsync?: boolean;
 }
 
+/** What a finished backup (or restore) went through. */
+export interface BackupInfo {
+  /** Size of the `.marcibin` file. */
+  bytes: number;
+  /** Storage trees in it (models, indexes, relation trees, journals, the schema). */
+  trees: number;
+  /** Key/value entries over all trees. */
+  entries: number;
+  /** The schema version (one per applied migration) the backup sits at. */
+  schemaVersion: number;
+  /** The snapshot time, RFC 3339 UTC. */
+  createdAt: string;
+}
+
+export interface RestoreOptions extends EmbeddedOptions {
+  /** Replace the database already in `dir` (it must be closed). Without it, a non-empty `dir` is refused. */
+  overwrite?: boolean;
+}
+
 /**
  * An open embedded database. It *is* a `MarciTransport` (has `exec`/`batch`/`queryBinary`), so pass it
  * straight to `marcidb(db)` to get the typed client; it also carries the admin/lifecycle methods below.
@@ -58,7 +78,14 @@ export interface EmbeddedDatabase extends MarciTransport {
   $snapshot(): Promise<string>;
   /** Rebuild every model's `@custom` indexes. */
   reindexAll(): Promise<{ ok: boolean; indexed: number }>;
-  /** Close and release the database. Idempotent. */
+  /**
+   * Consistent backup of the whole database to `path` (`.marcibin`). The snapshot point is fixed when the
+   * promise is created; the copy runs on a native thread, reads and writes continue meanwhile. The file is
+   * written under a temporary name and renamed into place when complete. Nothing waits for a running
+   * backup — schema changes included; it keeps seeing its own snapshot.
+   */
+  backup(path: string): Promise<BackupInfo>;
+  /** Close and release the database. Idempotent. Waits for running backups; their promises still settle. */
   close(): void;
   readonly closed: boolean;
 }
@@ -103,8 +130,37 @@ export function openDatabase(dir: string, options: EmbeddedOptions = {}): Embedd
   if (!handle) {
     throw new MarciEmbeddedError(ffi.lastError() ?? `failed to open database at '${dir}'`, "internal");
   }
+  return wrapHandle(handle);
+}
 
+/**
+ * Restores the `.marcibin` file at `backupPath` into `dir` and opens it — use instead of `openDatabase` at
+ * startup. The directory must not be open by anyone; pass `overwrite: true` to replace an existing database
+ * there. Synchronous: the restore runs on the calling thread. The restored database sits at the backup's
+ * schema version — `db.migrate(dir)` brings it forward.
+ */
+export function restoreDatabase(dir: string, backupPath: string, options: RestoreOptions = {}): EmbeddedDatabase {
+  const opts = JSON.stringify({ disableFsync: !!options.disableFsync, overwrite: !!options.overwrite });
+  const handle = ffi.restore(dir, backupPath, opts);
+  if (!handle) {
+    throw new MarciEmbeddedError(ffi.lastError() ?? `failed to restore '${backupPath}' into '${dir}'`, "internal");
+  }
+  return wrapHandle(handle);
+}
+
+/** How often a running backup is polled. */
+const BACKUP_POLL_MS = 50;
+
+/** Blocks the calling thread for `ms` (used only by `close()`, which blocks anyway until backups end). */
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** The `EmbeddedDatabase` object over a native handle (shared by `openDatabase` and `restoreDatabase`). */
+function wrapHandle(handle: unknown): EmbeddedDatabase {
   let closed = false;
+  /** Backups not yet settled, by job id: the poll loop and `close()` settle them. */
+  const pending = new Map<number, { resolve: (info: BackupInfo) => void; reject: (e: unknown) => void }>();
   const ensureOpen = () => {
     if (closed) throw new MarciEmbeddedError("database handle is closed", "bad_request");
   };
@@ -138,6 +194,25 @@ export function openDatabase(dir: string, options: EmbeddedOptions = {}): Embedd
     return body.subarray(1); // status 0 → the binary result buffer
   }
 
+  /** One poll of `job`; settles its promise and returns true once the backup is over. */
+  function pollBackup(job: number): boolean {
+    const waiter = pending.get(job);
+    if (!waiter) return true;
+    let result: any;
+    try {
+      result = unwrap(ffi.backupPoll(handle, job));
+    } catch (e) {
+      pending.delete(job);
+      waiter.reject(e);
+      return true;
+    }
+    if (result.state === "running") return false;
+    pending.delete(job);
+    const { state: _state, ...info } = result;
+    waiter.resolve(info as BackupInfo);
+    return true;
+  }
+
   return {
     exec,
     batch,
@@ -168,9 +243,27 @@ export function openDatabase(dir: string, options: EmbeddedOptions = {}): Embedd
       ensureOpen();
       return unwrap(ffi.reindexAll(handle));
     },
+    async backup(path: string): Promise<BackupInfo> {
+      // An async body runs synchronously up to its first `await`: the snapshot is taken by `backupStart`
+      // before the promise is handed back.
+      ensureOpen();
+      const { job } = unwrap(ffi.backupStart(handle, path));
+      return new Promise<BackupInfo>((resolve, reject) => {
+        pending.set(job, { resolve, reject });
+        const tick = () => {
+          if (!closed && !pollBackup(job)) setTimeout(tick, BACKUP_POLL_MS);
+        };
+        setTimeout(tick, BACKUP_POLL_MS);
+      });
+    },
     close() {
       if (closed) return;
       closed = true;
+      // The handle is freed below, so running backups are polled to the end here (the native close would
+      // wait for them anyway) and every pending promise settles with its real outcome.
+      for (const job of [...pending.keys()]) {
+        while (!pollBackup(job)) sleepSync(5);
+      }
       ffi.close(handle);
     },
     get closed() {

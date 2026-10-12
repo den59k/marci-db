@@ -72,6 +72,47 @@ Three binding kinds, chosen at schema resolution:
 
 Reverse dependencies (`rev_dependencies`) drive cascades and `SetNull` on delete.
 
+## Backup format
+
+Everything a database holds lives in canopydb trees: rows, secondary and unique-group indexes, relation
+binding trees, `@list` reverse trees, `@custom` index stores, journals (`__journal__/<model>/<name>` and the
+`__marci_journals__` registry) and the schema (`__marci_meta__`: the snapshot text and the version). There
+are no files on the side, index providers keep no state of their own, and autoincrement counters are
+rebuilt from the last key when a database opens. So a backup is a dump of every tree — and a restore
+that writes the same bytes back yields the same database, ids and journal positions included.
+
+The dump is taken inside **one read transaction**: canopydb's MVCC snapshot. Writers are not blocked and
+nothing committed after the snapshot point leaks in. (canopydb has no online-backup call, and copying the
+directory of a live database is unsafe with the WAL on.) Pages freed by writers while the transaction is
+open stay pinned until it ends — the reason a long backup can grow the data file temporarily.
+
+`.marcibin` layout (integers little-endian, `varint` = unsigned LEB128):
+
+```
+"MARCIBIN"  u16 format  u32 header_len  header JSON
+per tree, in header order:
+  u16 name_len  name  u64 entries  { varint key_len  key  varint value_len  value }*  u64 xxh3(section)
+"MARCIEND"  u32 sections  u64 xxh3(everything before this field)
+```
+
+The header is `{ engine, createdAt, schemaVersion, schema, trees: [{ name, entries }] }`; trees are sorted
+by name, entries in key order. `format` is the layout version (`BACKUP_FORMAT_VERSION`), independent of the
+engine version; a reader refuses a newer one.
+
+- **The schema is in the header** so the file describes itself: `marci-migrate inspect` decodes rows and
+  index keys of a backup with no database around, and a restored database opens at exactly that schema
+  (the migration path brings it forward from there). The entry counts come from the same read
+  transaction, so the header is written before the body and a summary needs no scan.
+- **Per-section checksums** (xxh3-64 over `name_len … last entry`) catch damage while streaming: a restore
+  verifies each tree as it reads it and fails at the first bad one, and an inspector can read one tree
+  without the rest. The trailer checksum covers every byte before it, including the section checksums, so
+  a truncated or reordered file is refused too.
+- A restore writes into a staging directory beside the target (`<name>.restoring`) in write transactions
+  of ~32 MB (canopydb spills a transaction past 64 MB), checkpoints and closes it, then swaps it in with a
+  rename; any failure removes the staging directory and leaves the target as it was. The swap refuses a
+  target whose canopydb `LOCK` is held — on Linux a rename would otherwise succeed under the open handle.
+- No compression for now: the format leaves room for it in a later `format` version.
+
 ## Query pipeline
 
 ```

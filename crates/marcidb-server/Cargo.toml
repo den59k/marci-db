@@ -22,3 +22,8 @@ chrono = "0.4.42"
 vector = ["dep:marci_vector_index"]
 # Enable `@custom(fulltext, …)` indexes: `cargo run -p marcidb-server --features fulltext`
 fulltext = ["dep:marci_fulltext_index"]
+
+[dev-dependencies]
+# The HTTP tests (src/tests.rs) drive the server with hyper's own client.
+hyper = { version = "1.7.0", features = ["client", "http1"] }
+tempfile = "3"

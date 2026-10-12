@@ -6,26 +6,61 @@
 //!   envelope**; the caller copies it and must release it with [`marci_free_string`].
 //!   Envelope shape: `{"ok":true,"data":<value>}` or `{"ok":false,"error":"…","kind":"…"}`,
 //!   where `kind` is `bad_request` | `not_found` | `internal` (mirrors the server's `ApiError`).
-//! * A [`DbHandle`] is **not** thread-safe: use one from a single thread at a time. FFI calls from a
-//!   single JS runtime are serialized by its event loop, which satisfies this.
+//! * A [`DbHandle`] guards its database with a read/write lock: data operations take the read side,
+//!   schema changes (`marci_sync`, `marci_migrate`, `marci_migrate_apply`) the write side — the same split
+//!   as the server. Calls may come from any thread, but [`marci_close`] must not race with other calls on
+//!   the same handle. FFI calls from a single JS runtime are serialized by its event loop.
+//! * Backups run on a native thread ([`marci_backup_start`] / [`marci_backup_poll`]) so the JS thread is
+//!   never blocked by the copy. The snapshot point is fixed before `marci_backup_start` returns; reads,
+//!   writes and schema changes all continue meanwhile — the lock is held only while the snapshot is taken,
+//!   the copy itself holds nothing but its storage snapshot. [`marci_close`] waits for running backups,
+//!   so a closed handle leaves complete files and releases the storage lock synchronously.
+
+// Every entry point takes pointers from a C caller, who owns the contract above (a live handle or NULL,
+// NUL-terminated strings); marking `extern "C"` functions `unsafe fn` would change nothing for that caller.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
+use std::thread::JoinHandle;
 
 use marcidb::{
-    MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
-    QueryBinaryOutcome, ReindexError, execute_batch, execute_op, execute_query_binary, parse_snapshot,
-    serialize_snapshot, try_parse_schema,
+    BackupInfo, MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
+    QueryBinaryOutcome, ReindexError, RestoreOptions, execute_batch, execute_op, execute_query_binary,
+    parse_snapshot, serialize_snapshot, try_parse_schema,
 };
 use serde_json::{Value, json};
 
-/// Opaque handle to an open embedded database. Created by [`marci_open`], freed by [`marci_close`].
+/// Opaque handle to an open embedded database. Created by [`marci_open`] / [`marci_restore`], freed by
+/// [`marci_close`]. The database is shared with backup threads, hence the `Arc<RwLock<…>>`.
 pub struct DbHandle {
-    db: MarciDB,
+    db: Arc<RwLock<MarciDB>>,
+    /// Backups started by [`marci_backup_start`] and not yet reported done by [`marci_backup_poll`].
+    jobs: Mutex<HashMap<u64, JoinHandle<Result<BackupInfo, String>>>>,
+    next_job: AtomicU64,
+}
+
+impl DbHandle {
+    fn new(db: MarciDB) -> Self {
+        DbHandle { db: Arc::new(RwLock::new(db)), jobs: Mutex::new(HashMap::new()), next_job: AtomicU64::new(1) }
+    }
+
+    /// The database for a data operation. A panic in an earlier call (caught at the boundary) may have
+    /// poisoned the lock; the engine's own transactions keep the data consistent, so carry on.
+    fn read(&self) -> RwLockReadGuard<'_, MarciDB> {
+        self.db.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The database for a schema change: waits for running operations.
+    fn write(&self) -> RwLockWriteGuard<'_, MarciDB> {
+        self.db.write().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 thread_local! {
@@ -112,8 +147,8 @@ unsafe fn req_str<'a>(ptr: *const c_char, name: &str) -> Result<&'a str, Fault> 
     unsafe { opt_str(ptr) }?.ok_or_else(|| Fault::bad_request(format!("argument '{}' must not be null", name)))
 }
 
-unsafe fn handle_mut<'a>(ptr: *mut DbHandle) -> Result<&'a mut DbHandle, Fault> {
-    unsafe { ptr.as_mut() }.ok_or_else(|| Fault::bad_request("database handle is null"))
+unsafe fn handle_ref<'a>(ptr: *mut DbHandle) -> Result<&'a DbHandle, Fault> {
+    unsafe { ptr.as_ref() }.ok_or_else(|| Fault::bad_request("database handle is null"))
 }
 
 // ───────────────────────────────── providers ─────────────────────────────────
@@ -135,7 +170,7 @@ fn build_providers() -> Arc<ProviderRegistry> {
 /// the product/package version** — bump it only when that contract changes incompatibly (a new/renamed
 /// symbol, or a [`BINARY_VERSION`](marcidb::BINARY_VERSION) bump). The loader reads this at open and refuses
 /// a mismatched native library with a clear message, instead of a cryptic missing-symbol `dlopen` failure.
-pub const MARCI_ABI_VERSION: u32 = 1;
+pub const MARCI_ABI_VERSION: u32 = 2;
 
 /// Returns [`MARCI_ABI_VERSION`]. The first symbol the loader binds — its absence marks a pre-handshake
 /// (too old) library.
@@ -180,7 +215,7 @@ fn open_inner(path: *const c_char, options_json: *const c_char) -> Result<DbHand
         .map_err(|e| Fault::internal(format!("failed to open database '{}': {:?}", path, e)))?
         .with_providers(build_providers());
 
-    Ok(DbHandle { db })
+    Ok(DbHandle::new(db))
 }
 
 fn parse_options(s: &str) -> Result<OpenOptions, Fault> {
@@ -192,13 +227,21 @@ fn parse_options(s: &str) -> Result<OpenOptions, Fault> {
     Ok(opts)
 }
 
-/// Closes and frees a handle (releasing the underlying storage lock). NULL is a no-op.
+/// Closes and frees a handle (releasing the underlying storage lock). Waits for running backups first, so
+/// their files are complete and the last reference to the database goes away here. NULL is a no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_close(handle: *mut DbHandle) {
     if handle.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { drop(Box::from_raw(handle)) }));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let handle = unsafe { Box::from_raw(handle) };
+        let jobs: Vec<_> = handle.jobs.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
+        for (_, job) in jobs {
+            let _ = job.join();
+        }
+        drop(handle);
+    }));
 }
 
 /// Message of the most recent [`marci_open`] that returned NULL (NULL if none). Owned by the library —
@@ -225,11 +268,11 @@ pub extern "C" fn marci_free_string(ptr: *mut c_char) {
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_exec(handle: *mut DbHandle, op_json: *const c_char) -> *mut c_char {
     run(|| {
-        let h = unsafe { handle_mut(handle) }?;
+        let h = unsafe { handle_ref(handle) }?;
         let input = unsafe { req_str(op_json, "op_json") }?;
         let value: Value =
             serde_json::from_str(input).map_err(|e| Fault::bad_request(format!("invalid op JSON: {}", e)))?;
-        exec_value(&h.db, value)
+        exec_value(&h.read(), value)
     })
 }
 
@@ -272,11 +315,11 @@ pub extern "C" fn marci_query_binary(handle: *mut DbHandle, op_json: *const c_ch
 }
 
 fn query_binary_inner(handle: *mut DbHandle, op_json: *const c_char) -> Result<QueryBinaryOutcome, Fault> {
-    let h = unsafe { handle_mut(handle) }?;
+    let h = unsafe { handle_ref(handle) }?;
     let input = unsafe { req_str(op_json, "op_json") }?;
     let value: Value =
         serde_json::from_str(input).map_err(|e| Fault::bad_request(format!("invalid op JSON: {}", e)))?;
-    execute_query_binary(&h.db, &value).map_err(op_fault)
+    execute_query_binary(&h.read(), &value).map_err(op_fault)
 }
 
 /// Frames `(status, payload)` into a length-prefixed heap buffer owned by the caller (see
@@ -314,13 +357,14 @@ fn op_fault(e: OpError) -> Fault {
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_sync(handle: *mut DbHandle, schema_text: *const c_char) -> *mut c_char {
     run(|| {
-        let h = unsafe { handle_mut(handle) }?;
+        let h = unsafe { handle_ref(handle) }?;
         let schema_text = unsafe { req_str(schema_text, "schema_text") }?;
 
+        let mut db = h.write();
         let mut new_schema = try_parse_schema(schema_text).map_err(|e| Fault::bad_request(e.to_string()))?;
-        marcidb_schema::reconcile(&mut new_schema, &h.db.schema);
-        let ops = marcidb_schema::diff(&h.db.schema, &new_schema).map_err(|e| Fault::bad_request(e.to_string()))?;
-        h.db.commit_schema(new_schema, &ops).map_err(migrate_fault)?;
+        marcidb_schema::reconcile(&mut new_schema, &db.schema);
+        let ops = marcidb_schema::diff(&db.schema, &new_schema).map_err(|e| Fault::bad_request(e.to_string()))?;
+        db.commit_schema(new_schema, &ops).map_err(migrate_fault)?;
         Ok(Value::Null)
     })
 }
@@ -331,9 +375,9 @@ pub extern "C" fn marci_sync(handle: *mut DbHandle, schema_text: *const c_char) 
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_migrate(handle: *mut DbHandle, migration_text: *const c_char) -> *mut c_char {
     run(|| {
-        let h = unsafe { handle_mut(handle) }?;
+        let h = unsafe { handle_ref(handle) }?;
         let migration_text = unsafe { req_str(migration_text, "migration_text") }?;
-        apply_migration_text(&mut h.db, migration_text)?;
+        apply_migration_text(&mut h.write(), migration_text)?;
         Ok(Value::Null)
     })
 }
@@ -370,16 +414,17 @@ fn canon_snapshot(text: &str) -> Result<String, Fault> {
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_migrate_apply(handle: *mut DbHandle, migrations_json: *const c_char) -> *mut c_char {
     run(|| {
-        let h = unsafe { handle_mut(handle) }?;
+        let h = unsafe { handle_ref(handle) }?;
         let input = unsafe { req_str(migrations_json, "migrations_json") }?;
         let migrations: Vec<String> = serde_json::from_str(input)
             .map_err(|e| Fault::bad_request(format!("migrations must be a JSON array of strings: {}", e)))?;
+        let mut db = h.write();
 
         // A fresh DB (no models yet) is the empty baseline — matches `marci-migrate`'s replay-from-empty.
-        let current = if h.db.schema.models.is_empty() {
+        let current = if db.schema.models.is_empty() {
             String::new()
         } else {
-            canon_snapshot(&serialize_snapshot(&h.db.schema))?
+            canon_snapshot(&serialize_snapshot(&db.schema))?
         };
 
         // Index of the first un-applied migration: replay the history until its cumulative snapshot
@@ -412,7 +457,7 @@ pub extern "C" fn marci_migrate_apply(handle: *mut DbHandle, migrations_json: *c
         for text in &migrations[start..] {
             let text = text.trim();
             if !text.is_empty() {
-                apply_migration_text(&mut h.db, text)?;
+                apply_migration_text(&mut db, text)?;
             }
         }
         Ok(json!({ "applied": migrations.len() - start, "total": migrations.len() }))
@@ -423,8 +468,8 @@ pub extern "C" fn marci_migrate_apply(handle: *mut DbHandle, migrations_json: *c
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_snapshot(handle: *mut DbHandle) -> *mut c_char {
     run(|| {
-        let h = unsafe { handle_mut(handle) }?;
-        Ok(Value::String(serialize_snapshot(&h.db.schema)))
+        let h = unsafe { handle_ref(handle) }?;
+        Ok(Value::String(serialize_snapshot(&h.read().schema)))
     })
 }
 
@@ -432,13 +477,132 @@ pub extern "C" fn marci_snapshot(handle: *mut DbHandle) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn marci_reindex_all(handle: *mut DbHandle) -> *mut c_char {
     run(|| {
-        let h = unsafe { handle_mut(handle) }?;
+        let h = unsafe { handle_ref(handle) }?;
+        let db = h.read();
         let mut total = 0usize;
-        for entity in h.db.schema.models.iter() {
-            total += h.db.reindex_entity(entity).map_err(reindex_fault)?;
+        for entity in db.schema.models.iter() {
+            total += db.reindex_entity(entity).map_err(reindex_fault)?;
         }
         Ok(json!({ "ok": true, "indexed": total }))
     })
+}
+
+// ───────────────────────────────── backup / restore ─────────────────────────────────
+
+/// Starts a consistent backup of the whole database into `path` (a `.marcibin` file, written as
+/// `<path>.tmp` and renamed when complete). Returns `{ "job": <id> }` once the snapshot point is fixed;
+/// the copy runs on a native thread — poll it with [`marci_backup_poll`]. Reads and writes continue while
+/// it runs; schema changes wait for it. A failure to take the snapshot is returned here; a failure of
+/// the copy is reported by the poll.
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_backup_start(handle: *mut DbHandle, path: *const c_char) -> *mut c_char {
+    run(|| {
+        let h = unsafe { handle_ref(handle) }?;
+        let path = unsafe { req_str(path, "path") }?.to_string();
+
+        // `canopydb::Transaction` is `!Send`: the thread opens the snapshot itself, and this call waits
+        // until it has, so the snapshot point is fixed when the call returns.
+        let db = Arc::clone(&h.db);
+        let (started_tx, started_rx) = mpsc::channel::<Result<(), String>>();
+        let job = std::thread::Builder::new()
+            .name("marci-backup".to_string())
+            .spawn(move || {
+                catch_unwind(AssertUnwindSafe(|| {
+                    // The lock is held only to take the snapshot; the copy runs without it, so a schema
+                    // change may proceed meanwhile (the snapshot is isolated from it). `db` itself stays
+                    // alive until the copy is done, which is what `marci_close` waits for.
+                    let snapshot = {
+                        let guard = db.read().unwrap_or_else(PoisonError::into_inner);
+                        match guard.backup_begin() {
+                            Ok(snapshot) => snapshot,
+                            Err(e) => {
+                                let _ = started_tx.send(Err(e.to_string()));
+                                return Err(e.to_string());
+                            }
+                        }
+                    };
+                    let _ = started_tx.send(Ok(()));
+                    snapshot.write_to_file(&path).map_err(|e| e.to_string())
+                }))
+                .unwrap_or_else(|panic| Err(panic_message(panic)))
+            })
+            .map_err(|e| Fault::internal(format!("cannot start the backup thread: {}", e)))?;
+
+        match started_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                let _ = job.join();
+                return Err(Fault::internal(message));
+            }
+            // The thread ended without reporting: it failed before the snapshot was taken.
+            Err(_) => {
+                let message = job.join().map_or_else(panic_message, |r| r.err().unwrap_or_default());
+                return Err(Fault::internal(format!("backup failed to start: {}", message)));
+            }
+        }
+
+        let id = h.next_job.fetch_add(1, Ordering::Relaxed);
+        h.jobs.lock().unwrap_or_else(PoisonError::into_inner).insert(id, job);
+        Ok(json!({ "job": id }))
+    })
+}
+
+/// Reports a backup started by [`marci_backup_start`]: `{ "state": "running" }`, or once finished
+/// `{ "state": "done", "bytes", "trees", "entries", "schemaVersion", "createdAt" }` — or an `internal`
+/// error envelope if the copy failed. A finished job is reported once and forgotten; an unknown id is a
+/// `bad_request`.
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_backup_poll(handle: *mut DbHandle, job: u64) -> *mut c_char {
+    run(|| {
+        let h = unsafe { handle_ref(handle) }?;
+        let finished = {
+            let mut jobs = h.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            match jobs.get(&job) {
+                None => return Err(Fault::bad_request(format!("no backup job {}", job))),
+                Some(thread) if !thread.is_finished() => return Ok(json!({ "state": "running" })),
+                Some(_) => jobs.remove(&job).expect("the job was just found"),
+            }
+        };
+        let info = finished.join().unwrap_or_else(|panic| Err(panic_message(panic))).map_err(Fault::internal)?;
+        let mut data = info.to_json();
+        data["state"] = json!("done");
+        Ok(data)
+    })
+}
+
+/// Restores the `.marcibin` file at `backup_path` into the directory `dir` and opens it — the startup-time
+/// alternative to [`marci_open`]. `options_json` may be NULL or `{}`; recognized keys:
+/// `{ "disableFsync": bool, "overwrite": bool }`. Without `overwrite`, a `dir` that already holds a
+/// database is refused; with it, that database is replaced — but never while it is open (by this
+/// process or another). Returns a handle, or NULL with the message in [`marci_last_error`].
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_restore(dir: *const c_char, backup_path: *const c_char, options_json: *const c_char) -> *mut DbHandle {
+    match catch_unwind(AssertUnwindSafe(|| restore_inner(dir, backup_path, options_json))) {
+        Ok(Ok(handle)) => Box::into_raw(Box::new(handle)),
+        Ok(Err(fault)) => {
+            set_last_error(fault.message);
+            ptr::null_mut()
+        }
+        Err(panic) => {
+            set_last_error(panic_message(panic));
+            ptr::null_mut()
+        }
+    }
+}
+
+fn restore_inner(dir: *const c_char, backup_path: *const c_char, options_json: *const c_char) -> Result<DbHandle, Fault> {
+    let dir = unsafe { req_str(dir, "dir") }?;
+    let backup_path = unsafe { req_str(backup_path, "backup_path") }?;
+    let mut options = RestoreOptions::default();
+    if let Some(s) = unsafe { opt_str(options_json) }?.filter(|s| !s.trim().is_empty()) {
+        options.open = parse_options(s)?;
+        let v: Value = serde_json::from_str(s).map_err(|e| Fault::bad_request(format!("invalid options JSON: {}", e)))?;
+        options.overwrite = v.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    }
+
+    let (db, _) = MarciDB::restore_from_file(dir, backup_path, &options)
+        .map_err(|e| Fault::internal(format!("cannot restore '{}' into '{}': {}", backup_path, dir, e)))?;
+    Ok(DbHandle::new(db.with_providers(build_providers())))
 }
 
 fn migrate_fault(e: MigrateApplyError) -> Fault {

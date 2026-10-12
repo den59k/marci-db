@@ -389,7 +389,7 @@ fn journal_error(e: JournalError) -> ApiError {
     }
 }
 
-fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
     query.split('&').find_map(|kv| kv.split_once('=').filter(|(k, _)| *k == name).map(|(_, v)| v))
 }
 

@@ -137,6 +137,57 @@ reordered (the normal workflow).
 
 ---
 
+## Backups
+
+`db.backup(path)` writes a consistent backup of the whole database to a `.marcibin` file — rows, indexes,
+relations, journals and the schema, byte for byte:
+
+```ts
+const info = await db.backup(`./backups/app-${Date.now()}.marcibin`);
+// { bytes: 48213, trees: 14, entries: 1532, schemaVersion: 7, createdAt: "2026-10-12T03:00:00Z" }
+```
+
+- **The snapshot point is fixed when you call it**: writes made after `backup()` returns its promise are not
+  in the file.
+- **The copy runs on a native thread**, not on the JS thread: the app keeps reading and writing while it
+  runs, and the promise settles when the file is complete. The file is written under a temporary name and
+  renamed into place only then — a crash mid-way never leaves a file that looks finished.
+- **Nothing waits for it**: reads, writes and schema changes (`$sync`, `migrate()`) all proceed while a
+  backup runs; the backup keeps seeing its own snapshot.
+- `close()` waits for running backups; their promises still settle with the real result.
+
+There is no built-in scheduler — use a timer:
+
+```ts
+const DAY = 24 * 60 * 60 * 1000;
+setInterval(() => {
+  db.backup(`./backups/app-${new Date().toISOString().replace(/[:.]/g, "-")}.marcibin`)
+    .catch((e) => console.error("backup failed", e));
+}, DAY);
+```
+
+**Restore at startup**, in place of `openDatabase`, then bring the schema forward:
+
+```ts
+import { openDatabase, restoreDatabase } from "marcidb-embedded";
+
+// e.g. RESTORE_FROM=./backups/app-2026-10-12.marcibin for the one start that should restore
+const db = process.env.RESTORE_FROM
+  ? restoreDatabase("./data", process.env.RESTORE_FROM, { overwrite: true })
+  : openDatabase("./data");
+await db.migrate("./migrations"); // a restored database is at the backup's schema version
+```
+
+`restoreDatabase(dir, file, options?)` restores into `dir` and returns the opened database. Without
+`overwrite: true` it refuses a `dir` that already holds a database; with it, the old database is
+replaced — but never one that is open (by this process or another): close it first. A damaged or
+truncated file is refused and leaves `dir` untouched. The restore is synchronous (it runs at startup).
+
+A backup file can be read without the app: `npx marcidb inspect file.marcibin` shows the schema and the
+trees, `--tree User` the rows.
+
+---
+
 ## Reading a schema file portably
 
 `openTestDatabase(schema)` / `$sync(schema)` take the schema **text**. Read it with `fs` so it works
@@ -170,15 +221,21 @@ Node doesn't support text import attributes.
   idempotent — prefer `migrate`). **await it.**
 - `$snapshot()` — current materialized schema snapshot text.
 - `reindexAll()` — rebuild every model's `@custom` (vector / full-text) indexes.
-- `close()` — release the database (idempotent). `closed` — boolean.
+- `backup(path)` — consistent backup to a `.marcibin` file on a native thread; resolves to
+  `{ bytes, trees, entries, schemaVersion, createdAt }` (see [Backups](#backups)).
+- `close()` — release the database (idempotent; waits for running backups). `closed` — boolean.
+
+`restoreDatabase(dir, backupPath, options?)` → `EmbeddedDatabase` — restore a backup into `dir` and open it;
+`options`: `{ disableFsync?, overwrite? }`.
 
 Errors surface as `MarciEmbeddedError`: `.kind` is what to switch on — a constraint (`unique`, `foreign_key`, `restrict`, `duplicate_id`), `not_found`, `bad_request` or `internal` —, `.field` the `Model.field` a constraint is about (`"Order.dish"`), the message is for a person (`Order.dish: no row with id "nothing" to point at`).
 
 Notes:
 - Always `await` `$sync` / `$migrate` — they return promises; an un-awaited rejection on error is
   silent.
-- Data crosses the FFI boundary as JSON. A handle is single-threaded — don't share it across Worker
-  threads (calls from one runtime's event loop are already serialized).
+- Data crosses the FFI boundary as JSON. Use a handle from the thread that opened it — don't share it
+  across Worker threads (calls from one runtime's event loop are already serialized). Backups run on
+  their own native thread and need nothing from you.
 
 ---
 

@@ -4,11 +4,16 @@
 //! The developer sees the CHANGES in it (that's what gets reviewed); the full schema lives in `schema.marci`, there's no
 //! snapshot inside a migration. The server is dumb: `$migrate` lays the sent actions onto its state.
 //! All the smarts (what changed, what to send) live here: `generate` diffs, `plan` computes the unapplied tail.
+//!
+//! It also works on a local database directory that no process has open: `backup` / `restore` a
+//! `.marcibin` file, and `inspect` a backup or a directory (see inspect.rs).
 
-use std::{env, fs, io::Read, process};
+use std::{env, fs, io::Read, path::Path, process};
 
-use marcidb::{MigrateOp, Schema, parse_snapshot, serialize_snapshot, try_parse_schema};
+use marcidb::{BackupInfo, MarciDB, MigrateOp, RestoreOptions, Schema, parse_snapshot, serialize_snapshot, try_parse_schema};
 use marcidb_schema::{diff, evolve, reconcile, serialize_migration};
+
+mod inspect;
 
 const EXT: &str = ".march";
 
@@ -25,6 +30,19 @@ fn main() {
       args.get(4).map(String::as_str).unwrap_or("migration"),
     ),
     Some("plan") => cmd_plan(args.get(2).map(String::as_str).unwrap_or("migrations")),
+    Some("backup") => match (args.get(2), args.get(3)) {
+      (Some(dir), Some(out)) => cmd_backup(dir, out),
+      _ => usage_error("backup <db-dir> <out.marcibin>"),
+    },
+    Some("restore") => {
+      let overwrite = args.iter().skip(2).any(|a| a == "--overwrite");
+      let positional: Vec<&String> = args.iter().skip(2).filter(|a| !a.starts_with("--")).collect();
+      match positional.as_slice() {
+        [dir, file] => cmd_restore(dir, file, overwrite),
+        _ => usage_error("restore <db-dir> <in.marcibin> [--overwrite]"),
+      }
+    }
+    Some("inspect") => inspect::cmd_inspect(&args[2..]),
     Some(other) => {
       eprintln!("Unknown command: {}\n", other);
       print_usage();
@@ -42,8 +60,65 @@ fn print_usage() {
     "marci-migrate — MarciDB migration tool\n\nUsage:\n  \
      marci-migrate snapshot <schema.marci> [out]            materialize schema → flat snapshot\n  \
      marci-migrate generate <schema.marci> [dir] [name]     diff schema vs history → new {EXT} migration\n  \
-     marci-migrate plan [dir]                               read server snapshot on STDIN → print actions to apply"
+     marci-migrate plan [dir]                               read server snapshot on STDIN → print actions to apply\n\n\
+     On a local database directory that is not open in any process:\n  \
+     marci-migrate backup  <db-dir> <out.marcibin>          consistent backup (out may be a directory)\n  \
+     marci-migrate restore <db-dir> <in.marcibin> [--overwrite]   restore a backup into db-dir\n  \
+     marci-migrate inspect <file.marcibin | db-dir> [--tree <name>] [--limit N] [--id <json>] [--raw]\n  \
+                                                            header, schema and trees; --tree lists entries"
   );
+}
+
+fn usage_error(usage: &str) -> ! {
+  eprintln!("Usage: marci-migrate {}", usage);
+  process::exit(2);
+}
+
+/// Opens a database directory for the local commands. canopydb locks the directory: a database a
+/// server or an app has open is refused (after canopydb's lock timeout) rather than read under it.
+fn open_local(dir: &str) -> MarciDB {
+  if !Path::new(dir).is_dir() {
+    eprintln!("'{}' is not a database directory", dir);
+    process::exit(1);
+  }
+  MarciDB::try_open(dir).unwrap_or_else(|e| {
+    eprintln!("Cannot open the database in '{}' — is it open in another process (a server or an app)? ({})", dir, e);
+    process::exit(1);
+  })
+}
+
+fn describe(info: &BackupInfo) -> String {
+  format!("{} trees, {} entries, {} bytes, schema version {}, taken {}", info.trees, info.entries, info.bytes, info.schema_version, info.created_at)
+}
+
+/// `backup <db-dir> <out>`: `out` is the file, or a directory to put `<db>-<YYYYMMDD-HHMMSS>.marcibin` in.
+fn cmd_backup(dir: &str, out: &str) {
+  let db = open_local(dir);
+  let snapshot = die(db.backup_begin(), "Backup failed");
+  let file = if Path::new(out).is_dir() {
+    let name = Path::new(dir).canonicalize().ok()
+      .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+      .unwrap_or_else(|| "db".to_string());
+    // `2026-10-12T12:00:00Z` → `20261012-120000`
+    let stamp: String = snapshot.header().created_at.chars().filter(|c| c.is_ascii_digit() || *c == 'T').collect::<String>().replace('T', "-");
+    Path::new(out).join(format!("{}-{}.marcibin", name, stamp))
+  } else {
+    Path::new(out).to_path_buf()
+  };
+  let info = die(snapshot.write_to_file(&file), "Backup failed");
+  println!("Backed up {} to {} ({})", dir, file.display(), describe(&info));
+}
+
+fn cmd_restore(dir: &str, file: &str, overwrite: bool) {
+  let options = RestoreOptions { overwrite, ..Default::default() };
+  let (_, info) = MarciDB::restore_from_file(dir, file, &options).unwrap_or_else(|e| {
+    eprintln!("Restore failed: {}", e);
+    if !overwrite && matches!(e, marcidb::BackupError::Target(_)) && Path::new(dir).is_dir() {
+      eprintln!("(add --overwrite to replace the database in '{}')", dir);
+    }
+    process::exit(1);
+  });
+  println!("Restored {} into {} ({})", file, dir, describe(&info));
 }
 
 /// Reads the schema text, stripping the UTF-8 BOM (otherwise the first schema block "shifts")

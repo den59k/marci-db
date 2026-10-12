@@ -17,6 +17,7 @@ mod url_parser;
 mod update_op;
 mod num_utils;
 mod journal;
+mod backup;
 
 // The schema model + parser + snapshot codec live in the foundation crate. Alias it as `crate::schema` so
 // the engine's many `crate::schema::…` references keep resolving, and re-export the public types at the
@@ -24,7 +25,7 @@ mod journal;
 pub(crate) use marcidb_schema as schema;
 
 pub use marcidb_schema::{parse_schema, try_parse_schema, SchemaError, FieldRef, Schema, Field,Entity,FieldLocation,FieldType,PrimitiveFieldType,FieldExistsCondition,EnumInfo,RefInfo,RefBinding,Attribute,DeleteConstraint,FieldCustomFormat,FieldDefault,FieldIndex,FieldIndexNum};
-pub use crate::json_parsers::{parse_insert,parse_update,parse_query,parse_aggregate,aggregate_to_json,decode_document,decode_id, id_text,array_to_json,parse_id,EncodeError};
+pub use crate::json_parsers::{parse_insert,parse_update,parse_query,parse_aggregate,aggregate_to_json,decode_document,decode_row_json,decode_field_value,DecodeError,decode_id, id_text,array_to_json,parse_id,EncodeError};
 pub use crate::aggregate_op::{AggregateOp,AggregateResult,SumValue};
 pub use crate::url_parser::{parse_id_from_url,UrlParseError};
 pub use crate::marci_db::{MarciDB, OpenOptions, ReindexError, QueryError};
@@ -32,6 +33,8 @@ pub use crate::index_provider::{IndexProvider, IndexTree, IndexIter, RowScan, Ro
 pub use crate::transaction::MarciTransaction;
 pub use crate::journal::{JournalError, JournalSignal};
 pub use crate::error::StorageError;
+pub use crate::index_utils::{decode_index_key_value, split_index_key};
+pub use crate::backup::{BACKUP_MAGIC, BACKUP_FORMAT_VERSION, TreeInfo, BackupHeader, BackupInfo, RestoreOptions, BackupError, BackupSnapshot, BackupReader, SectionReader, RestoreStaged};
 pub use crate::batch::{execute_batch, execute_op, filter_query, BatchError, BatchErrorKind, OpError};
 pub use crate::binary_encode::{execute_query_binary, query_binary_many, query_binary_one, shape_supported, QueryBinaryOutcome, BINARY_VERSION};
 pub use crate::migrate::{apply, MigrateApplyError};
