@@ -682,6 +682,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "marcidb-http"
+version = "0.15.0"
+dependencies = [
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "marci_fulltext_index",
+ "marci_vector_index",
+ "marcidb",
+ "marcidb-schema",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "marcidb-migrate"
 version = "0.15.0"
 dependencies = [
@@ -698,16 +715,9 @@ version = "0.15.0"
 name = "marcidb-server"
 version = "0.15.0"
 dependencies = [
- "chrono",
- "http-body-util",
  "hyper",
  "hyper-util",
- "marci_fulltext_index",
- "marci_vector_index",
- "marcidb",
- "marcidb-schema",
- "serde_json",
- "tempfile",
+ "marcidb-http",
  "tokio",
 ]
 

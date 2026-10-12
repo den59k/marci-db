@@ -1,0 +1,32 @@
+[package]
+name = "marcidb-http"
+version.workspace = true
+edition = "2024"
+
+# The HTTP API of MarciDB as a library — routing, handlers, errors, the backup routes. Shared by the
+# `marcidb-server` binary and by `marcidb-ffi` (an embedded app's maintenance port), so every endpoint has
+# one implementation.
+[dependencies]
+http-body-util = "0.1.3"
+hyper = "1.7.0"
+hyper-util = { version = "0.1.17", features = ["http1", "server", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util", "sync", "time", "macros"] }
+serde_json = "1.0.145"
+marcidb = { path = "../marcidb" }
+marcidb-schema = { path = "../marcidb-schema" }
+chrono = "0.4.42"
+# Vector index module — opt-in (pulls in `marci_vector`, which needs nightly portable_simd).
+marci_vector_index = { path = "../marci-vector-index", optional = true }
+# Full-text search module — opt-in (stable toolchain).
+marci_fulltext_index = { path = "../marci-fulltext-index", optional = true }
+
+[features]
+# `@custom(vector, …)` indexes in the databases a `ServerContext` opens.
+vector = ["dep:marci_vector_index"]
+# `@custom(fulltext, …)` indexes in the databases a `ServerContext` opens.
+fulltext = ["dep:marci_fulltext_index"]
+
+[dev-dependencies]
+# The HTTP tests (src/tests.rs) drive the server with hyper's own client.
+hyper = { version = "1.7.0", features = ["client", "http1"] }
+tempfile = "3"

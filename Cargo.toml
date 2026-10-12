@@ -6,6 +6,7 @@ members = ["crates/*"]
 
 default-members = [
     "crates/marcidb",
+    "crates/marcidb-http",
     "crates/marcidb-server"
 ]
 
