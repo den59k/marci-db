@@ -178,7 +178,7 @@ What this buys (assuming the engine never reuses a retired slot):
 | Migration | Cost |
 |---|---|
 | add field without `@default` | **O(1)** — old rows read it as absent/null |
-| add field with `@default` | scan — the default is written into every existing row, as SQL's `ADD COLUMN … DEFAULT` |
+| add field with `@default` | scan — the default is written into every existing row, as SQL's `ADD COLUMN … DEFAULT`; `autoincrement()` numbers them 1, 2, 3… in key order |
 | reorder fields in `schema.marci` | **O(1)** — declaration order is cosmetic; slots are carried |
 | add index / unique | scan (backfill the index tree from existing rows) |
 
@@ -226,7 +226,7 @@ rebuilds the computed caches (default bytes, index trees, counters, reverse-depe
 |---|---|---|---|
 | `CreateEntity` | create the entity tree + its index/relation trees | no (empty) | no |
 | `DropEntity` | delete the entity tree + its index/relation trees | no | **yes** |
-| `AddField` | refuses a required field while the model has rows; writes the `@default` (if any) into existing rows — a value like any other from then on, for filters and the indexes built after it; `now()` stamps the migration time. Without a default, nothing (the slot is in `new`, old rows read it as absent) | with `@default` | no |
+| `AddField` | refuses a required field while the model has rows; writes the `@default` (if any) into existing rows — a value like any other from then on, for filters and the indexes built after it; `now()` stamps the migration time, `autoincrement()` numbers the rows 1, 2, 3… in key order and the counter continues after them. Without a default, nothing (the slot is in `new`, old rows read it as absent) | with `@default` | no |
 | `AlterField` | nothing (nullable/default/format/`@onDelete`/added enum variants/`@rev` — metadata) | no | no |
 | `DropField` | nothing — the slot is **retired** (`@retired(N)` in the snapshot); old rows keep dead bytes, new rows skip it. Relation/key drops are rejected. | no | **yes** |
 | `AddIndex` / `DropIndex` | build the index tree from existing rows / delete it | scan / no | no |

@@ -8,7 +8,7 @@ use canopydb::WriteTransaction;
 
 use crate::index_utils::{encode_full_index, encode_index, encode_unique_group};
 use crate::json_parsers::default_bytes;
-use crate::schema::{Entity, Field, FieldIndex, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
+use crate::schema::{Entity, Field, FieldDefault, FieldIndex, FieldLocation, FieldType, RefBinding, Schema, SchemaError, MigrateError, MigrateOp};
 use crate::update_op::process_update::with_body_value;
 use crate::utils::{check_exists_condition, get_data};
 use crate::StorageError;
@@ -251,14 +251,20 @@ fn build_index(tx: &WriteTransaction, schema: &Schema, entity: &str, field_name:
 /// Existing rows and an added field, as in SQL's ADD COLUMN. A `@default` is written into every row, as
 /// an insert would have: from then on it's a stored value like any other — for reads, filters and the
 /// indexes built after this; a later change of `@default` leaves these rows alone, and `now()` stamps
-/// them with the migration time. A required field (no `?`, no default) is refused while there are rows:
-/// they would read `null` for a type that promises a value.
+/// them with the migration time. `autoincrement()` numbers the rows 1, 2, 3… in key order, as Postgres
+/// does for an added identity column; the counter rebuilt after the commit continues from the last row.
+/// A required field (no `?`, no default) is refused while there are rows: they would read `null` for a
+/// type that promises a value.
 fn fill_added_field(tx: &WriteTransaction, schema: &Schema, entity: &Entity, field: &Field) -> Result<(), MigrateApplyError> {
   let FieldLocation::Body { offset_pos } = field.location else { return Ok(()) };
-  let value = field.default_value.as_ref().and_then(default_bytes);
+  let fill = match &field.default_value {
+    Some(FieldDefault::Counter(_)) => Some(Fill::Counter(1)),
+    Some(default) => default_bytes(default).map(Fill::Value),
+    None => None,
+  };
   // An absent list reads as `[]`, so only a scalar, enum or reference needs a value.
   let required = !field.nullable && field.default_value.is_none() && !matches!(field.ty, FieldType::PrimitiveList(..));
-  if value.is_none() && !required {
+  if fill.is_none() && !required {
     return Ok(());
   }
   // A new entity gets its tree from CreateEntity — and has no rows yet.
@@ -276,8 +282,9 @@ fn fill_added_field(tx: &WriteTransaction, schema: &Schema, entity: &Entity, fie
     }
     ids.push(id.to_vec());
   }
-  let Some(value) = value else { return Ok(()) };
+  let Some(mut fill) = fill else { return Ok(()) };
   for id in ids {
+    let value = fill.next();
     // The read borrows the tree's page; it must be gone before the write.
     let filled = match tree.get(&id)? {
       Some(body) => with_body_value(&body, entity, offset_pos, &value),
@@ -288,6 +295,23 @@ fn fill_added_field(tx: &WriteTransaction, schema: &Schema, entity: &Entity, fie
     }
   }
   Ok(())
+}
+
+/// What an add-field migration writes into each existing row.
+enum Fill {
+  /// The same stored bytes for every row (a literal, or `now()` taken once)
+  Value(Vec<u8>),
+  /// `autoincrement()`: the next number, in the counter's stored encoding (u64 big-endian)
+  Counter(u64),
+}
+
+impl Fill {
+  fn next(&mut self) -> Vec<u8> {
+    match self {
+      Fill::Value(v) => v.clone(),
+      Fill::Counter(n) => { let v = n.to_be_bytes().to_vec(); *n += 1; v },
+    }
+  }
 }
 
 fn drop_index(tx: &WriteTransaction, old: &Schema, entity: &str, field_name: &str) -> Result<(), MigrateApplyError> {

@@ -565,3 +565,36 @@ fn migrate_add_required_field_refused_when_rows_exist() {
   migrate_to(&mut db, "model User {\n  name String\n  age UInt\n  tags String[]\n}").unwrap();
   assert_eq!(get_data(&db, "User", json!({ "tags": true })), json!([{ "tags": [] }]));
 }
+
+/// `@default(autoincrement())` on an added field numbers the existing rows 1, 2, 3… in key order — what
+/// Postgres does for `ADD COLUMN … GENERATED AS IDENTITY` — and the counter continues after them, also
+/// across a reopen (it's rebuilt from the last row).
+#[test]
+fn migrate_add_counter_field_numbers_existing_rows() {
+  let before = "model User {
+  name String
+}";
+  let after = "model User {
+  name String
+  seq UInt @default(autoincrement())
+}";
+  let fields = json!({ "name": true, "seq": true });
+
+  for via_file in [false, true] {
+    let dir = tempdir().unwrap();
+    let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+    insert_data(&db, "User", json!({ "name": "Alice" }));
+    insert_data(&db, "User", json!({ "name": "Bob" }));
+
+    if via_file { apply_migration(&mut db, &mig(before, after)).unwrap() } else { migrate_to(&mut db, after).unwrap() }
+    insert_data(&db, "User", json!({ "name": "Carol" }));
+    assert_eq!(get_data(&db, "User", fields.clone()), json!([
+      { "name": "Alice", "seq": 1 }, { "name": "Bob", "seq": 2 }, { "name": "Carol", "seq": 3 },
+    ]));
+
+    drop(db);
+    let db = MarciDB::open(dir.path().to_str().unwrap());
+    insert_data(&db, "User", json!({ "name": "Dave" }));
+    assert_eq!(get_data(&db, "User", json!({ "seq": true, "$where": { "name": "Dave" } })), json!([{ "seq": 4 }]));
+  }
+}
