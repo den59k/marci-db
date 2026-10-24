@@ -132,24 +132,36 @@ function compareNames(a: string, b: string): number {
   return (na - i) - (nb - j);
 }
 
+const utf8 = new TextDecoder();
+
+/** Decodes `len` UTF-8 bytes at `o`. (Measured: `TextDecoder` is ~50 ns flat on Bun and Node, so a hand-rolled
+ *  ASCII loop only wins below ~8 bytes — not worth a second code path.) */
+function readUtf8(bytes: Uint8Array, o: number, len: number): string {
+  return utf8.decode(bytes.subarray(o, o + len));
+}
+
+// 64-bit integers are read as two 32-bit halves and combined in doubles: `hi * 2^32` is exact and the one
+// addition rounds once, so the result equals `Number(BigInt)` for every value (checked across the 2^32, 2^53,
+// 2^63 and 2^64 edges) — minus the BigInt allocation, which was ~3× the cost of the read itself.
+const TWO_32 = 4294967296;
+
 /** Forward cursor over a result buffer. One instance walks the whole buffer (rows are sequential). */
 class BinReader {
   o = 0;
-  private dv: DataView;
-  private bytes: Uint8Array;
-  private static decoder = new TextDecoder();
+  readonly dv: DataView;
+  readonly bytes: Uint8Array;
   constructor(bytes: Uint8Array) {
     this.bytes = bytes;
     this.dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   }
-  u8() { return this.dv.getUint8(this.o++); }
+  u8() { return this.bytes[this.o++]!; }
   u32() { const v = this.dv.getUint32(this.o, true); this.o += 4; return v; }
-  i64() { const v = Number(this.dv.getBigInt64(this.o, true)); this.o += 8; return v; }
-  u64() { const v = Number(this.dv.getBigUint64(this.o, true)); this.o += 8; return v; }
+  i64() { const v = this.dv.getUint32(this.o, true) + this.dv.getInt32(this.o + 4, true) * TWO_32; this.o += 8; return v; }
+  u64() { const v = this.dv.getUint32(this.o, true) + this.dv.getUint32(this.o + 4, true) * TWO_32; this.o += 8; return v; }
   f64() { const v = this.dv.getFloat64(this.o, true); this.o += 8; return v; }
   str() {
     const len = this.u32();
-    const s = BinReader.decoder.decode(this.bytes.subarray(this.o, this.o + len));
+    const s = readUtf8(this.bytes, this.o, len);
     this.o += len;
     return s;
   }
@@ -171,19 +183,113 @@ function readScalar(r: BinReader, t: string): any {
 
 
 type Decoder = (r: BinReader) => any;
+type Step = { name: string; key: boolean; t: string };
+type Rel = { name: string; many: boolean; fn: Decoder };
+
+// ── decoder compilation ──
+//
+// A shape's decoder is generated as straight-line source and compiled once with `new Function`: every field
+// becomes an inlined read against the DataView with the offset in a local, and the row is built as one object
+// literal — so the engine sees a monomorphic allocation site with a fixed property order instead of a loop
+// that adds properties one by one. Where `new Function` is unavailable (a CSP without `unsafe-eval`), the
+// closure interpreter below decodes the same bytes — the two are interchangeable, and the unit tests run both.
+
+/** The scalar read of one step as source: assigns `v` (the local for the value) and advances `o`. */
+function scalarSource(v: string, t: string): string {
+  switch (t) {
+    case "str": return `n = dv.getUint32(o, true); ${v} = S(b, o + 4, n); o += 4 + n;`;
+    case "json": return `n = dv.getUint32(o, true); ${v} = JSON.parse(S(b, o + 4, n)); o += 4 + n;`;
+    case "i64": return `${v} = dv.getUint32(o, true) + dv.getInt32(o + 4, true) * ${TWO_32}; o += 8;`;
+    case "u64": return `${v} = dv.getUint32(o, true) + dv.getUint32(o + 4, true) * ${TWO_32}; o += 8;`;
+    case "f64": return `${v} = dv.getFloat64(o, true); o += 8;`;
+    case "bool": return `${v} = b[o++] !== 0;`;
+    case "u8": return `${v} = b[o++];`;
+    default: throw new Error(`marcidb: unknown binary type code '${t}'`);
+  }
+}
+
+/** The source of a row decoder for `steps` (scalars, in wire order) and `rels` (relations, in wire order). */
+function decoderSource(steps: Step[], rels: Rel[]): string {
+  const lines: string[] = ["const dv = r.dv, b = r.bytes; let o = r.o, n = 0;"];
+  const props: string[] = [];
+  steps.forEach((s, i) => {
+    const v = `s${i}`;
+    lines.push(`let ${v};`);
+    if (s.key) lines.push(scalarSource(v, s.t));
+    else lines.push(`if (b[o++] === 0) ${v} = null; else { ${scalarSource(v, s.t)} }`);
+    props.push(`${JSON.stringify(s.name)}: ${v}`);
+  });
+  // A nested decoder reads through the shared reader, so the local offset is handed over and taken back.
+  rels.forEach((rel, i) => {
+    const v = `r${i}`;
+    lines.push(`let ${v};`);
+    if (rel.many) {
+      lines.push(`n = dv.getUint32(o, true); o += 4; r.o = o; ${v} = new Array(n); for (let j = 0; j < n; j++) ${v}[j] = f${i}(r); o = r.o;`);
+    } else {
+      lines.push(`if (b[o++] === 0) ${v} = null; else { r.o = o; ${v} = f${i}(r); o = r.o; }`);
+    }
+    props.push(`${JSON.stringify(rel.name)}: ${v}`);
+  });
+  lines.push(`r.o = o; return { ${props.join(", ")} };`);
+  return lines.join("\n");
+}
+
+/** Compiles the decoder for a shape with `new Function`, or returns `null` where that is not allowed. */
+function compileDecoder(steps: Step[], rels: Rel[]): Decoder | null {
+  try {
+    const factory = new Function("S", ...rels.map((_, i) => `f${i}`), `return function decode(r) {\n${decoderSource(steps, rels)}\n};`);
+    return factory(readUtf8, ...rels.map((rel) => rel.fn)) as Decoder;
+  } catch {
+    return null; // `new Function` refused (CSP) → the interpreter below
+  }
+}
+
+/** The closure interpreter for a shape: the same walk as the compiled decoder, step by step. */
+function interpretDecoder(steps: Step[], rels: Rel[]): Decoder {
+  return (r: BinReader) => {
+    const obj: Record<string, any> = {};
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i]!;
+      if (s.key) {
+        obj[s.name] = readScalar(r, s.t);
+      } else {
+        obj[s.name] = r.u8() === 0 ? null : readScalar(r, s.t);
+      }
+    }
+    for (let i = 0; i < rels.length; i++) {
+      const rel = rels[i]!;
+      if (rel.many) {
+        const n = r.u32();
+        const arr = new Array(n);
+        for (let j = 0; j < n; j++) arr[j] = rel.fn(r);
+        obj[rel.name] = arr;
+      } else {
+        obj[rel.name] = r.u8() === 0 ? null : rel.fn(r);
+      }
+    }
+    return obj;
+  };
+}
+
+/** Options of `createDecoderRegistry` — for tests; the defaults are what the generated client uses. */
+export type DecoderRegistryOptions = {
+  /** `false` forces the closure interpreter instead of `new Function` compilation (the CSP fallback). */
+  compile?: boolean;
+};
 
 /**
  * Builds the binary decoder registry for a set of models. `MODELS` maps each model name to its ordered
  * field descriptors (emitted by codegen). Returns `getDecoder` (shape → cached decoder, or `null` when the
  * shape isn't binary-decodable → caller falls back to JSON) and `decodeBuffer` (run a decoder over a buffer).
  */
-export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>): {
+export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>, options: DecoderRegistryOptions = {}): {
   // The decoder is opaque to callers — `(reader: any) => any` keeps the internal BinReader class out of the
   // public types so isolated-declaration `.d.ts` emit (bunup) succeeds without leaking private names.
   getDecoder(model: string, select: Record<string, any> | undefined): ((reader: any) => any) | null;
   decodeBuffer(decoder: (reader: any) => any, bytes: Uint8Array, many: boolean): any;
 } {
   const cache = new Map<string, Decoder | null>();
+  const compile = options.compile !== false;
 
   const isSel = (v: any) => v !== undefined && v !== false;
 
@@ -235,8 +341,8 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>): {
       if (!known.has(k) && isSel(select[k])) return null;
     }
 
-    const steps: { name: string; key: boolean; t: string }[] = [];
-    const rels: { name: string; many: boolean; fn: Decoder }[] = [];
+    const steps: Step[] = [];
+    const rels: Rel[] = [];
 
     for (const f of fields) {
       const sel = select[f.n];
@@ -257,29 +363,7 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>): {
     steps.sort((a, b) => compareNames(a.name, b.name));
     rels.sort((a, b) => compareNames(a.name, b.name));
 
-    return (r: BinReader) => {
-      const obj: Record<string, any> = {};
-      for (let i = 0; i < steps.length; i++) {
-        const s = steps[i]!;
-        if (s.key) {
-          obj[s.name] = readScalar(r, s.t);
-        } else {
-          obj[s.name] = r.u8() === 0 ? null : readScalar(r, s.t);
-        }
-      }
-      for (let i = 0; i < rels.length; i++) {
-        const rel = rels[i]!;
-        if (rel.many) {
-          const n = r.u32();
-          const arr = new Array(n);
-          for (let j = 0; j < n; j++) arr[j] = rel.fn(r);
-          obj[rel.name] = arr;
-        } else {
-          obj[rel.name] = r.u8() === 0 ? null : rel.fn(r);
-        }
-      }
-      return obj;
-    };
+    return (compile && compileDecoder(steps, rels)) || interpretDecoder(steps, rels);
   }
 
   function getDecoder(model: string, select: Record<string, any> | undefined): Decoder | null {

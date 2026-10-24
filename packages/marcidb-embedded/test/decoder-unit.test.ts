@@ -1,7 +1,7 @@
 // Unit tests for the binary decoder-compiler (`createDecoderRegistry` in marcidb-client/runtime) — the
 // fiddliest part of the binary transport. Pure JS: hand-built MODELS + hand-built buffers, no FFI, no native
 // lib. Covers the shape cache, the support gate (`build` → null), and the byte-level reader.
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import path from "node:path";
 
 const runtimeUrl = `file://${path.resolve(import.meta.dir, "..", "..", "marcidb-client", "runtime", "index.js").replace(/\\/g, "/")}`;
@@ -44,7 +44,10 @@ function buf() {
   };
 }
 
-const { getDecoder, decodeBuffer } = createDecoderRegistry(MODELS);
+// Every test below runs twice: against the compiled (`new Function`) decoders the generated client uses, and
+// against the closure interpreter that stands in where `new Function` is refused (CSP). Same bytes, same values.
+for (const compile of [true, false]) describe(compile ? "compiled decoders" : "interpreted decoders", () => {
+const { getDecoder, decodeBuffer } = createDecoderRegistry(MODELS, { compile });
 
 test("shape cache & projection key", () => {
   const a = getDecoder("User", { name: true });
@@ -142,3 +145,35 @@ test("empty projection → empty objects", () => {
   const b = buf(); b.u8(2); b.u32(2); // 2 rows, no field bytes
   expect(decodeBuffer(dec, b.done(), true)).toEqual([{}, {}]);
 });
+
+test("64-bit integers decode exactly like Number(BigInt) across the edges, without BigInt", () => {
+  const { getDecoder: dec, decodeBuffer: decode } = createDecoderRegistry({
+    N: [{ n: "id", k: "key", t: "u64" }, { n: "v", k: "body", t: "i64" }],
+  }, { compile });
+  const u = [0n, 1n, 2n ** 32n - 1n, 2n ** 32n, 2n ** 53n - 1n, 2n ** 53n, 2n ** 53n + 1n, 2n ** 63n, 2n ** 64n - 1n, 12345678901234567890n];
+  const i = [0n, -1n, -(2n ** 32n), -(2n ** 32n) - 1n, -(2n ** 53n), -(2n ** 53n) - 1n, -(2n ** 63n), 2n ** 63n - 1n, -1234567890123456789n, 1700000000000n];
+  const b = buf(); b.u8(2); b.u32(u.length);
+  for (let k = 0; k < u.length; k++) { b.u64(u[k]!); b.u8(1); b.i64(i[k]!); }
+  expect(decode(dec("N", { id: true, v: true }), b.done(), true)).toEqual(u.map((x, k) => ({ id: Number(x), v: Number(i[k]!) })));
+});
+
+test("strings: empty, multi-byte UTF-8, long; json fields parse", () => {
+  const { getDecoder: dec, decodeBuffer: decode } = createDecoderRegistry({
+    S: [{ n: "id", k: "key", t: "u64" }, { n: "s", k: "body", t: "str" }, { n: "j", k: "body", t: "json" }],
+  }, { compile });
+  const long = "x".repeat(10_000) + "— конец ✓";
+  const rows = [["", { a: [1, 2, { b: null }] }], ["héllo wörld — 日本語 🙂", 3.5], [long, "plain"]] as const;
+  const b = buf(); b.u8(2); b.u32(rows.length);
+  for (const [s, j] of rows) { b.u64(1); b.u8(1); b.str(JSON.stringify(j)); b.u8(1); b.str(s); } // wire order: id, j, s
+  expect(decode(dec("S", { id: true, s: true, j: true }), b.done(), true)).toEqual(rows.map(([s, j]) => ({ id: 1, s, j })));
+});
+
+test("field names that are not identifiers are fine in a compiled decoder", () => {
+  const { getDecoder: dec, decodeBuffer: decode } = createDecoderRegistry({
+    Q: [{ n: "id", k: "key", t: "u64" }, { n: "weird name\"'", k: "body", t: "bool" }],
+  }, { compile });
+  const b = buf(); b.u8(2); b.u32(1); b.u64(5); b.u8(1); b.u8(1);
+  expect(decode(dec("Q", { id: true, "weird name\"'": true }), b.done(), true)).toEqual([{ id: 5, "weird name\"'": true }]);
+});
+
+}); // compiled / interpreted
