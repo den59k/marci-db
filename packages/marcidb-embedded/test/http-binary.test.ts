@@ -7,7 +7,8 @@
 //   1. Parity — every query deep-equals between the binary HTTP client and a forced-JSON client over one DB.
 //   2. Negotiation — the server returns binary only for `Accept: <binary>` + a matching `X-Marci-Schema`;
 //      a stale/absent hash, or no Accept (curl), falls back to JSON, still correct.
-//   3. Handshake agreement — the hash the client bakes in equals the server's fingerprint of the same schema.
+//   3. Handshake agreement — the hash the client bakes in is the one the server (which rebuilt its schema
+//      from the stored snapshot) accepts, so the fast path actually engages.
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,21 +28,8 @@ let dataDir: string;
 let base: string; // `${origin}/${DB}`
 let binaryClient: any;
 let jsonClient: any;
-let serverHash: string;
+let clientHash: string; // the fingerprint the generated client bakes in (`SCHEMA_HASH`)
 const ids: Record<string, any> = {};
-
-/** FNV-1a (64-bit), hex — a reference reimplementation of the Rust `schema_fingerprint`, used to derive the
- *  server's hash from its `$snapshot` text and cross-check that the two implementations agree. */
-function fnv1a(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let hash = 0xcbf29ce484222325n;
-  const mask = (1n << 64n) - 1n;
-  for (const b of bytes) {
-    hash = (hash ^ BigInt(b)) & mask;
-    hash = (hash * 0x100000001b3n) & mask;
-  }
-  return hash.toString(16).padStart(16, "0");
-}
 
 /** A transport that always takes the plain-JSON path (no `queryBinary`) — the parity oracle. */
 function jsonTransport(baseUrl: string): any {
@@ -87,13 +75,13 @@ beforeAll(async () => {
     if (i === 199) throw new Error("server did not become ready");
   }
 
-  // Sync the schema over HTTP, then derive the server's fingerprint from its snapshot.
+  // Sync the schema over HTTP.
   const schema = fs.readFileSync(schemaPath("parity.marci"), "utf8");
   const sync = await fetch(`${base}/$sync`, { method: "POST", body: schema });
   if (!sync.ok) throw new Error(`$sync failed: ${sync.status} ${await sync.text()}`);
-  serverHash = fnv1a(await (await fetch(`${base}/$snapshot`)).text());
 
   const { marcidb } = await generateClient(schemaPath("parity.marci"));
+  clientHash = clientSchemaHash(schemaPath("parity.marci"));
   binaryClient = marcidb(base);           // HTTP transport → binary fast path (httpTransport has queryBinary)
   jsonClient = marcidb(jsonTransport(base)); // forced JSON — the oracle
 
@@ -118,8 +106,11 @@ afterAll(() => {
 
 // ── handshake agreement ──────────────────────────────────────────────────────────────────────
 
-test("client's baked SCHEMA_HASH matches the server's fingerprint of the same schema", () => {
-  expect(clientSchemaHash(schemaPath("parity.marci"))).toBe(serverHash);
+test("the client's baked SCHEMA_HASH is accepted by a server that rebuilt its schema from the snapshot", async () => {
+  // The server went schema text → `$sync` → stored snapshot → live schema; the client went schema text →
+  // codegen. Binary coming back proves both ends fingerprint the same schema the same way.
+  const out = await requestBinary(`${base}/User/findMany`, { id: true, name: true }, clientHash);
+  expect(out).toBeInstanceOf(Uint8Array);
 });
 
 // ── parity (binary HTTP vs forced JSON) ──────────────────────────────────────────────────────
@@ -152,9 +143,9 @@ test("binary client decoded concrete values (not silently empty)", async () => {
 // ── negotiation (the server's content-type decision) ─────────────────────────────────────────
 
 test("matching hash + supported shape → server returns binary", async () => {
-  const out = await requestBinary(`${base}/User/findMany`, { id: true, name: true, age: true }, serverHash);
+  const out = await requestBinary(`${base}/User/findMany`, { id: true, name: true, age: true }, clientHash);
   expect(out).toBeInstanceOf(Uint8Array);
-  expect((out as Uint8Array)[0]).toBe(1); // BINARY_VERSION
+  expect((out as Uint8Array)[0]).toBe(2); // BINARY_VERSION
 });
 
 test("stale schema hash → server falls back to JSON", async () => {
@@ -164,7 +155,7 @@ test("stale schema hash → server falls back to JSON", async () => {
 });
 
 test("unsupported shape (enum payload) → server falls back to JSON even with a matching hash", async () => {
-  const out = await requestBinary(`${base}/Account/findMany`, { id: true, label: true, kind: true }, serverHash);
+  const out = await requestBinary(`${base}/Account/findMany`, { id: true, label: true, kind: true }, clientHash);
   expect(out).not.toBeInstanceOf(Uint8Array);
   expect((out as { json: any }).json).toBeInstanceOf(Array);
 });
@@ -215,7 +206,7 @@ describe("a server started with --token", () => {
     await client.user.insert({ name: "Tia", age: 7, score: 1, active: true });
     expect(await client.user.findMany({ name: true, age: true })).toEqual([{ name: "Tia", age: 7 }]);
 
-    const binary = await requestBinary(`${tokenBase}/User/findMany`, { name: true, age: true }, serverHash, { token: TOKEN });
+    const binary = await requestBinary(`${tokenBase}/User/findMany`, { name: true, age: true }, clientHash, { token: TOKEN });
     expect(binary).toBeInstanceOf(Uint8Array);
 
     const err = await marcidb(tokenBase).user.findMany({ name: true }).catch((e: unknown) => e);

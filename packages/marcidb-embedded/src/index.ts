@@ -27,8 +27,10 @@ export type MarciErrorKind = "unique" | "foreign_key" | "restrict" | "duplicate_
 export interface MarciTransport {
   exec(op: MarciOp): Promise<any>;
   batch(ops: MarciOp[]): Promise<any[]>;
-  /** Returns the raw binary result buffer for a read op, or `null` to signal "fall back to JSON". */
-  queryBinary?(op: MarciOp): Promise<Uint8Array | null>;
+  /** Returns the raw binary result buffer for a read op, or `null` to signal "fall back to JSON". `schemaHash`
+   *  is the fingerprint of the schema the calling client was generated from (the generated client passes its
+   *  own); the engine answers binary only for a database on that schema — without it, always `null`. */
+  queryBinary?(op: MarciOp, schemaHash?: string): Promise<Uint8Array | null>;
 }
 
 export interface EmbeddedOptions {
@@ -84,7 +86,7 @@ export interface RestoreOptions extends EmbeddedOptions {
 export interface EmbeddedDatabase extends MarciTransport {
   exec(op: MarciOp): Promise<any>;
   batch(ops: MarciOp[]): Promise<any[]>;
-  queryBinary(op: MarciOp): Promise<Uint8Array | null>;
+  queryBinary(op: MarciOp, schemaHash?: string): Promise<Uint8Array | null>;
   /** Back-compat alias of the database itself — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
   readonly transport: MarciTransport;
   /** Declarative schema sync from `.marci` text. */
@@ -221,14 +223,16 @@ function wrapHandle(handle: unknown, dir: string): EmbeddedDatabase {
     return unwrap(ffi.exec(handle, JSON.stringify(ops)));
   }
   // Binary read fast path consumed by `marcidb(db)` (marcidb-client): returns the raw result payload bytes
-  // for a `findMany`/`findFirst` op, or `null` when the engine can't binary-encode this shape (→ the client
-  // falls back to `exec`/JSON). Throws `MarciEmbeddedError` on a real fault.
-  async function queryBinary(op: MarciOp): Promise<Uint8Array | null> {
+  // for a `findMany`/`findFirst` op, or `null` when the engine won't binary-encode it — the client's schema
+  // fingerprint (`schemaHash`, baked into the generated client) differs from the database's live schema, or
+  // the shape isn't binary-encodable (→ the client falls back to `exec`/JSON). Throws `MarciEmbeddedError`
+  // on a real fault.
+  async function queryBinary(op: MarciOp, schemaHash?: string): Promise<Uint8Array | null> {
     ensureOpen();
-    const body = ffi.queryBinary(handle, JSON.stringify(op));
+    const body = ffi.queryBinary(handle, JSON.stringify(schemaHash === undefined ? op : { ...op, schema: schemaHash }));
     if (!body) return null; // NULL pointer (OOM) → fall back to JSON
     const status = body[0];
-    if (status === 2) return null; // unsupported shape → fall back to JSON
+    if (status === 2) return null; // schema mismatch or unsupported shape → fall back to JSON
     if (status === 1) throw new MarciEmbeddedError(new TextDecoder().decode(body.subarray(1)), "bad_request");
     return body.subarray(1); // status 0 → the binary result buffer
   }

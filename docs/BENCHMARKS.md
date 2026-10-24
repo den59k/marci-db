@@ -205,9 +205,12 @@ size or JS allocation.
 ### Binary over HTTP (`marcidb-server`)
 
 The same encoder is available over HTTP as an **opt-in** mode, in parallel with JSON. The client advertises
-`Accept: application/x-marcidb-rows` plus a schema fingerprint (`X-Marci-Schema`); the server replies binary
-only when the fingerprint matches the DB's current schema **and** the shape is supported, otherwise JSON — so
-curl and any non-negotiating client are unaffected. Reads only (`findMany`/`findFirst`).
+`Accept: application/x-marcidb-rows` plus a schema fingerprint (`X-Marci-Schema` — the schema as the binary
+decoder sees it: field names, kinds, type codes and relation targets, not slots or field order, so a client
+generated from `schema.marci` matches a migrated database); the server replies binary only when the
+fingerprint matches the DB's current schema **and** the shape is supported, otherwise JSON — so curl and any
+non-negotiating client are unaffected. Reads only (`findMany`/`findFirst`). The embedded transport runs the
+same handshake in-process (the op carries the fingerprint).
 
 Here the network round-trip is in the mix, so the win is narrower than embedded and concentrated on **large
 reads**, where binary is both **smaller on the wire** and skips `JSON.parse`/double-serialize. Same running

@@ -8,6 +8,7 @@ mod snapshot;
 mod op;
 mod diff;
 mod march;
+mod wire;
 
 // Schema model + `.marci` DSL parser
 pub use crate::schema::{
@@ -21,3 +22,5 @@ pub use crate::snapshot::{serialize_snapshot, parse_snapshot, serialize_type, se
 pub use crate::op::{MigrateOp, MigrateError};
 pub use crate::diff::{diff, reconcile};
 pub use crate::march::{serialize_migration, evolve, migration_ops};
+// The binary read transport's view of a schema (field descriptors, canonical wire order, handshake fingerprint)
+pub use crate::wire::{WireKind, WireField, wire_type_code, wire_field, wire_fields, wire_order, wire_descriptor, wire_fingerprint};

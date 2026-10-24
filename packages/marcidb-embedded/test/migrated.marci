@@ -1,0 +1,8 @@
+// The schema a client is generated from for binary-migrated.test.ts: `active` is declared before `flag`/`note`
+// but, on the database the test migrates, was added last (see the .march text in the test).
+model Item {
+    title  String
+    active Bool    @default(true)
+    flag   Bool    @default(false)
+    note   String?
+}

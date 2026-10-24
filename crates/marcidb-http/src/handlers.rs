@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use http_body_util::Full;
 use hyper::{Request, Response, body::Bytes};
-use marcidb::{JournalError, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, schema_fingerprint, serialize_snapshot, shape_supported, filter_query};
+use marcidb::{JournalError, MarciDB, MigrateApplyError, ProviderError, QueryError, ReindexError, aggregate_to_json, array_to_json, decode_document, decode_id, execute_batch, parse_aggregate, parse_id_from_url, parse_insert, parse_query, parse_update, query_binary_many, query_binary_one, serialize_snapshot, shape_supported, filter_query};
 use serde_json::Value;
 
 use crate::{ServerContext, errors::ApiError, helpers::{blocking, ok_response, parse_json_body, parse_text_body, read_response, BinaryNeg, ReadBody}};
@@ -188,13 +188,14 @@ pub async fn handle_insert(req: Request<hyper::body::Incoming>, ctx: Arc<ServerC
 }
 
 /// Whether this binary-eligible request should actually get bytes: the client must accept binary, claim the
-/// *same* schema fingerprint the target DB currently has, and the query shape must be binary-encodable. Any
-/// miss → JSON (transparent, never wrong bytes). The fingerprint is computed only on the binary path (gated
-/// by `wants_binary` first), so the common JSON request pays nothing.
+/// *same* wire fingerprint the target DB currently has (`MarciDB::wire_fingerprint` — what the binary
+/// decoder depends on, not slots or field order, so a client generated from the same `schema.marci` matches
+/// a migrated database), and the query shape must be binary-encodable. Any miss → JSON (transparent, never
+/// wrong bytes).
 fn binary_allowed(neg: &BinaryNeg, db: &MarciDB, query_op: &marcidb::QueryOp) -> bool {
     neg.wants_binary
         && shape_supported(query_op)
-        && neg.schema_hash.as_deref() == Some(schema_fingerprint(&db.schema).as_str())
+        && neg.schema_hash.as_deref() == Some(db.wire_fingerprint())
 }
 
 pub async fn handle_find_many(req: Request<hyper::body::Incoming>, ctx: Arc<ServerContext>, db_name: String, model_name: String) -> HandlerResult {

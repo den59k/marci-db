@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 use canopydb::{Database, Transaction, Tree, WriteTransaction};
 use serde_json::Value;
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, journal::Journals, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, journal::Journals, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot, wire_fingerprint}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 /// Storage-engine options threaded into `MarciDB::try_*_with_options`. Defaults match the durable
 /// `MarciDB::new`/`open` path; the embedding/test layer flips `disable_fsync` for fast, ephemeral DBs.
@@ -24,6 +24,10 @@ pub(crate) fn open_database(path: &str, options: &OpenOptions) -> Result<Databas
 
 pub struct MarciDB {
   pub schema: Schema,
+  /// `wire_fingerprint(&schema)`, cached: the binary read handshake compares a client's fingerprint against
+  /// it on every binary read, so it must not cost a schema serialization each time. Kept in step with
+  /// `schema` by the constructors and `swap_schema` — the only places the schema changes.
+  wire_fingerprint: String,
   pub(crate) db: Database,
   pub(crate) counters: Vec<Arc<AtomicU64>>,
   model_by_name: HashMap<String, usize>,
@@ -78,7 +82,8 @@ impl MarciDB {
     let journals = Journals::load(&tx)?;
     tx.commit()?;
 
-    Ok(MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
+    let wire_fingerprint = wire_fingerprint(&schema);
+    Ok(MarciDB { db, schema, wire_fingerprint, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
   }
 
   /// Installs the `@custom` index providers (builder style). The same registry is typically shared across
@@ -124,7 +129,8 @@ impl MarciDB {
     let journals = Journals::load(&rx)?;
     drop(rx);
 
-    Ok(MarciDB { db, schema, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
+    let wire_fingerprint = wire_fingerprint(&schema);
+    Ok(MarciDB { db, schema, wire_fingerprint, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
   }
 
   pub fn get_model(&self, name: &str) -> Option<&Entity> {
@@ -137,6 +143,12 @@ impl MarciDB {
 
   pub fn get_model_by_index<'a>(&'a self, index: usize) -> &'a Entity {
     return &self.schema.models[index]
+  }
+
+  /// The fingerprint of the live schema as the binary read transport sees it (`marcidb_schema::wire_fingerprint`).
+  /// A client that bakes in the same value decodes this database's binary rows; any other value gets JSON.
+  pub fn wire_fingerprint(&self) -> &str {
+    &self.wire_fingerprint
   }
 
   pub fn find_many<U, F>(&self, query: &QueryOp, f: F) -> Result<Vec<U>, QueryError> where U: Clone, F: Fn(DecodeCtx<U>) -> U {
@@ -428,6 +440,7 @@ impl MarciDB {
     drop(rx);
     self.counters = counters;
     self.model_by_name = new_schema.build_model_name_map();
+    self.wire_fingerprint = wire_fingerprint(&new_schema);
     self.schema = new_schema;
     Ok(())
   }

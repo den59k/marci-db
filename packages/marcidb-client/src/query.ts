@@ -180,6 +180,11 @@ export type JournalArgs = { name: string, on?: readonly JournalOp[], after?: num
 export type MarciTransport = {
   exec(op: MarciOp): Promise<any>
   batch(ops: MarciOp[]): Promise<any[]>
+  /** The binary read fast path, if the transport has one. `schemaHash` is the fingerprint of the schema the
+   *  calling client was generated from; the transport answers with the binary result buffer only for a
+   *  database on the same schema. `{ json }` is an already-parsed JSON answer (HTTP, when the server declined
+   *  binary); `null` means "no binary answer" and the client falls back to `exec`. */
+  queryBinary?(op: MarciOp, schemaHash: string): Promise<Uint8Array | { json: any } | null>
 }
 
 // ───────────────────────────── query builder ─────────────────────────────

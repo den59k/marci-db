@@ -103,16 +103,34 @@ export async function requestBinary(url: string, body: any, schemaHash: string, 
 // descriptors the codegen emits — see `createDecoderRegistry`. This removes the JSON serialize/parse tax on
 // the hot read path. Wire format (little-endian) — produced by the engine's `binary_encode`:
 //
-//   result buffer : [u8 version=1][u32 row_count][row…]
-//   row           : selected fields in slot order, then includes (relations) in field order
+//   result buffer : [u8 version=2][u32 row_count][row…]
+//   row           : selected scalar fields in wire order, then selected includes (relations) in wire order
 //   key field     : value (no tag — ids are always present)
 //   body field    : [u8 tag] (0=null, 1=present) then, if present, the value
 //   to-one rel    : [u8] (0=null, 1=present) then, if present, the related row inline
 //   to-many rel   : [u32 count] then that many related rows inline
 //   scalar values : i64/u64/f64 → 8 bytes; bool/u8 → 1 byte; string → [u32 len][utf-8 bytes]
+//
+// The wire order is **by field name** (code-point order, which is the byte order of the UTF-8 name the engine
+// sorts by), not the order of the `MODELS` descriptors: those come from `schema.marci` (declaration order),
+// while the engine holds the migrated schema (slot order), and the two disagree as soon as a migration adds a
+// field anywhere but last. Sorting the selected names on both sides needs no agreement on either.
 
-const BINARY_VERSION = 1;
+const BINARY_VERSION = 2;
 const AGG_KEYS = ["$count", "$sum", "$avg", "$min", "$max"];
+
+/** Code-point order of two field names — equals the engine's byte order of the UTF-8 names. */
+function compareNames(a: string, b: string): number {
+  const na = a.length, nb = b.length;
+  let i = 0, j = 0;
+  while (i < na && j < nb) {
+    const ca = a.codePointAt(i)!, cb = b.codePointAt(j)!;
+    if (ca !== cb) return ca < cb ? -1 : 1;
+    i += ca > 0xffff ? 2 : 1;
+    j += cb > 0xffff ? 2 : 1;
+  }
+  return (na - i) - (nb - j);
+}
 
 /** Forward cursor over a result buffer. One instance walks the whole buffer (rows are sequential). */
 class BinReader {
@@ -179,8 +197,7 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>): {
   }
 
   // A stable key for the result *shape* (projection + nesting), independent of select key order and of
-  // shape-irrelevant keys ($where/$order/…). Derived by walking the model's fields, so it matches the
-  // engine's slot-order encoding.
+  // shape-irrelevant keys ($where/$order/…). Derived by walking the model's descriptors.
   function projectionKey(model: string, select: Record<string, any>): string {
     const fields = MODELS[model];
     if (!fields) return "?";
@@ -236,6 +253,9 @@ export function createDecoderRegistry(MODELS: Record<string, FieldDesc[]>): {
         steps.push({ name: f.n, key: f.k === "key", t: f.t });
       }
     }
+    // The wire order: scalars by name, then relations by name (see the header comment).
+    steps.sort((a, b) => compareNames(a.name, b.name));
+    rels.sort((a, b) => compareNames(a.name, b.name));
 
     return (r: BinReader) => {
       const obj: Record<string, any> = {};

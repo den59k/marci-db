@@ -11,9 +11,12 @@
 //! [u8 version][u32 row_count][row 0][row 1] … [row N-1]      (all integers little-endian)
 //! ```
 //!
-//! A **row** is the selected fields in **slot order** (the order `entity.fields` is iterated), then the
-//! includes in field order — exactly what [`decode_document`] emits, so the TS decoder reads in the same
-//! order. Per field:
+//! A **row** is the selected scalar fields in **wire order** — sorted by field name — then the selected
+//! includes, also sorted by field name. The order is canonical rather than positional on purpose: the
+//! client decoder is compiled from `schema.marci` (declaration order) while the engine holds the migrated
+//! schema (slot order), and the two disagree as soon as a migration adds a field anywhere but last. Both
+//! sides derive the wire order from the selected names alone (`marcidb_schema::wire_order`), so they
+//! cannot drift. Per field:
 //!
 //! * **Key field** (`@id`): the value, no presence tag (ids are always present).
 //! * **Body field**: a 1-byte presence tag — [`TAG_NULL`] or [`TAG_PRESENT`] — then, if present, the value.
@@ -31,6 +34,16 @@
 //! (the FFI reports "unsupported" and the client re-issues over the JSON path). Covered: the scalar
 //! primitives (including `Json`) + nested to-one / to-many relations. Formats (uuid/hex), enums, primitive
 //! lists, and composite/ref keys are intentionally deferred — they stay on the JSON path until a later slice.
+//!
+//! ## Handshake
+//!
+//! A binary read carries the fingerprint of the schema the client was generated from
+//! (`marcidb_schema::wire_fingerprint` — the op's `schema` key over FFI, `X-Marci-Schema` over HTTP). The
+//! engine encodes only when it equals the fingerprint of its live schema; otherwise, and when no fingerprint
+//! is given at all (a client from before the handshake), the read is reported unsupported and goes over
+//! JSON. The fingerprint covers exactly what the decoder depends on (names, kinds, type codes, relation
+//! targets), not slots or order — a migrated database and a client generated from the same `schema.marci`
+//! agree on it.
 
 use serde_json::Value;
 
@@ -38,12 +51,13 @@ use crate::{
   MarciDB, OpError, QueryError,
   json_parsers::{DecodeError, get_offset_checked, parse_query},
   query_op::{DecodeCtx, IncludeQuery, IncludeResult, QueryOp},
-  schema::{FieldLocation, FieldType, PrimitiveFieldType, Schema},
+  schema::{Entity, FieldLocation, FieldType, PrimitiveFieldType, Schema, wire_order},
   utils::{check_exists_condition, get_end_optimized, get_id_field_size},
 };
 
 /// Wire format version. Bump on any layout change; the decoder hard-errors on a mismatch.
-pub const BINARY_VERSION: u8 = 1;
+/// v2: fields in wire (name) order instead of slot order.
+pub const BINARY_VERSION: u8 = 2;
 
 /// Body-field presence tags (key fields carry no tag — they are always present).
 const TAG_NULL: u8 = 0;
@@ -92,10 +106,45 @@ pub fn shape_supported(query: &QueryOp) -> bool {
   true
 }
 
+/// The wire order of every entity a query touches (the root and each nested include, recursively), computed
+/// once per query so the per-row encoder walks a ready permutation instead of sorting. Entities are the
+/// schema's own (`&Entity` borrowed by the `QueryOp` tree), so pointer identity keys them; a model that
+/// appears twice (two relations to it) is computed once.
+pub struct WireOrders(Vec<(*const Entity, Vec<usize>)>);
+
+impl WireOrders {
+  pub fn for_query(query: &QueryOp) -> Self {
+    let mut orders = WireOrders(Vec::new());
+    orders.collect(query);
+    orders
+  }
+
+  fn collect(&mut self, query: &QueryOp) {
+    let key = query.entity as *const Entity;
+    if !self.0.iter().any(|(k, _)| *k == key) {
+      self.0.push((key, wire_order(query.entity)));
+    }
+    for include in query.includes.iter() {
+      if let IncludeQuery::Query(sub) = &include.query {
+        self.collect(sub);
+      }
+    }
+  }
+
+  fn get(&self, entity: &Entity) -> &[usize] {
+    let key = entity as *const Entity;
+    match self.0.iter().find(|(k, _)| *k == key) {
+      Some((_, order)) => order,
+      // Every entity the query machinery hands the encoder is in the QueryOp tree — reaching here is a bug.
+      None => panic!("binary encoder: no wire order for entity '{}'", entity.name),
+    }
+  }
+}
+
 /// The binary counterpart of [`decode_document`]: encodes one row (with its already-encoded includes) into
 /// the wire format above. Infallible types are gated by [`shape_supported`]; a `DecodeError` here means a
 /// genuinely corrupt row (the JSON path would `unwrap()` on the same input).
-pub fn encode_document(ctx: DecodeCtx<Vec<u8>>) -> Result<Vec<u8>, DecodeError> {
+pub fn encode_document(ctx: DecodeCtx<Vec<u8>>, orders: &WireOrders) -> Result<Vec<u8>, DecodeError> {
   let DecodeCtx { data, entity, id, mask, includes, schema } = ctx;
 
   // Header length is taken from the row itself (bytes 2..4), exactly like decode_document, so a row written
@@ -118,23 +167,32 @@ pub fn encode_document(ctx: DecodeCtx<Vec<u8>>) -> Result<Vec<u8>, DecodeError> 
 
   let mut out = Vec::with_capacity(64);
 
-  let mut id_offset = 0;
-  for (field_index, field) in entity.fields.iter().enumerate() {
+  for &field_index in orders.get(entity) {
+    if !mask[field_index] {
+      continue;
+    }
+    let field = &entity.fields[field_index];
     match field.location {
       FieldLocation::Key { .. } => {
-        let size = get_id_field_size(id, field, id_offset, schema);
-        if mask[field_index] {
-          encode_key_field(&mut out, &id[id_offset..id_offset + size], &field.ty, schema)?;
+        // Key parts are laid out in key order inside `id`, which the wire order doesn't follow — walk the
+        // key fields up to this one to find its bytes (a single `@id`, the common case, is one step).
+        let mut id_offset = 0;
+        for (i, part) in entity.fields.iter().enumerate() {
+          if !matches!(part.location, FieldLocation::Key { .. }) {
+            continue;
+          }
+          let size = get_id_field_size(id, part, id_offset, schema);
+          if i == field_index {
+            encode_key_field(&mut out, &id[id_offset..id_offset + size], &field.ty, schema)?;
+            break;
+          }
+          id_offset += size;
         }
-        id_offset += size;
       }
       FieldLocation::Body { offset_pos } => {
-        if !mask[field_index] {
-          continue;
-        }
         // A variant field whose enum isn't on the matching value is absent in the JSON output. v1 gates
         // such fields out of binary (shape_supported), but keep the guard so the contract is faithful:
-        // emit a NULL tag so the row stays decodable in slot order.
+        // emit a NULL tag so the row stays decodable.
         if !check_exists_condition(entity, &field.condition, id, data, schema) {
           out.push(TAG_NULL);
           continue;
@@ -145,8 +203,12 @@ pub fn encode_document(ctx: DecodeCtx<Vec<u8>>) -> Result<Vec<u8>, DecodeError> 
     }
   }
 
-  // Includes come after the body, in field order — same as decode_document. The nested rows are already
-  // encoded by this very closure (the query machinery ran it recursively), so they inline verbatim.
+  // Includes come after the scalars, in wire (name) order too. The nested rows are already encoded by this
+  // very closure (the query machinery ran it recursively), so they inline verbatim.
+  let mut includes = includes;
+  if includes.len() > 1 {
+    includes.sort_by(|a, b| include_field_name(a).cmp(include_field_name(b)));
+  }
   for include in includes {
     match include {
       IncludeResult::None(_) => out.push(0), // to-one with no match → null
@@ -168,6 +230,12 @@ pub fn encode_document(ctx: DecodeCtx<Vec<u8>>) -> Result<Vec<u8>, DecodeError> 
   }
 
   Ok(out)
+}
+
+fn include_field_name<'a>(include: &IncludeResult<'a, Vec<u8>>) -> &'a str {
+  match include {
+    IncludeResult::None(field) | IncludeResult::One(field, _) | IncludeResult::Many(field, _) | IncludeResult::Aggregate(field, _, _) => &field.name,
+  }
 }
 
 /// A key (`@id`) value: present unconditionally, no tag. v1 supports primitive keys only.
@@ -261,13 +329,14 @@ fn encode_primitive(out: &mut Vec<u8>, ty: &PrimitiveFieldType, data: &[u8]) -> 
 
 /// The binary closure passed to `find_many`/`find_first`. Shapes are pre-validated by [`shape_supported`],
 /// so an `Err` here is a corrupt row — the JSON path `unwrap()`s on the same input, so we mirror that.
-fn encode_row(ctx: DecodeCtx<Vec<u8>>) -> Vec<u8> {
-  encode_document(ctx).expect("binary encode of a supported, well-formed row")
+fn encode_row(ctx: DecodeCtx<Vec<u8>>, orders: &WireOrders) -> Vec<u8> {
+  encode_document(ctx, orders).expect("binary encode of a supported, well-formed row")
 }
 
 /// Runs a `findMany` and encodes the result set into the wire buffer (`[version][row_count][rows…]`).
 pub fn query_binary_many(db: &MarciDB, query: &QueryOp) -> Result<Vec<u8>, QueryError> {
-  let rows = db.find_many(query, encode_row)?;
+  let orders = WireOrders::for_query(query);
+  let rows = db.find_many(query, |ctx| encode_row(ctx, &orders))?;
   let mut out = Vec::with_capacity(5 + rows.iter().map(Vec::len).sum::<usize>());
   out.push(BINARY_VERSION);
   put_u32(&mut out, rows.len());
@@ -279,7 +348,8 @@ pub fn query_binary_many(db: &MarciDB, query: &QueryOp) -> Result<Vec<u8>, Query
 
 /// Runs a `findFirst` and encodes 0-or-1 rows into the same wire buffer.
 pub fn query_binary_one(db: &MarciDB, query: &QueryOp) -> Result<Vec<u8>, QueryError> {
-  let row = db.find_first(query, encode_row)?;
+  let orders = WireOrders::for_query(query);
+  let row = db.find_first(query, |ctx| encode_row(ctx, &orders))?;
   let mut out = Vec::with_capacity(5 + row.as_ref().map_or(0, Vec::len));
   out.push(BINARY_VERSION);
   match row {
@@ -300,9 +370,10 @@ pub enum QueryBinaryOutcome {
 }
 
 /// Binary read dispatcher — the binary counterpart of [`execute_op`](crate::execute_op) for the two read
-/// actions. Parses the `{ model, action: "findMany"|"findFirst", query }` op, checks the shape, and encodes.
-/// Non-read actions and unsupported shapes return [`QueryBinaryOutcome::Unsupported`] (→ JSON fallback);
-/// only genuine client/storage faults return `Err`.
+/// actions. Parses the `{ model, action: "findMany"|"findFirst", query, schema }` op, checks the handshake
+/// (`schema` is the client's wire fingerprint; see the module docs) and the shape, and encodes. Non-read
+/// actions, a missing or foreign fingerprint, and unsupported shapes return
+/// [`QueryBinaryOutcome::Unsupported`] (→ JSON fallback); only genuine client/storage faults return `Err`.
 pub fn execute_query_binary(db: &MarciDB, op: &Value) -> Result<QueryBinaryOutcome, OpError> {
   let obj = op.as_object().ok_or(OpError::NotAnObject)?;
   let model = obj.get("model").and_then(|m| m.as_str()).ok_or(OpError::MissingField("model"))?;
@@ -313,6 +384,12 @@ pub fn execute_query_binary(db: &MarciDB, op: &Value) -> Result<QueryBinaryOutco
     "findFirst" => false,
     _ => return Ok(QueryBinaryOutcome::Unsupported),
   };
+
+  // The decoder on the other end was compiled for the schema it names; bytes for any other schema would be
+  // read wrong, so a mismatch (or no fingerprint — a client predating the handshake) means JSON.
+  if obj.get("schema").and_then(Value::as_str) != Some(db.wire_fingerprint()) {
+    return Ok(QueryBinaryOutcome::Unsupported);
+  }
 
   let entity = db.get_model(model).ok_or_else(|| OpError::UnknownModel(model.to_string()))?;
   let query_val = obj.get("query").ok_or(OpError::MissingField("query"))?;

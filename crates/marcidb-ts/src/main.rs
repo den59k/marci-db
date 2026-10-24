@@ -1,6 +1,6 @@
 use std::{env, fs, path::Path};
 
-use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, RefInfo, Schema, parse_schema};
+use marcidb::{Entity, EnumInfo, Field, FieldExistsCondition, FieldIndex, FieldLocation, FieldType, PrimitiveFieldType, RefBinding, RefInfo, Schema, WireKind, parse_schema, wire_field};
 
 /// Whether this relation field is a `@list` id array (the owning side)
 fn is_id_list(field: &Field) -> bool {
@@ -461,61 +461,27 @@ fn get_field_update_str(field: &Field, schema: &Schema) -> String {
   }
 }
 
-/// Binary-transport type code for a primitive. `Float` is decoded as f64 (the engine widens it on the wire
-/// for exact parity) and `DateTime` as i64 (an epoch number, matching the JSON path). `Json` ships as its
-/// decoded JSON text (string framing) under the `json` code, which the client `JSON.parse`s.
-fn binary_type_code(ty: &PrimitiveFieldType) -> &'static str {
-  match ty {
-    PrimitiveFieldType::String => "str",
-    PrimitiveFieldType::Int64 => "i64",
-    PrimitiveFieldType::UInt64 => "u64",
-    PrimitiveFieldType::Float => "f64",
-    PrimitiveFieldType::Double => "f64",
-    PrimitiveFieldType::Bool => "bool",
-    PrimitiveFieldType::Byte => "u8",
-    PrimitiveFieldType::DateTime => "i64",
-    PrimitiveFieldType::Json => "json",
-  }
-}
-
 /// One field descriptor for the binary decoder-compiler: `{ n: name, k: kind, t: typecode, m: relModel }`.
 /// `k` is `key` | `body` | `one` | `many`; `t` is the scalar type code (or `null` for a scalar the binary
 /// path can't decode yet → selecting it makes the whole query fall back to JSON); `m` is the target model
-/// for relations. The order mirrors `entity.fields`, which is the slot order the engine encodes in.
+/// for relations. The definition is the shared `marcidb_schema::wire` one — the same the engine's encoder
+/// and the handshake fingerprint are built on. Internal (`@`-prefixed) fields are never selectable, so
+/// they get no descriptor.
 fn binary_field_descriptor(field: &Field, schema: &Schema) -> Option<String> {
-  // `@`-prefixed internal fields are never selectable, so they never reach the wire — omit them (the
-  // relative order of the remaining, selectable fields is preserved, which is all the decoder needs).
-  if field.name.starts_with('@') {
-    return None;
-  }
-
-  let descriptor = match &field.ty {
-    FieldType::Ref(ref_info) => {
-      format!("{{ n: \"{}\", k: \"one\", m: \"{}\" }}", field.name, schema.models[ref_info.model_index].name)
+  let wire = wire_field(schema, field)?;
+  Some(match wire.kind {
+    WireKind::One | WireKind::Many => format!("{{ n: \"{}\", k: \"{}\", m: \"{}\" }}", wire.name, wire.kind.code(), wire.target.unwrap_or_default()),
+    WireKind::Key | WireKind::Body => {
+      let code = wire.ty.map_or("null".to_string(), |t| format!("\"{}\"", t));
+      format!("{{ n: \"{}\", k: \"{}\", t: {} }}", wire.name, wire.kind.code(), code)
     }
-    FieldType::RefList(ref_info) => {
-      format!("{{ n: \"{}\", k: \"many\", m: \"{}\" }}", field.name, schema.models[ref_info.model_index].name)
-    }
-    _ => {
-      let kind = if matches!(field.location, FieldLocation::Key { .. }) { "key" } else { "body" };
-      // A scalar is binary-decodable only if it is an unformatted primitive on the matching enum value
-      // (no @format, no enum-variant condition). Everything else is `t: null` → JSON fallback.
-      let code = match &field.ty {
-        FieldType::Primitive(ty)
-          if field.format.is_none() && matches!(field.condition, FieldExistsCondition::None) =>
-        {
-          format!("\"{}\"", binary_type_code(ty))
-        }
-        _ => "null".to_string(),
-      };
-      format!("{{ n: \"{}\", k: \"{}\", t: {} }}", field.name, kind, code)
-    }
-  };
-  Some(descriptor)
+  })
 }
 
 /// The `MODELS` metadata object literal the decoder-compiler consumes: every model (including struct models,
-/// which relations target) → its ordered field descriptors. Emitted once, statically, into the client.
+/// which relations target) → its field descriptors. Emitted once, statically, into the client. The order
+/// within a model is `entity.fields` (declaration order) for stable output only — the wire order is by
+/// field name, which the decoder derives itself (see `marcidb_schema::wire`).
 fn get_models_metadata(schema: &Schema) -> String {
   let mut entries = vec![];
   for model in schema.models.iter() {
@@ -524,7 +490,10 @@ fn get_models_metadata(schema: &Schema) -> String {
       .collect();
     entries.push(format!("  \"{}\": [ {} ]", model.name, fields.join(", ")));
   }
-  format!("{{\n{}\n}}", entries.join(",\n"))
+  format!("{{
+{}
+}}", entries.join(",
+"))
 }
 
 fn main() {
@@ -740,7 +709,7 @@ fn generate_types(input: &str, output_dir: &str) {
 
   let index_out = include_str!("prefix.js")
     .replace("/* generated_models */", &get_models_metadata(&schema))
-    .replace("/* generated_schema_hash */", &format!("\"{}\"", marcidb::schema_fingerprint(&schema)))
+    .replace("/* generated_schema_hash */", &format!("\"{}\"", marcidb::wire_fingerprint(&schema)))
     .replace("/* generated_data */", &lines.join("\n    "));
 
   let out_path = Path::new(output_dir);
@@ -766,8 +735,8 @@ mod binary_descriptor_tests {
   use super::*;
 
   /// Per-field descriptors the binary decoder-compiler consumes — one assertion per field *kind*, since the
-  /// `k`/`t`/`m` split is what the TS gate keys off of. The order within a model must mirror `entity.fields`
-  /// (the slot order the engine encodes), so we also assert the relative order of a couple of fields.
+  /// `k`/`t`/`m` split is what the TS gate keys off of. The order within a model is declaration order (for
+  /// stable output; the wire order is by name and derived by the decoder), so we also pin that.
   #[test]
   fn descriptors_cover_every_field_kind() {
     // Block keywords must be column-0 (the parser doesn't dedent), so keep this literal flush-left. The
@@ -822,13 +791,13 @@ enum Role {
     assert!(meta.contains(r#"{ n: "posts", k: "many", m: "Post" }"#), "to-many\n{meta}");
     assert!(meta.contains(r#"{ n: "author", k: "one", m: "User" }"#), "to-one\n{meta}");
 
-    // Models that relations point at must also be present in the table, in slot order.
+    // Models that relations point at must also be present in the table.
     assert!(meta.contains(r#""Post": [ { n: "id", k: "key", t: "u64" }, { n: "title", k: "body", t: "str" }"#), "Post model emitted\n{meta}");
 
-    // Field order within a model mirrors entity.fields: name precedes age precedes rating.
+    // Field order within a model is declaration order: name precedes age precedes rating.
     let user = meta.find(r#""User""#).unwrap();
     let pos = |needle: &str| meta[user..].find(needle).unwrap();
-    assert!(pos("\"name\"") < pos("\"age\"") && pos("\"age\"") < pos("\"rating\""), "slot order preserved\n{meta}");
+    assert!(pos("\"name\"") < pos("\"age\"") && pos("\"age\"") < pos("\"rating\""), "declaration order preserved\n{meta}");
   }
 
   /// Internal (`@`-prefixed) fields are never selectable, so they must not appear in the descriptor list —

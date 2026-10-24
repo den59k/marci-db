@@ -205,16 +205,17 @@ fn read_str(buf: &[u8], o: &mut usize) -> String {
 
 fn decode_rows(buf: &[u8]) -> Vec<Value> {
   let mut o = 0;
-  assert_eq!(buf[o], 1, "binary version");
+  assert_eq!(buf[o], 2, "binary version");
   o += 1;
   let count = read_u32(buf, &mut o);
   let mut out = Vec::with_capacity(count);
   for _ in 0..count {
+    // Fields arrive in wire order — by name: data, id, name.
+    let data = read_tagged_str(buf, &mut o)
+      .map_or(Value::Null, |t| serde_json::from_str(&t).expect("json field is valid JSON text"));
     let id = u64::from_le_bytes(buf[o..o + 8].try_into().unwrap()); // key field — no presence tag
     o += 8;
     let name = read_tagged_str(buf, &mut o).map_or(Value::Null, Value::String);
-    let data = read_tagged_str(buf, &mut o)
-      .map_or(Value::Null, |t| serde_json::from_str(&t).expect("json field is valid JSON text"));
     out.push(json!({ "id": id, "name": name, "data": data }));
   }
   out

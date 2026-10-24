@@ -36,9 +36,10 @@ pub use crate::error::StorageError;
 pub use crate::index_utils::{decode_index_key_value, split_index_key};
 pub use crate::backup::{BACKUP_MAGIC, BACKUP_FORMAT_VERSION, TreeInfo, BackupHeader, BackupInfo, RestoreOptions, BackupError, BackupSnapshot, BackupReader, SectionReader, RestoreStaged};
 pub use crate::batch::{execute_batch, execute_op, filter_query, BatchError, BatchErrorKind, OpError};
-pub use crate::binary_encode::{execute_query_binary, query_binary_many, query_binary_one, shape_supported, QueryBinaryOutcome, BINARY_VERSION};
+pub use crate::binary_encode::{execute_query_binary, query_binary_many, query_binary_one, shape_supported, QueryBinaryOutcome, WireOrders, BINARY_VERSION};
 pub use crate::migrate::{apply, MigrateApplyError};
 pub use marcidb_schema::{MigrateOp, MigrateError, serialize_snapshot, parse_snapshot, serialize_type, serialize_field, schema_fingerprint};
+pub use marcidb_schema::{WireKind, WireField, wire_type_code, wire_field, wire_fields, wire_order, wire_descriptor, wire_fingerprint};
 
 pub use crate::query_op::{DecodeCtx, QueryOp};
 pub use crate::update_op::UpdateError;

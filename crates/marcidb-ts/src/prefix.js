@@ -3,13 +3,15 @@ import { request, requestBinary, encodeId, createDecoderRegistry, createQueryLay
 // Reference to the result of a previous operation inside $transaction
 export const ref = (path) => ({ $ref: path })
 
-// Per-model field descriptors (slot order, type codes, relation targets) the binary decoder-compiler reads.
+// Per-model field descriptors (names, kinds, type codes, relation targets) the binary decoder-compiler reads.
 // Generated from the schema; static. See marcidb-client/runtime `createDecoderRegistry`.
 const MODELS = /* generated_models */
 
-// Fingerprint of the schema this client was generated from. Sent on binary HTTP reads (`X-Marci-Schema`); the
-// server returns binary only when it matches the target DB's current schema, else JSON — the wire-format
-// handshake that keeps a stale client correct (never wrong bytes). See `schema_fingerprint` (Rust).
+// Fingerprint of the schema this client was generated from, as the binary decoder sees it (field names, kinds,
+// type codes, relation targets — not slots or order). Sent with every binary read (`X-Marci-Schema` over HTTP,
+// the op's `schema` over the embedded FFI); the engine returns binary only when it matches the target DB's
+// current schema, else JSON — the handshake that keeps a stale client correct (never wrong bytes). See
+// `wire_fingerprint` (Rust, marcidb-schema).
 const SCHEMA_HASH = /* generated_schema_hash */
 
 // HTTP transport: maps a transport-neutral op descriptor `{ model, action, query/data/id }` onto the
@@ -79,8 +81,9 @@ export function marcidb(transport, options) {
         // The transport may answer three ways:
         //   Uint8Array → a binary result buffer → decode it on the fast path
         //   { json }   → the transport declined binary (HTTP: schema/shape mismatch) → use the parsed result
-        //   null       → no answer (embedded: engine can't encode this shape) → fall back to exec/JSON
-        return Promise.resolve(transport.queryBinary(descriptor)).then((payload) => {
+        //   null       → no answer (embedded: schema mismatch, or a shape the engine can't encode) → exec/JSON
+        // The schema fingerprint goes along so the engine can refuse a decoder compiled for another schema.
+        return Promise.resolve(transport.queryBinary(descriptor, SCHEMA_HASH)).then((payload) => {
           if (payload == null) return transport.exec(descriptor);
           if (payload instanceof Uint8Array) return registry.decodeBuffer(decode, payload, many);
           return payload.json;
