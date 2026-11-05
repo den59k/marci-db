@@ -414,3 +414,153 @@ async fn a_waiting_journal_read_does_not_hold_the_shutdown() {
     let reply = waiting.await.unwrap().expect("the waiting read is answered");
     assert_eq!((reply.status, reply.json()), (StatusCode::OK, json!([])));
 }
+
+// ─────────────────────────────── watch sockets (`GET /:db/$watch`) ───────────────────────────────
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+
+async fn socket(addr: SocketAddr, db: &str, token: Option<&str>) -> Result<Socket, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{}/{}/$watch", addr, db).into_client_request().unwrap();
+    if let Some(token) = token {
+        req.headers_mut().insert("authorization", format!("Bearer {}", token).parse().unwrap());
+    }
+    tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws)
+}
+
+async fn send_text(ws: &mut Socket, text: String) {
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::text(text)).await.unwrap();
+}
+
+async fn send(ws: &mut Socket, frame: Value) {
+    send_text(ws, frame.to_string()).await;
+}
+
+/// The next frame as JSON (`{ "closed": <code> }` for a close), or `None` when nothing comes within `wait`.
+async fn next(ws: &mut Socket, wait: Duration) -> Option<Value> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        match tokio::time::timeout(wait, ws.next()).await {
+            Err(_) => return None,
+            Ok(Some(Ok(Message::Text(text)))) => return Some(serde_json::from_str(text.as_str()).unwrap()),
+            Ok(Some(Ok(Message::Close(frame)))) => return Some(json!({ "closed": frame.map(|f| u16::from(f.code)) })),
+            Ok(Some(Ok(_))) => continue,
+            Ok(end) => return Some(json!({ "closed": null, "end": format!("{:?}", end.map(|r| r.map(|_| ()))) })),
+        }
+    }
+}
+
+const QUIET: Duration = Duration::from_millis(300);
+const SOON: Duration = Duration::from_secs(5);
+
+fn watch_frame(id: u64, action: &str, query: Value) -> Value {
+    json!({ "watch": id, "op": { "model": "User", "action": action, "query": query } })
+}
+
+async fn insert(server: &TestServer, name: &str) {
+    let reply = post(server, "/app/User/insert", json!({ "name": name }).to_string()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_socket_signals_the_commits_that_touch_its_reads() {
+    let server = seeded(None).await;
+    let mut ws = socket(server.addr, "app", None).await.unwrap();
+
+    send(&mut ws, watch_frame(7, "findMany", json!({ "$where": { "name": "dee" } }))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 7 })));
+    send(&mut ws, watch_frame(9, "count", json!({}))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 9 })));
+
+    insert(&server, "dee").await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "changed": [7, 9] })));
+    insert(&server, "eve").await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "changed": [9] })), "eve is not in watch 7");
+
+    // One commit, one frame, each id once.
+    let ops: Vec<Value> = ["dee", "dee", "fay"].iter().map(|n| json!({ "model": "User", "action": "insert", "data": { "name": n } })).collect();
+    assert_eq!(post(&server, "/app/$transaction", Value::Array(ops).to_string()).await.status, StatusCode::OK);
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "changed": [7, 9] })));
+    assert_eq!(next(&mut ws, QUIET).await, None);
+
+    // Frames are answered in order: once watch 11 is confirmed, the unwatch before it is done.
+    send(&mut ws, json!({ "unwatch": 9 })).await;
+    send(&mut ws, watch_frame(11, "findFirst", json!({ "$where": { "name": "zed" } }))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 11 })));
+    insert(&server, "gus").await;
+    assert_eq!(next(&mut ws, QUIET).await, None, "9 is gone, 7 and 11 do not match");
+
+    // Refusals name the id.
+    send(&mut ws, watch_frame(1, "insert", json!({}))).await;
+    let refused = next(&mut ws, SOON).await.unwrap();
+    assert_eq!((refused["err"].clone(), refused["kind"].clone()), (json!(1), json!("bad_request")));
+    assert!(refused["message"].as_str().unwrap().contains("is not a read"), "{}", refused);
+    send(&mut ws, json!({ "watch": 2, "op": { "model": "Nope", "action": "findMany", "query": {} } })).await;
+    assert_eq!(next(&mut ws, SOON).await.unwrap()["kind"], json!("not_found"));
+    send_text(&mut ws, "not json".to_string()).await;
+    assert_eq!(next(&mut ws, SOON).await.unwrap()["err"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_watch_route_is_a_websocket_behind_the_token() {
+    use tokio_tungstenite::tungstenite::Error;
+    let server = seeded(Some("secret")).await;
+    let status = |result: Result<Socket, Error>| match result {
+        Err(Error::Http(res)) => res.status().as_u16(),
+        Err(e) => panic!("{}", e),
+        Ok(_) => 101,
+    };
+    assert_eq!(status(socket(server.addr, "app", None).await), 401);
+    assert_eq!(status(socket(server.addr, "app", Some("wrong")).await), 401);
+    assert_eq!(status(socket(server.addr, "nope", Some("secret")).await), 404);
+    assert_eq!(status(socket(server.addr, "app", Some("secret")).await), 101);
+
+    let plain = request(&server, Method::GET, "/app/$watch", Bytes::new(), Some("secret")).await;
+    assert_eq!(plain.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_closes_the_socket_without_waiting_for_it() {
+    let server = seeded(None).await;
+    let backup = request(&server, Method::GET, "/app/$backup", Bytes::new(), None).await;
+    let mut ws = socket(server.addr, "app", None).await.unwrap();
+    send(&mut ws, watch_frame(1, "count", json!({}))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 1 })));
+
+    let started = Instant::now();
+    let restored = post(&server, "/app/$restore", backup.body.clone()).await;
+    assert_eq!(restored.status, StatusCode::OK, "{:?}", restored.body);
+    assert!(started.elapsed() < Duration::from_secs(5), "the socket held the database: {:?}", started.elapsed());
+    // 1012: the database it watched is gone — reconnect.
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "closed": 1012 })));
+
+    // A new socket watches the restored database.
+    let mut ws = socket(server.addr, "app", None).await.unwrap();
+    send(&mut ws, watch_frame(1, "count", json!({}))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 1 })));
+    insert(&server, "dee").await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "changed": [1] })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopping_server_closes_its_watch_sockets() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = app_db(&dir);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let ctx = Arc::new(ServerContext::single("app".to_string(), db, None).log_requests(false));
+    let served = tokio::spawn(serve(listener, ctx, async { let _ = stopped.await; }));
+
+    let mut ws = socket(addr, "app", None).await.unwrap();
+    send(&mut ws, watch_frame(1, "count", json!({}))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 1 })));
+
+    let started = Instant::now();
+    stop.send(()).unwrap();
+    served.await.unwrap();
+    assert!(started.elapsed() < SHUTDOWN_GRACE, "took {:?}", started.elapsed());
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "closed": 1001 })));
+}

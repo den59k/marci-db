@@ -18,6 +18,8 @@
 //! * [`marci_listen`] serves the server's HTTP API for this one database on a local port (the maintenance
 //!   port, `port.rs`; cargo feature `http`, on by default). Its requests share the handle's lock with the
 //!   FFI calls. [`marci_listen_stop`] and [`marci_close`] stop it, blocking for at most the grace period.
+//! * Watches ([`marci_watch`] / [`marci_unwatch`] / [`marci_watch_poll`]): the handle is one subscriber of
+//!   the engine's watches; the caller polls for the ids that changed — no call ever blocks on them.
 
 // Every entry point takes pointers from a C caller, who owns the contract above (a live handle or NULL,
 // NUL-terminated strings); marking `extern "C"` functions `unsafe fn` would change nothing for that caller.
@@ -36,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use marcidb::{
     BackupInfo, MarciDB, MigrateApplyError, OpError, OpenOptions, ProviderError, ProviderRegistry,
-    QueryBinaryOutcome, ReindexError, RestoreOptions, execute_batch, execute_op, execute_query_binary,
+    QueryBinaryOutcome, ReindexError, RestoreOptions, Watcher, execute_batch, execute_op, execute_query_binary,
     parse_snapshot, serialize_snapshot, try_parse_schema,
 };
 use serde_json::{Value, json};
@@ -54,6 +56,8 @@ pub struct DbHandle {
     /// The maintenance port started by [`marci_listen`], if one runs (at most one per database).
     #[cfg(feature = "http")]
     listener: Mutex<Option<port::Listener>>,
+    /// This handle's watches ([`marci_watch`]); the caller drains them with [`marci_watch_poll`].
+    watcher: Arc<Watcher>,
 }
 
 impl DbHandle {
@@ -64,6 +68,7 @@ impl DbHandle {
             next_job: AtomicU64::new(1),
             #[cfg(feature = "http")]
             listener: Mutex::new(None),
+            watcher: Watcher::new(|| {}),
         }
     }
 
@@ -199,7 +204,7 @@ fn build_providers() -> Arc<ProviderRegistry> {
 /// the product/package version** — bump it only when that contract changes incompatibly (a new/renamed
 /// symbol, or a [`BINARY_VERSION`](marcidb::BINARY_VERSION) bump). The loader reads this at open and refuses
 /// a mismatched native library with a clear message, instead of a cryptic missing-symbol `dlopen` failure.
-pub const MARCI_ABI_VERSION: u32 = 3;
+pub const MARCI_ABI_VERSION: u32 = 4;
 
 /// Returns [`MARCI_ABI_VERSION`]. The first symbol the loader binds — its absence marks a pre-handshake
 /// (too old) library.
@@ -688,6 +693,51 @@ pub extern "C" fn marci_listen_stop(handle: *mut DbHandle) -> *mut c_char {
         let h = unsafe { handle_ref(handle) }?;
         Ok(json!({ "stopped": h.stop_listener() }))
     })
+}
+
+// ───────────────────────────────── watches ─────────────────────────────────
+
+/// Watches the read `op_json` (`{ model, action, query }` — `findMany`, `findFirst`, `count`, `aggregate`)
+/// under `id`, replacing this handle's watch of that id: from now on every commit that may change the
+/// op's result puts `id` into the next [`marci_watch_poll`]. Returns NULL, or an error envelope (`{"ok":
+/// false,"error","kind"}`: a write op or a bad query is `bad_request`, an unknown model `not_found`) the
+/// caller frees with [`marci_free_string`].
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_watch(handle: *mut DbHandle, id: u64, op_json: *const c_char) -> *mut c_char {
+    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<(), Fault> {
+        let h = unsafe { handle_ref(handle) }?;
+        let input = unsafe { req_str(op_json, "op_json") }?;
+        let op: Value = serde_json::from_str(input).map_err(|e| Fault::bad_request(format!("invalid op JSON: {}", e)))?;
+        h.read().watch(&h.watcher, id, &op).map_err(op_fault)
+    }));
+    match outcome {
+        Ok(Ok(())) => ptr::null_mut(),
+        Ok(Err(fault)) => into_c_string(err_envelope(&fault)),
+        Err(panic) => into_c_string(err_envelope(&Fault::internal(panic_message(panic)))),
+    }
+}
+
+/// Stops this handle's watch `id` (an unknown id is a no-op).
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_unwatch(handle: *mut DbHandle, id: u64) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(h) = unsafe { handle_ref(handle) } {
+            h.read().unwatch(&h.watcher, id);
+        }
+    }));
+}
+
+/// The ids of this handle's watches whose results may have changed since the last poll, each once, as a
+/// JSON array (`[7,9]`, not an envelope; `[]` for a NULL handle). Never blocks on a commit. Free it with
+/// [`marci_free_string`].
+#[unsafe(no_mangle)]
+pub extern "C" fn marci_watch_poll(handle: *mut DbHandle) -> *mut c_char {
+    let ids = catch_unwind(AssertUnwindSafe(|| match unsafe { handle_ref(handle) } {
+        Ok(h) => h.watcher.take_changed(),
+        Err(_) => Vec::new(),
+    }))
+    .unwrap_or_default();
+    into_c_string(json!(ids).to_string())
 }
 
 fn migrate_fault(e: MigrateApplyError) -> Fault {

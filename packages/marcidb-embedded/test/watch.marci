@@ -1,0 +1,5 @@
+model Player {
+  name   String
+  room   String
+  score  Int
+}

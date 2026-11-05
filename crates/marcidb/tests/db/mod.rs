@@ -25,12 +25,14 @@ pub mod id_list_tests;
 pub mod array_ops_tests;
 pub mod row_codec_fuzz_tests;
 pub mod journal_tests;
+pub mod watch_tests;
 pub mod foreign_key_tests;
 pub mod error_text_tests;
 pub mod bind_list_tests;
 pub mod unique_group_tests;
 pub mod upsert_tests;
 pub mod default_list_tests;
+pub mod default_json_tests;
 pub mod backup_tests;
 
 use std::str::FromStr;

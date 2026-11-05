@@ -1,6 +1,6 @@
 // The generic query layer (query-language types + the builder runtime) — see ./query.ts.
 export * from "./query";
-import type { FieldDesc } from "./query";
+import type { FieldDesc, MarciOp, WatchListener, WatchRegistration } from "./query";
 
 /** The class of a refused request — the server's `kind`: a constraint (`unique`, `foreign_key`, `restrict`,
  *  `duplicate_id`), `not_found`, `bad_request`, `unauthorized`, or `internal` for a fault of the server. */
@@ -61,6 +61,149 @@ export async function request(method: string, url: string, body?: any, options?:
   // }
 
   return res.json();
+}
+
+// ───────────────────────────────── watch socket ─────────────────────────────────
+//
+// The watches of the HTTP transport: one WebSocket per client (`GET /:db/$watch`, crates/marcidb-http/src/
+// watch.rs), opened by the first watch and closed a few seconds after the last.
+//   → { watch: id, op }   ← { ok: id } | { err: id, message, kind }
+//   → { unwatch: id }     ← { changed: [ids] }
+// A dropped socket is reopened, with a growing pause, and every watch registered again — each then reads
+// again, as after a change. A watch the server never confirmed fails instead (unreachable, a wrong token,
+// no such database): `op.watch` hands that to `error`. The token goes in the upgrade's headers, which Bun
+// and Node send; a browser's WebSocket cannot.
+
+const WATCH_LINGER_MS = 3000;
+const WATCH_RETRY_MIN_MS = 250;
+const WATCH_RETRY_MAX_MS = 5000;
+const STATUS_OF_KIND: Record<string, number> = { not_found: 404, unauthorized: 401, unavailable: 503, internal: 500 };
+
+/** The watch half of the HTTP transport for the database at `url` (what `marcidb(url)` plugs in). */
+export function createWatchSocket(url: string, options?: HttpOptions): { watch(op: MarciOp, listener: WatchListener): WatchRegistration } {
+  type Entry = { op: MarciOp; listener: WatchListener; confirmed: boolean; resolve(): void; reject(error: unknown): void };
+  const target = url.replace(/^http/, "ws") + "/$watch";
+  const entries = new Map<number, Entry>();
+  let nextId = 1;
+  let socket: WebSocket | undefined;
+  let open = false;
+  let pause = WATCH_RETRY_MIN_MS;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let lingerTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const send = (frame: unknown) => {
+    if (open) socket!.send(JSON.stringify(frame));
+  };
+
+  // Why the socket did not open, as the plain route answers it: 401, 404 — or the network's error.
+  const whyNotOpen = (): Promise<unknown> =>
+    request("GET", `${url}/$watch`, undefined, options).then(
+      () => new Error(`marcidb: cannot open the watch socket ${target}`),
+      (e) => (e instanceof MarciError && e.kind === "bad_request" ? new Error(`marcidb: cannot open the watch socket ${target}`) : e),
+    );
+
+  function connect() {
+    const WS = (globalThis as any).WebSocket;
+    if (!WS) {
+      const error = new Error("marcidb: watching over HTTP needs a global WebSocket (Bun, Node 22+, a browser)");
+      for (const [id, entry] of entries) if (!entry.confirmed) { entries.delete(id); entry.reject(error); }
+      return;
+    }
+    const headers = optionHeaders(options);
+    const ws: WebSocket = Object.keys(headers).length ? new WS(target, { headers }) : new WS(target);
+    socket = ws;
+    open = false;
+    ws.onopen = () => {
+      if (socket !== ws) return;
+      open = true;
+      pause = WATCH_RETRY_MIN_MS;
+      for (const [id, entry] of entries) send({ watch: id, op: entry.op });
+    };
+    ws.onmessage = (event: MessageEvent) => {
+      if (socket !== ws) return;
+      let frame: any;
+      try {
+        frame = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (typeof frame.ok === "number") {
+        const entry = entries.get(frame.ok);
+        if (!entry) return;
+        if (entry.confirmed) entry.listener.changed(); // registered again after a reconnect: read again
+        else { entry.confirmed = true; entry.resolve(); }
+      } else if (typeof frame.err === "number") {
+        const entry = entries.get(frame.err);
+        if (!entry) return;
+        entries.delete(frame.err);
+        const kind = frame.kind ?? "bad_request";
+        const error = new MarciError(STATUS_OF_KIND[kind] ?? 400, frame.message ?? "the watch was refused", kind);
+        if (entry.confirmed) entry.listener.failed(error);
+        else entry.reject(error);
+        linger();
+      } else if (Array.isArray(frame.changed)) {
+        for (const id of frame.changed) entries.get(id)?.listener.changed();
+      }
+    };
+    ws.onerror = () => {}; // `close` follows
+    ws.onclose = () => {
+      if (socket !== ws) return;
+      const opened = open;
+      socket = undefined;
+      open = false;
+      if (!opened) {
+        // Never opened: the watches still waiting for their first answer fail; the confirmed ones wait on.
+        const failed = [...entries].filter(([, entry]) => !entry.confirmed);
+        for (const [id] of failed) entries.delete(id);
+        if (failed.length) whyNotOpen().then((error) => failed.forEach(([, entry]) => entry.reject(error)));
+      }
+      if (entries.size === 0) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        if (entries.size > 0 && !socket) connect();
+      }, pause);
+      pause = Math.min(pause * 2, WATCH_RETRY_MAX_MS);
+    };
+  }
+
+  // The socket outlives its last watch by a few seconds: a watch closed and opened again keeps it.
+  function linger() {
+    if (entries.size > 0 || lingerTimer) return;
+    lingerTimer = setTimeout(() => {
+      lingerTimer = undefined;
+      if (entries.size > 0) return;
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+      const ws = socket;
+      socket = undefined;
+      open = false;
+      ws?.close();
+    }, WATCH_LINGER_MS);
+    (lingerTimer as any).unref?.();
+  }
+
+  return {
+    watch(op, listener) {
+      const id = nextId++;
+      clearTimeout(lingerTimer);
+      lingerTimer = undefined;
+      let entry!: Entry;
+      const ready = new Promise<void>((resolve, reject) => {
+        entry = { op, listener, confirmed: false, resolve, reject };
+      });
+      entries.set(id, entry);
+      if (open) send({ watch: id, op });
+      else if (!socket && !retryTimer) connect();
+      return {
+        ready,
+        close() {
+          if (!entries.delete(id)) return;
+          send({ unwatch: id });
+          linger();
+        },
+      };
+    },
+  };
 }
 
 /** Media type for a binary result buffer — must match the server's `BINARY_MEDIA_TYPE`. */

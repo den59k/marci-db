@@ -30,7 +30,7 @@ With `--token`, clients send the token: the typed client as `marcidb(url, { toke
 
 ## Endpoints
 
-Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text, the [journal](#journals) routes, and the [backup](#backups) routes). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
+Every path starts with the **database name**: `/:db/...`. The database is created by its first `$migrate` (or `$sync`); data endpoints on an unknown database return `404`. All endpoints are `POST` with a JSON body (except `$sync`, whose body is the raw schema text, the [journal](#journals) routes, the [backup](#backups) routes, and the [watch](#watches) socket). `:model` is the model name exactly as in the schema (case-sensitive: `User`, not `user`).
 
 | Endpoint | Body | Response |
 |---|---|---|
@@ -51,6 +51,7 @@ Every path starts with the **database name**: `/:db/...`. The database is create
 | `POST /:db/:model/$journal/:name` | `{ "on": "delete" }` | `{ "created": bool }` — see [Journals](#journals) |
 | `GET /:db/:model/$journal/:name` | — (`?after=&limit=&wait=`) | JSON array of entries |
 | `DELETE /:db/:model/$journal/:name` | — | `{ "dropped": bool }` |
+| `GET /:db/$watch` | — (a WebSocket upgrade) | a socket of JSON frames — see [Watches](#watches) |
 | `GET /:db/$backup` | — | the database as a `.marcibin` file (`application/x-marcidb-backup`) — see [Backups](#backups) |
 | `POST /:db/$restore` | a `.marcibin` file (`?into=<name>` restores under another name) | `{ "restored", "bytes", "trees", "entries", "schemaVersion", "createdAt" }` — replaces the database |
 
@@ -232,6 +233,34 @@ curl -X DELETE localhost:3000/myapp/File/\$journal/stored-files
 - `after` is the only way an entry leaves a journal. A reader that failed repeats its request with the same `after` and gets the same entries; confirming twice is harmless.
 - `limit` defaults to 100 (at most 1000), `wait` is in seconds (at most 60). A waiting request holds no lock on the database.
 - Reading or confirming a journal that does not exist is a `404`.
+
+## Watches
+
+`GET /:db/$watch` upgrades to a WebSocket that tells a client when the result of a read may have changed
+(what signals a watch: the [TypeScript API](API.md#watches)). It carries no data — the client reads again.
+Bearer auth as everywhere: the token goes in the upgrade request's `Authorization` header. An unknown
+database is a `404`, a request that is not a WebSocket upgrade a `400`.
+
+Frames are JSON text. Ids are the client's — non-negative integers, per socket:
+
+```
+→ { "watch": 7, "op": { "model": "Room", "action": "findMany", "query": { "$where": { "code": "AB12" } } } }
+← { "ok": 7 }                                           watched: every commit that may change the result signals 7
+← { "err": 7, "message": "…", "kind": "bad_request" }   refused: a write action, a bad query; an unknown model is "not_found"
+→ { "unwatch": 7 }                                      no answer
+← { "changed": [7, 9] }                                 what committed since the last such frame, an id at most once
+```
+
+- `op` is one operation of a [`$transaction`](#transactions) — `model`, `action`, `query` — and only a read:
+  `findMany`, `findFirst`, `count`, `aggregate`. Watching an id again replaces its op. A frame that is not
+  JSON, or not one of the two above, is answered `{ "err": null, … }`.
+- Frames are answered in order. Register first, then read: a commit between the two is signalled, not lost.
+- A `changed` frame follows each commit that signalled something; commits closer together than the socket
+  drains share one.
+- Closing the socket drops its watches. The server closes it with `1001` when it stops, and with `1012` when
+  the database is closed under it (a `$restore`, `DELETE /:db`): reconnect, register again, read again.
+  Between frames a socket holds nothing of the database, so it does not hold up a restore.
+- Watches are not stored: a restarted server has none.
 
 ## Backups
 

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt};
 
-use crate::schema::{SchemaError, schema_attributes::{Attribute, FieldCustomFormat, parse_attribute}, schema_default_value::FieldDefault};
+use crate::schema::{SchemaError, schema_attributes::{Attribute, FieldCustomFormat, parse_attribute, split_outside_quotes}, schema_default_value::FieldDefault};
 
 #[derive(Debug,Clone)]
 pub enum FieldLocation {
@@ -245,9 +245,9 @@ pub fn parse_field_raw(line: &str) -> Result<Field, SchemaError> {
     let nullable = type_str.ends_with('?') || matches!(ty, FieldType::RefListUnresolved(_));
 
     // attributes: everything left in the line is interpreted as attributes
-    // Each word starting with '@' is a separate attribute
-    let attributes: Vec<Attribute> = line
-        .split('@')
+    // Each word starting with '@' is a separate attribute; an '@' inside a quoted default is not a start
+    let attributes: Vec<Attribute> = split_outside_quotes(line, |c| c == '@')
+        .into_iter()
         .skip(1)         // ignore the part before the first @
         .map(str::trim)  // strip whitespace
         .filter(|s| !s.is_empty())

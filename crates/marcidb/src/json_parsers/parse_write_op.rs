@@ -279,6 +279,12 @@ pub(crate) fn default_bytes(default_value: &FieldDefault) -> Option<Vec<u8>> {
     match default_value {
         FieldDefault::Value(val) => Some(val.clone()),
         FieldDefault::Now => Some(Local::now().timestamp_millis().to_be_bytes().to_vec()),
+        // The literal was validated when the schema was parsed; its bytes are the JSONB an insert of the
+        // same value stores.
+        FieldDefault::Json(text) => {
+            let value: Value = serde_json::from_str(text).expect("a Json default is validated when the schema is parsed");
+            Some(crate::json_parsers::jsonb::encode(&value))
+        }
         FieldDefault::Counter(_) => None,
     }
 }
@@ -286,7 +292,7 @@ pub(crate) fn default_bytes(default_value: &FieldDefault) -> Option<Vec<u8>> {
 /// Writes the default value. If the value is computed at write time, returns the offset
 fn parse_default_value(dst: &mut Vec<u8>, field: &Field, default_value: &FieldDefault) -> Result<Option<usize>, EncodeError> {
     match default_value {
-        FieldDefault::Value(_) | FieldDefault::Now => {
+        FieldDefault::Value(_) | FieldDefault::Now | FieldDefault::Json(_) => {
             dst.extend_from_slice(&default_bytes(default_value).unwrap());
             return Ok(None)
         },

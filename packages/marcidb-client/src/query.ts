@@ -1,6 +1,6 @@
 // The generic query layer of the marcidb client: the query-language types every generated client is built
 // on (where / update operators, `GetResult`, `Op`, the query builder `Query<T>`) and the builder runtime
-// (`createQueryLayer`). Everything here is schema-agnostic — the codegen (crates/marcidb-ts) emits the
+// (`createQueryLayer`, `op.watch` included). Everything here is schema-agnostic — the codegen (crates/marcidb-ts) emits the
 // per-model type bags and MODELS metadata this file is parametrised by.
 //
 // Keep it dependency-free: besides shipping in `marcidb-client/runtime`, this file is vendored verbatim
@@ -170,7 +170,44 @@ export type AggregateResult<TModel, T> =
 // A lazily-executed operation. `await` runs it as a single request;
 // passing it into `db.$transaction([...])` bundles it into one atomic transaction
 declare const __op: unique symbol
-export type Op<T> = PromiseLike<T> & { readonly [__op]: T }
+/** What a query or an op offers of a promise: `then`, `catch`, `finally` — the runtime object has
+ *  all three (`op()` / the collection builder below), so `db.x.insert(…).catch(…)` type-checks. */
+export type Settles<T> = PromiseLike<T> & {
+  catch<R = never>(onRejected?: ((reason: any) => R | PromiseLike<R>) | null): Promise<T | R>
+  finally(onFinally?: (() => void) | null): Promise<T>
+}
+export type Op<T> = Settles<T> & { readonly [__op]: T }
+
+/** A running watch — see `ReadOp.watch`. */
+export interface Watch {
+  /** Stops it: no callback after this returns. Idempotent. */
+  close(): void
+}
+export type WatchOptions = {
+  /** Gets what a read of the watch failed with (an op the database refuses — after a migration, say),
+   *  and what the callback threw. Without it, they are logged. */
+  error?: (error: unknown) => void
+}
+/** A read (`select`, `first`, `count`, `aggregate`): an op that can also be watched. */
+export type ReadOp<T> = Op<T> & {
+  /**
+   * Calls `callback` with the result at once, then again each time a commit changed it. The database signals
+   * every commit that may have changed it; the client reads again and calls back only when the result
+   * differs (as JSON) from the one it delivered last. Signals that arrive during a read make one more read.
+   * A dropped connection is reopened and read again by the client — nothing to handle outside.
+   */
+  watch(callback: (result: T) => void, options?: WatchOptions): Watch
+}
+/** What a transport tells a watch it holds (internal: `op.watch` is built on it). */
+export type WatchListener = {
+  /** A commit may have changed the result — or the transport recovered a lost connection. */
+  changed(): void
+  /** The database refused the op when the transport registered it again. */
+  failed(error: unknown): void
+}
+/** A watch registered with a transport: `ready` settles once the database has it (it rejects with the
+ *  refusal), `close` drops it. */
+export type WatchRegistration = { ready: Promise<void>, close(): void }
 
 // A transport-neutral operation descriptor and the pluggable transport that runs it. The HTTP transport
 // is selected by passing a URL string; marcidb-embedded provides an in-process FFI transport.
@@ -185,6 +222,9 @@ export type MarciTransport = {
    *  database on the same schema. `{ json }` is an already-parsed JSON answer (HTTP, when the server declined
    *  binary); `null` means "no binary answer" and the client falls back to `exec`. */
   queryBinary?(op: MarciOp, schemaHash: string): Promise<Uint8Array | { json: any } | null>
+  /** Watches, if the transport has them: registers the read `op` and tells `listener` whenever a commit may
+   *  have changed its result. Only signals — the re-read and the comparison are the query layer's. */
+  watch?(op: MarciOp, listener: WatchListener): WatchRegistration
 }
 
 // ───────────────────────────── query builder ─────────────────────────────
@@ -231,8 +271,10 @@ export type IdArg<I> = I | BareId<I>
  * it to `$transaction` batches it; placing it in another query's select makes it a sub-select. `Sel` is the
  * projection: id + scalars until `select(...)` sets a shape.
  */
-export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends PromiseLike<Rows<T, Sel>[]> {
+export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends Settles<Rows<T, Sel>[]> {
   readonly [__op]: Rows<T, Sel>[]
+  /** The rows now, then each time a commit changed them — see `ReadOp.watch`. */
+  watch(callback: (rows: Rows<T, Sel>[]) => void, options?: WatchOptions): Watch
   readonly [__sub]: T["name"]
   readonly [__sel]: Effective<T, Sel>
   /** Filter (marcidb `$where`). Repeated calls are ANDed. */
@@ -253,13 +295,13 @@ export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends Promise
    */
   select<S extends T["query"] = T["scalars"]>(shape?: S): Query<T, S>
   /** The first matching row or `null`. */
-  first(): Op<Rows<T, Sel> | null>
+  first(): ReadOp<Rows<T, Sel> | null>
   /** Row count; inside a select it becomes `{ count }` for the relation. */
-  count(): Op<number> & Sub<T["name"], { $count: true }>
+  count(): ReadOp<number> & Sub<T["name"], { $count: true }>
   /** @deprecated pass the filter through the chain: `db.user.where(w).count()` (removed in the next minor). */
-  count(query: { $where?: T["where"] }): Op<number> & Sub<T["name"], { $count: true }>
+  count(query: { $where?: T["where"] }): ReadOp<number> & Sub<T["name"], { $count: true }>
   // `NoInfer`: as a select value the contextual type is `Sub<Name, any>`, which would otherwise win the inference of `A`
-  aggregate<A extends T["aggregate"]>(query: A): Op<AggregateResult<T["model"], A>> & Sub<T["name"], NoInfer<A>>
+  aggregate<A extends T["aggregate"]>(query: A): ReadOp<AggregateResult<T["model"], A>> & Sub<T["name"], NoInfer<A>>
 
   insert(data: T["insert"]): Op<T["id"]>
   /** The new row by `select`'s shape — its defaults, dates and files as stored: one call, nothing to read back. */
@@ -285,9 +327,9 @@ export interface Query<T extends ModelTypes, Sel = T["scalars"]> extends Promise
 
   // ── object form (deprecated): one query object (select shape + $where/$order/$limit/$skip/$cursor)
   /** @deprecated use `.select(query)` — it takes the same object, merged with the chain (removed in the next minor). */
-  findMany<Q extends T["query"] = {}>(query?: Q): Op<Rows<T, Q>[]>
+  findMany<Q extends T["query"] = {}>(query?: Q): ReadOp<Rows<T, Q>[]>
   /** @deprecated use `.select(query).first()` (removed in the next minor). */
-  findFirst<Q extends T["query"] = {}>(query?: Q): Op<Rows<T, Q> | null>
+  findFirst<Q extends T["query"] = {}>(query?: Q): ReadOp<Rows<T, Q> | null>
 }
 
 // ───────────────────────────── journals ─────────────────────────────
@@ -336,7 +378,11 @@ export type QueryLayerOptions = {
   /** Hook for the `onInsert` part of an `upsert` — the fields used only when the row is created (the lecodes SDK
    *  puts a uuid id here). Receives what the caller gave (or undefined), returns what is sent. */
   prepareUpsert?(model: string, onInsert: any): any;
+  /** The transport's watches (`MarciTransport.watch`); without it `op.watch` throws. */
+  watch?(op: MarciOp, listener: WatchListener): WatchRegistration;
 };
+
+const READ_ACTIONS = ["findMany", "findFirst", "count", "aggregate"];
 
 const AGGREGATE_KEYS = ["$count", "$sum", "$avg", "$min", "$max"];
 const and = (a: any, b: any): any => (a ? (b ? { $and: [a, b] } : a) : b);
@@ -351,6 +397,64 @@ type QueryState = { shape?: Record<string, any>; where?: any; order?: any; limit
 export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor: MarciOp) => any; collection: (model: string) => any } {
   const { models, run } = options;
 
+  // `op.watch(callback, { error })` — one code for every transport: the transport only says "may have
+  // changed"; reading again, comparing with what was delivered and coalescing happen here.
+  const watch = (descriptor: MarciOp, callback: (result: any) => void, o?: WatchOptions): Watch => {
+    if (!READ_ACTIONS.includes(descriptor.action)) {
+      throw new Error(`marcidb: ${descriptor.model}.${descriptor.action} is a write — only reads can be watched`);
+    }
+    if (!options.watch) throw new Error("marcidb: this transport cannot watch");
+    let closed = false;
+    let reading = false;
+    let again = false;
+    let last: string | undefined; // the last result delivered, as JSON
+    const fail = (e: unknown) => {
+      if (closed) return;
+      if (o?.error) o.error(e);
+      else console.error(`marcidb: a watch of ${descriptor.model}.${descriptor.action} failed:`, e);
+    };
+    const read = async (): Promise<void> => {
+      if (closed) return;
+      if (reading) {
+        again = true; // one more read after this one, however many signals came meanwhile
+        return;
+      }
+      reading = true;
+      try {
+        do {
+          again = false;
+          let result: any;
+          try {
+            result = await run(descriptor);
+          } catch (e) {
+            fail(e);
+            continue;
+          }
+          const json = JSON.stringify(result);
+          if (closed || json === last) continue;
+          last = json;
+          try {
+            callback(result);
+          } catch (e) {
+            fail(e);
+          }
+        } while (again && !closed);
+      } finally {
+        reading = false;
+      }
+    };
+    // Registered first, read second: a commit between the two is signalled, not lost.
+    const registration = options.watch(descriptor, { changed: () => void read(), failed: fail });
+    registration.ready.then(read, fail);
+    return {
+      close() {
+        if (closed) return;
+        closed = true;
+        registration.close();
+      },
+    };
+  };
+
   // Lazily-executed operation: `await` runs it through the transport as a single op,
   // while `$transaction` takes only the `__op` descriptor and sends them as one batch.
   const op = (descriptor: MarciOp): any => ({
@@ -358,6 +462,7 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
     then: (onFulfilled?: any, onRejected?: any) => run(descriptor).then(onFulfilled, onRejected),
     catch: (onRejected?: any) => run(descriptor).catch(onRejected),
     finally: (onFinally?: any) => run(descriptor).finally(onFinally),
+    watch: (callback: (result: any) => void, o?: WatchOptions) => watch(descriptor, callback, o),
   });
 
   // A field key is anything that isn't a `$`-clause. A shape without field keys selects id + every scalar
@@ -456,6 +561,7 @@ export function createQueryLayer(options: QueryLayerOptions): { op: (descriptor:
         then: (onFulfilled?: any, onRejected?: any) => run(findMany()).then(onFulfilled, onRejected),
         catch: (onRejected?: any) => run(findMany()).catch(onRejected),
         finally: (onFinally?: any) => run(findMany()).finally(onFinally),
+        watch: (callback: (rows: any) => void, o?: WatchOptions) => watch(findMany(), callback, o),
 
         where: (where: any) => make({ ...st, where: and(st.where, where) }),
         order: (field: any, direction?: "asc" | "desc") => {

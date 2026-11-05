@@ -15,6 +15,9 @@ serde_json = "1.0.145"
 marcidb = { path = "../marcidb" }
 marcidb-schema = { path = "../marcidb-schema" }
 chrono = "0.4.42"
+# `GET /:db/$watch` is a WebSocket (watch.rs): the frame codec over hyper's upgraded connection.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Vector index module — opt-in (pulls in `marci_vector`, which needs nightly portable_simd).
 marci_vector_index = { path = "../marci-vector-index", optional = true }
 # Full-text search module — opt-in (stable toolchain).
@@ -30,3 +33,5 @@ fulltext = ["dep:marci_fulltext_index"]
 # The HTTP tests (src/tests.rs) drive the server with hyper's own client.
 hyper = { version = "1.7.0", features = ["client", "http1"] }
 tempfile = "3"
+# ...and the watch socket with tungstenite's client.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }

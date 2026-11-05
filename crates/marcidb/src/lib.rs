@@ -17,6 +17,7 @@ mod url_parser;
 mod update_op;
 mod num_utils;
 mod journal;
+mod watch;
 mod backup;
 
 // The schema model + parser + snapshot codec live in the foundation crate. Alias it as `crate::schema` so
@@ -32,6 +33,7 @@ pub use crate::marci_db::{MarciDB, OpenOptions, ReindexError, QueryError};
 pub use crate::index_provider::{IndexProvider, IndexTree, IndexIter, RowScan, RowRef, SearchHit, ProviderError, ProviderRegistry};
 pub use crate::transaction::MarciTransaction;
 pub use crate::journal::{JournalError, JournalSignal};
+pub use crate::watch::Watcher;
 pub use crate::error::StorageError;
 pub use crate::index_utils::{decode_index_key_value, split_index_key};
 pub use crate::backup::{BACKUP_MAGIC, BACKUP_FORMAT_VERSION, TreeInfo, BackupHeader, BackupInfo, RestoreOptions, BackupError, BackupSnapshot, BackupReader, SectionReader, RestoreStaged};

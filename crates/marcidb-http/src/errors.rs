@@ -21,15 +21,20 @@ pub enum ApiError {
 
 // Error → Response conversion — once and for all
 impl ApiError {
-    pub fn into_response(self) -> Response<Full<Bytes>> {
-        let (kind, field, message) = match self {
+    /// `(kind, field, message)` — what a JSON error body (or a watch socket's `err` frame) carries.
+    pub fn parts(self) -> (&'static str, Option<String>, String) {
+        match self {
             ApiError::Unauthorized(m) => ("unauthorized", None, m),
             ApiError::NotFound(m) => ("not_found", None, m),
             ApiError::BadRequest(m) => ("bad_request", None, m),
             ApiError::Internal(m) => ("internal", None, m),
             ApiError::Unavailable(m) => ("unavailable", None, m),
             ApiError::Engine { kind, field, message } => (kind, field, message),
-        };
+        }
+    }
+
+    pub fn into_response(self) -> Response<Full<Bytes>> {
+        let (kind, field, message) = self.parts();
         let status = match kind {
             "unique" | "foreign_key" | "restrict" | "duplicate_id" => StatusCode::CONFLICT,
             "not_found" => StatusCode::NOT_FOUND,

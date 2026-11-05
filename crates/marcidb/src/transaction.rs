@@ -145,14 +145,18 @@ impl<'db> MarciTransaction<'db> {
 
   /// Commits all the transaction's changes. After the commit they are visible to new readers
   pub fn commit(self) -> Result<(), StorageError> {
+    // Taken while the write lock is still held: the next transaction must start without them.
+    let hits = self.db.watches.take_hits();
     self.tx.commit()?;
     self.db.journals.committed();
+    self.db.watches.publish(hits);
     Ok(())
   }
 
   /// Explicitly rolls back the transaction. Equivalent to a plain `drop`, but returns an error
   /// if the rollback failed
   pub fn rollback(self) -> Result<(), StorageError> {
+    self.db.watches.discard();
     self.tx.rollback()?;
     Ok(())
   }

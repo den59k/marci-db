@@ -3,13 +3,13 @@
 //! databases under a directory) and `marcidb-ffi` — an embedded app's maintenance port over the one
 //! database the app has open.
 
-use std::{collections::{HashMap, HashSet}, convert::Infallible, future::Future, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, RwLock, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet}, convert::Infallible, future::Future, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, RwLock}, time::{Duration, Instant}};
 
 use http_body_util::Full;
 use hyper::{Method, Request, Response, StatusCode, body::Bytes, header, server::conn::http1, service::service_fn};
-use hyper_util::{rt::TokioIo, server::graceful::GracefulShutdown};
+use hyper_util::rt::TokioIo;
 use marcidb::{BackupInfo, MarciDB, ProviderRegistry, RestoreStaged};
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{net::TcpListener, sync::watch as signal, task::JoinSet};
 
 use crate::{backup::{handle_backup, handle_restore}, errors::ApiError, handlers::{handle_upsert, handle_aggregate, handle_count, handle_delete, handle_delete_many, handle_find_first, handle_find_many, handle_insert, handle_journal_drop, handle_journal_open, handle_journal_read, handle_migrate, handle_reindex, handle_reindex_all, handle_snapshot, handle_sync, handle_sync_plan, handle_transaction, handle_update, handle_update_many}, helpers::{ResponseBody, boxed}};
 
@@ -17,6 +17,7 @@ mod backup;
 mod handlers;
 mod errors;
 mod helpers;
+mod watch;
 #[cfg(test)]
 mod tests;
 
@@ -33,9 +34,9 @@ pub struct ServerContext {
     token: Option<String>,
     /// One stdout line per request: on in the server, off on a maintenance port (an app's stdout is not ours).
     log_requests: bool,
-    /// Set by [`serve`] once it stops accepting: a waiting journal read answers early instead of holding
-    /// the shutdown for its whole wait.
-    stopping: AtomicBool,
+    /// Set by [`serve`] once it stops accepting: open connections finish their requests and close, a
+    /// waiting journal read answers early, a watch socket closes.
+    stop: signal::Sender<bool>,
 }
 
 enum Databases {
@@ -107,7 +108,7 @@ impl ServerContext {
     }
 
     fn with(databases: Databases, token: Option<String>) -> Self {
-        ServerContext { databases, token, log_requests: true, stopping: AtomicBool::new(false) }
+        ServerContext { databases, token, log_requests: true, stop: signal::channel(false).0 }
     }
 
     /// Whether every request is logged to stdout (on by default).
@@ -118,7 +119,7 @@ impl ServerContext {
 
     /// Whether [`serve`] has stopped accepting and is letting the last requests finish.
     pub fn is_stopping(&self) -> bool {
-        self.stopping.load(Ordering::SeqCst)
+        *self.stop.borrow()
     }
 
     /// The directory-mode state, or `refused` on a maintenance port.
@@ -323,7 +324,6 @@ pub async fn serve(listener: TcpListener, ctx: Arc<ServerContext>, shutdown: imp
 
 /// [`serve`] with an explicit grace period.
 pub async fn serve_with_grace(listener: TcpListener, ctx: Arc<ServerContext>, shutdown: impl Future<Output = ()>, grace: Duration) {
-    let graceful = GracefulShutdown::new();
     let mut connections = JoinSet::new();
     tokio::pin!(shutdown);
 
@@ -336,11 +336,23 @@ pub async fn serve_with_grace(listener: TcpListener, ctx: Arc<ServerContext>, sh
                 };
                 let log = ctx.log_requests;
                 let service_ctx = ctx.clone();
+                let mut stop = ctx.stop.subscribe();
+                // With upgrades: a watch socket takes its connection over (watch.rs) — it then lives on its
+                // own task and closes itself when the server stops.
                 let conn = http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), service_fn(move |req| handle(req, service_ctx.clone())));
-                let conn = graceful.watch(conn);
+                    .serve_connection(TokioIo::new(stream), service_fn(move |req| handle(req, service_ctx.clone())))
+                    .with_upgrades();
                 connections.spawn(async move {
-                    if let Err(err) = conn.await && log {
+                    tokio::pin!(conn);
+                    // On stop: the request in flight finishes, an idle keep-alive connection closes at once.
+                    let served = tokio::select! {
+                        served = conn.as_mut() => served,
+                        _ = async { let _ = stop.wait_for(|stopping| *stopping).await; } => {
+                            conn.as_mut().graceful_shutdown();
+                            conn.await
+                        }
+                    };
+                    if let Err(err) = served && log {
                         eprintln!("  connection error: {}", err);
                     }
                 });
@@ -352,8 +364,9 @@ pub async fn serve_with_grace(listener: TcpListener, ctx: Arc<ServerContext>, sh
     }
 
     drop(listener);
-    ctx.stopping.store(true, Ordering::SeqCst);
-    if tokio::time::timeout(grace, graceful.shutdown()).await.is_err() {
+    ctx.stop.send_replace(true);
+    let drained = async { while connections.join_next().await.is_some() {} };
+    if tokio::time::timeout(grace, drained).await.is_err() {
         connections.abort_all();
     }
     while connections.join_next().await.is_some() {}
@@ -378,6 +391,11 @@ async fn handle_inner(
     }
 
     authorize(&req, &ctx)?;
+
+    // A watch socket takes the connection over (see watch.rs)
+    if method == Method::GET && let Some((db_name, "$watch")) = path.split_once('/') {
+        return watch::upgrade(req, ctx, db_name.to_string()).await.map(boxed);
+    }
 
     // A backup streams its body (see backup.rs)
     if method == Method::GET && let Some((db_name, "$backup")) = path.split_once('/') {

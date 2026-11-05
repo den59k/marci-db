@@ -1,4 +1,4 @@
-import { request, requestBinary, encodeId, createDecoderRegistry, createQueryLayer } from 'marcidb-client/runtime'
+import { request, requestBinary, encodeId, createDecoderRegistry, createQueryLayer, createWatchSocket } from 'marcidb-client/runtime'
 
 // Reference to the result of a previous operation inside $transaction
 export const ref = (path) => ({ $ref: path })
@@ -21,6 +21,8 @@ const SCHEMA_HASH = /* generated_schema_hash */
 function httpTransport(url, options) {
   // Every request carries the transport's options (a bearer token) — see `HttpOptions` in the runtime.
   const send = (method, route, body) => request(method, route, body, options);
+  // Watches: one WebSocket per client (`GET /:db/$watch`), opened by the first one — see the runtime.
+  const sockets = createWatchSocket(url, options);
   return {
     exec(op) {
       switch (op.action) {
@@ -56,6 +58,9 @@ function httpTransport(url, options) {
     queryBinary(op) {
       const path = op.action === "findFirst" ? "findFirst" : "findMany";
       return requestBinary(`${url}/${op.model}/${path}`, op.query, SCHEMA_HASH, options);
+    },
+    watch(op, listener) {
+      return sockets.watch(op, listener);
     },
   };
 }
@@ -94,8 +99,10 @@ export function marcidb(transport, options) {
   }
 
   // The query builder (`db.<model>` — where/order/limit/select/…, sub-queries, the empty-select rule) and
-  // the lazy `op` come from the shared query layer; `run` is the only transport-specific piece.
-  const { collection } = createQueryLayer({ models: MODELS, run });
+  // the lazy `op` (with `watch`) come from the shared query layer; `run` and the transport's watch signal
+  // are the only transport-specific pieces.
+  const watch = transport.watch ? (op, listener) => transport.watch(op, listener) : undefined;
+  const { collection } = createQueryLayer({ models: MODELS, run, watch });
 
   // Atomic batch transaction: array of operation descriptors → one batch call to the transport
   const $transaction = (ops) => transport.batch(ops.map((o) => o.__op));

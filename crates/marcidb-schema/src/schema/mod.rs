@@ -8,6 +8,7 @@ mod schema_default_value;
 mod schema_resolve_bindings;
 
 pub use crate::schema::schema_attributes::{Attribute,DeleteConstraint,FieldCustomFormat};
+pub(crate) use crate::schema::schema_attributes::split_outside_quotes;
 pub use crate::schema::schema_field::{Field,FieldType,FieldLocation,PrimitiveFieldType,RefInfo,RefBinding,EnumInfo,FieldExistsCondition,FieldIndex,FieldIndexNum};
 pub use crate::schema::{schema_parse::{parse_schema,try_parse_schema}};
 pub(crate) use crate::schema::schema_parse::rebuild_caches;

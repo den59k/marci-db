@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::{Arc, atomic::AtomicU64}};
 use canopydb::{Database, Transaction, Tree, WriteTransaction};
 use serde_json::Value;
 
-use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, journal::Journals, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot, wire_fingerprint}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
+use crate::{Field, MarciTransaction, StorageError, aggregate_op::{AggregateOp, AggregateResult, process_aggregate}, delete_op::DeleteError, journal::Journals, watch::Watches, error::RequireTree, index_provider::{IndexTree, ProviderError, ProviderRegistry, RowScan, SearchHit}, migrate::{META_TREE, MigrateApplyError, apply, create_entity_trees}, query_op::{DecodeCtx, QueryOp, TransationContext, decode_row, process_query_many, process_query_one, process_where}, schema::{Entity, FieldDefault, FieldIndex, Schema, parse_schema, parse_snapshot, serialize_snapshot, wire_fingerprint}, update_op::{UpdateError, UpdateOp}, utils::get_data, write_op::{InsertError, WriteOp}};
 
 /// Storage-engine options threaded into `MarciDB::try_*_with_options`. Defaults match the durable
 /// `MarciDB::new`/`open` path; the embedding/test layer flips `disable_fsync` for fast, ephemeral DBs.
@@ -37,6 +37,8 @@ pub struct MarciDB {
   pub(crate) providers: Arc<ProviderRegistry>,
   /// The journals readers opened on this database's models (journal.rs). Empty unless one was asked for.
   pub(crate) journals: Journals,
+  /// The reads subscribers watch (watch.rs). Empty unless one was registered; never persisted.
+  pub(crate) watches: Watches,
 }
 
 impl MarciDB {
@@ -83,7 +85,7 @@ impl MarciDB {
     tx.commit()?;
 
     let wire_fingerprint = wire_fingerprint(&schema);
-    Ok(MarciDB { db, schema, wire_fingerprint, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
+    Ok(MarciDB { db, schema, wire_fingerprint, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals, watches: Watches::default() })
   }
 
   /// Installs the `@custom` index providers (builder style). The same registry is typically shared across
@@ -130,7 +132,7 @@ impl MarciDB {
     drop(rx);
 
     let wire_fingerprint = wire_fingerprint(&schema);
-    Ok(MarciDB { db, schema, wire_fingerprint, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals })
+    Ok(MarciDB { db, schema, wire_fingerprint, counters, model_by_name, providers: Arc::new(ProviderRegistry::new()), journals, watches: Watches::default() })
   }
 
   pub fn get_model(&self, name: &str) -> Option<&Entity> {
@@ -243,7 +245,10 @@ impl MarciDB {
   /// atomically; to commit you must call [`MarciTransaction::commit`], otherwise a rollback
   /// happens on `drop`. While the transaction is open, it holds an exclusive write lock
   pub fn begin_write(&self) -> Result<MarciTransaction<'_>, StorageError> {
-    Ok(MarciTransaction::new(self, self.db.begin_write()?))
+    let tx = self.db.begin_write()?;
+    // What a transaction that did not commit hit is dropped here, under the write lock.
+    self.watches.discard();
+    Ok(MarciTransaction::new(self, tx))
   }
 
   /// The storage transactions themselves, for the engine's own modules (journal.rs).
@@ -344,6 +349,8 @@ impl MarciDB {
     for name in dropped { self.journals.forget_model(name); }
 
     self.swap_schema(new_schema)?;
+    // Rows may have been rewritten and ops may no longer parse: every watch fires.
+    self.watches_schema_changed();
     Ok(())
   }
 
@@ -380,6 +387,8 @@ impl MarciDB {
       count += self.reindex_field_in_tx(&tx, entity, field)?;
     }
     tx.commit()?;
+    // A search over a rebuilt index may answer otherwise.
+    if count > 0 { self.watches.fire_model(&entity.name); }
     Ok(count)
   }
 
@@ -388,6 +397,7 @@ impl MarciDB {
     let tx = self.db.begin_write()?;
     let count = self.reindex_field_in_tx(&tx, entity, field)?;
     tx.commit()?;
+    if count > 0 { self.watches.fire_model(&entity.name); }
     Ok(count)
   }
 

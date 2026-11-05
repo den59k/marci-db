@@ -10,6 +10,7 @@ pub(crate) use parsers::{encode_enum, encode_primitive_value};
 pub(crate) mod jsonb;
 
 pub use crate::json_parsers::parse_query_op::{parse_query};
+pub(crate) use crate::json_parsers::parse_where::parse_where;
 pub use crate::json_parsers::parse_aggregate_op::{parse_aggregate,aggregate_to_json};
 pub use crate::json_parsers::json_decoder::{decode_document,decode_row_json,decode_field_value,decode_id, id_text,array_to_json,DecodeError,get_offset_checked};
 pub use crate::json_parsers::parse_write_op::{parse_insert};

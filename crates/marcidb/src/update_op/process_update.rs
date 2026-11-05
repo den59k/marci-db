@@ -50,6 +50,8 @@ pub fn process_update(tx: &WriteTransaction, entity: &Entity, id: &[u8], update:
     let mut tree = tx.require_tree(entity.name.as_bytes())?;
     tree.insert(id, new_data)?;
   }
+  // Checked when no field changed too: the relation operations below change what a read of the row returns.
+  db.watches.written(tx, &db.schema, entity, id, Some(&data), resp.as_deref());
 
   // The composite unique indexes: a group whose key changed moves its entry; a taken key is a violation
   // naming the group's fields and the row holding it (a part gone null drops the entry, as on insert).

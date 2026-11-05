@@ -246,6 +246,27 @@ default), and set a `token` for anything else.
 
 ---
 
+## Watches
+
+`op.watch(callback, { error })` of the client works on `marcidb(db)` as it does over HTTP — the result at
+once, then again on every change ([Watches](../../docs/API.md#watches)):
+
+```ts
+const db = marcidb(openDatabase("./data"));
+const w = db.player.where({ roomId }).watch((players) => render(players));
+// …
+w.close();
+```
+
+Embedded, a watch is registered with the engine (`marci_watch`); every commit that may change its result
+leaves the watch's id with the handle, and the client collects them (`marci_watch_poll`) every 50 ms while
+a watch is open. The poll never blocks, so the JS thread never waits on a commit — a signal reaches the
+callback within a poll and a read. An open watch keeps the process alive (its timer), as a socket would:
+`close()` it, or `db.close()`. Commits of the [maintenance port](#maintenance-port) signal the app's watches
+too: it writes to the same database.
+
+---
+
 ## Reading a schema file portably
 
 `openTestDatabase(schema)` / `$sync(schema)` take the schema **text**. Read it with `fs` so it works
@@ -283,6 +304,8 @@ Node doesn't support text import attributes.
   `{ bytes, trees, entries, schemaVersion, createdAt }` (see [Backups](#backups)).
 - `listen({ port, host?, token?, name? })` — serve the server's HTTP API for this database on a local
   port; returns `{ port, host, url, close() }` (see [Maintenance port](#maintenance-port)).
+- `watch(op, listener)` — the transport half of the client's `op.watch`: registers a read and calls
+  `listener.changed()` when a commit may have changed it (see [Watches](#watches)); use `op.watch`.
 - `close()` — release the database (idempotent; stops the maintenance port, waits for running backups).
   `closed` — boolean.
 

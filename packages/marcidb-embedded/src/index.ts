@@ -31,7 +31,15 @@ export interface MarciTransport {
    *  is the fingerprint of the schema the calling client was generated from (the generated client passes its
    *  own); the engine answers binary only for a database on that schema — without it, always `null`. */
   queryBinary?(op: MarciOp, schemaHash?: string): Promise<Uint8Array | null>;
+  /** Watches (what `op.watch` of the client is built on): registers the read `op`; `listener.changed()` is
+   *  called whenever a commit may have changed its result. */
+  watch?(op: MarciOp, listener: WatchListener): WatchRegistration;
 }
+
+/** What the transport tells a watch it holds (matches the client's `WatchListener`). */
+export type WatchListener = { changed(): void; failed(error: unknown): void };
+/** A watch the transport holds: `ready` settles once the engine has it, `close` drops it. */
+export type WatchRegistration = { ready: Promise<void>; close(): void };
 
 export interface EmbeddedOptions {
   /** Disable fsync — faster, durability-unsafe. Intended for ephemeral/test databases. */
@@ -87,6 +95,9 @@ export interface EmbeddedDatabase extends MarciTransport {
   exec(op: MarciOp): Promise<any>;
   batch(ops: MarciOp[]): Promise<any[]>;
   queryBinary(op: MarciOp, schemaHash?: string): Promise<Uint8Array | null>;
+  /** Registers a watch of the read `op` (the client's `op.watch` uses it). The engine collects the ids a commit
+   *  touched; they are polled every 50 ms while a watch is open — the JS thread never waits on a commit. */
+  watch(op: MarciOp, listener: WatchListener): WatchRegistration;
   /** Back-compat alias of the database itself — `marcidb(db)` and `marcidb(db.transport)` are equivalent. */
   readonly transport: MarciTransport;
   /** Declarative schema sync from `.marci` text. */
@@ -182,6 +193,9 @@ export function restoreDatabase(dir: string, backupPath: string, options: Restor
 /** How often a running backup is polled. */
 const BACKUP_POLL_MS = 50;
 
+/** How often the changed watches are polled while one is open. */
+const WATCH_POLL_MS = 50;
+
 /** Blocks the calling thread for `ms` (used only by `close()`, which blocks anyway until backups end). */
 function sleepSync(ms: number) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -237,6 +251,40 @@ function wrapHandle(handle: unknown, dir: string): EmbeddedDatabase {
     return body.subarray(1); // status 0 → the binary result buffer
   }
 
+  // Watches: the engine keeps the ids a commit touched for this handle; a timer drains them while a watch is
+  // open (the FFI call never blocks, so the JS thread never waits on a commit).
+  const watches = new Map<number, WatchListener>();
+  let nextWatch = 1;
+  let watchTimer: ReturnType<typeof setInterval> | undefined;
+  const pollWatches = () => {
+    if (closed) return;
+    for (const id of JSON.parse(ffi.watchPoll(handle)) as number[]) watches.get(id)?.changed();
+  };
+  function watch(op: MarciOp, listener: WatchListener): WatchRegistration {
+    ensureOpen();
+    const id = nextWatch++;
+    const refused = ffi.watch(handle, id, JSON.stringify(op));
+    let ready: Promise<void>;
+    if (refused === null) {
+      watches.set(id, listener);
+      watchTimer ??= setInterval(pollWatches, WATCH_POLL_MS);
+      ready = Promise.resolve();
+    } else {
+      ready = Promise.resolve(refused).then(unwrap); // the error envelope: rejects with its error
+    }
+    return {
+      ready,
+      close() {
+        if (!watches.delete(id)) return;
+        if (!closed) ffi.unwatch(handle, id);
+        if (watches.size === 0 && watchTimer !== undefined) {
+          clearInterval(watchTimer);
+          watchTimer = undefined;
+        }
+      },
+    };
+  }
+
   /** One poll of `job`; settles its promise and returns true once the backup is over. */
   function pollBackup(job: number): boolean {
     const waiter = pending.get(job);
@@ -260,7 +308,8 @@ function wrapHandle(handle: unknown, dir: string): EmbeddedDatabase {
     exec,
     batch,
     queryBinary,
-    transport: { exec, batch, queryBinary },
+    watch,
+    transport: { exec, batch, queryBinary, watch },
     async $sync(schemaText: string) {
       ensureOpen();
       return unwrap(ffi.sync(handle, schemaText));
@@ -325,6 +374,9 @@ function wrapHandle(handle: unknown, dir: string): EmbeddedDatabase {
     close() {
       if (closed) return;
       closed = true;
+      if (watchTimer !== undefined) clearInterval(watchTimer);
+      watchTimer = undefined;
+      watches.clear();
       // The native close stops the maintenance port first.
       // The handle is freed below, so running backups are polled to the end here (the native close would
       // wait for them anyway) and every pending promise settles with its real outcome.

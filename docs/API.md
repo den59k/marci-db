@@ -59,7 +59,7 @@ If a model has no `@id` field, an autoincrement `id UInt` is added implicitly.
 - `@unique` — unique secondary index on a scalar; on a relation field it is the one-to-one constraint
 - `@unique(<name>)` — a composite unique index: the same name on two or more fields of a model makes one index over them (`user User @unique(pair)` + `post Post @unique(pair)` = one like per user and post), the way several `@id` make one key. A row with a null part is not constrained. A violation names the fields: `Like.user, Like.post: the value is already taken (by the row with id 7)`
 - `@index` — secondary index on a scalar/enum/list (used by `$where`, `$order` and aggregations). **Not** valid on a relation field — index a relation through its reverse collection (`@bind`) instead
-- `@default(value)` — also `autoincrement()`, `now()`; a list's is written as a list (`@default([])` is the empty list, `@default([1, 2])`)
+- `@default(value)` — also `autoincrement()`, `now()`; a list's is written as a list (`@default([])` is the empty list, `@default([1, 2])`). A `DateTime`'s is `now()` or an integer, epoch milliseconds (`@default(1735689600000)`), stored like a written date. A `Json`'s is any JSON literal but `null`: `@default([])`, `@default({})`, `@default({"theme": "dark", "tabs": [1, 2]})`, `@default("text")`, `@default(0)`, `@default(true)` — an `@`, `)` or space inside its strings belongs to the value, and other attributes may follow it
 - `@bind(Model.field)` — declares the reverse side of a relation
 - `@list` — on a relation list (`Model[]`): stores the related ids **inline in the row as an ordered array** instead of a virtual index-tree relation — see [Ordered relation lists](#ordered-relation-lists-list)
 - `@format(uuid | hex)` — JSON representation of byte fields
@@ -510,6 +510,35 @@ for await (const change of deleted) {
 
 A model nobody journals pays nothing. A journaled one pays one extra write per deleted row and journal.
 
+## Watches
+
+A watch keeps a read's result fresh: the callback gets the result at once, then again each time a commit changed it.
+
+```ts
+const w = db.player.where({ roomId }).select({ name: true, score: true }).watch((players) => render(players), {
+  error: (e) => console.error(e), // a read the database refuses — after a migration, say
+})
+db.room.where({ code }).first().watch((room) => …)
+db.player.where({ roomId }).count().watch((n) => …)
+w.close()
+```
+
+Every read has it — a query, `first()`, `count()`, `aggregate()`; the `watch` of a write throws.
+
+- **The first call comes at once**, with the current result (as soon as the watch is registered and read).
+- **A call means the result changed.** The database signals every commit that *may* have changed it; the client reads again and calls back only when the result differs from the one it delivered last (compared as JSON). That is part of the contract: a signal that changed nothing calls nothing.
+- **Signals coalesce.** Signals that arrive while the client reads make one more read, not one each.
+- **The connection is the client's business.** Over HTTP a dropped socket is reopened, and every watch registered again and read again — the callback runs only if the result differs. Embedded there is no connection.
+- **Errors go to `error`**: a read that fails (an op the database refuses — from the start, or after a migration), and what the callback throws. Without `error` they are logged.
+- **`close()`** stops it: no call comes after it returns.
+
+What signals a watch — two rules:
+
+1. **Each written row is checked against the watch's `$where`**: an insert by the new row, a delete by the old one, an update by both — a row that leaves the filter signals too. The check runs in the writing transaction, from the path every write takes (a cascade, a `$transaction`, an `updateMany` alike); a transaction that rolls back signals nothing. It over-approximates and never misses: `$order`, `$limit`, `$skip` and `$cursor` are not considered, and a condition through a relation (`{ author: { name: "ann" } }`) counts as "may match" — a false signal costs one read.
+2. **A model the read reaches through a relation signals it on any write**: a relation in the select (`posts: { title: true }`, `posts: { $count: true }`) or in the `$where`. And a migration (`$migrate`, `$sync`) signals every watch; a `reindex()`, the watches of its model.
+
+Watches are ephemeral: nothing is stored, and a restarted server or a reopened database has none — the client registers its own again. A model nobody watches pays nothing; a watched one pays a check of each written row per watch. Over HTTP the client opens one WebSocket per `marcidb(url)` on the first watch and closes it a few seconds after the last ([the protocol](HTTP-API.md#watches)); the token goes in its upgrade request, which Bun and Node send but a browser's `WebSocket` cannot. Embedded, the engine collects the signals and the client polls them every 50 ms while a watch is open ([embedded](../packages/marcidb-embedded/README.md#watches)).
+
 ## Client setup
 
 ```ts
@@ -536,6 +565,7 @@ db.<model>                          // a query: await it, chain it, or use it as
   .first()                          // Promise<Result | null>
   .count()                          // Promise<number>
   .aggregate(query)                 // Promise<AggregateResult>
+  .watch(callback, { error? })      // on any read above: the result now, then on every change — see Watches
 db.<model>.insert(data)           // Promise<Id>
 db.<model>.update(id, data)       // Promise<void>
 db.<model>.delete(id)             // Promise<void>

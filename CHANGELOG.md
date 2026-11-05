@@ -4,6 +4,13 @@ All notable changes to MarciDB are documented here. New entries below this line
 are generated from commit history by [`scripts/gen-changelog.sh`](scripts/gen-changelog.sh)
 when cutting a release.
 
+## Unreleased
+
+### Features
+
+- watches: `op.watch(callback, { error })` on every read — the result at once, then again each time a commit changed it (the client re-reads on the engine's signal and calls back only when the result differs). The engine checks each written row against the watches of its model in the writing transaction; `GET /:db/$watch` is the WebSocket of the HTTP host; `marci_watch` / `marci_unwatch` / `marci_watch_poll` the embedded ABI (ABI version 4). See [Watches](docs/API.md#watches).
+- schema: `DateTime @default(<integer>)` (epoch milliseconds, next to `now()`) and `Json @default(<JSON literal>)` (`[]`, `{}`, `{"a": 1}`, `"text"`, `0`, `true`; not `null`) — both were refused at `$sync`. The literal is written into rows inserted without the field and, by an add-field migration, into existing rows. Attribute splitting no longer breaks on an `@` inside a quoted default (`@default("a@b.c") @unique`), and the snapshot / `.march` tokenizers keep a quoted `)` or a run of spaces inside one intact. See [Attributes](docs/API.md#attributes).
+
 ## v0.4.0 - 2026-06-16
 
 ### Features

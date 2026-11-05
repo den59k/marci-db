@@ -14,6 +14,8 @@ pub fn process_delete<'a>(
   let providers = &db.providers;
   // A journaled model's delete records the row it removes, so the body is read whatever the op needs.
   let journaled = db.journals.records_delete(&entity.name);
+  // So is a watched one's: a watch checks the row it removes.
+  let watched = db.watches.reads_rows(&entity.name);
   let mut body_value: Option<Vec<u8>> = None;
   {
     let mut owned;
@@ -25,7 +27,7 @@ pub fn process_delete<'a>(
         }
     };
 
-    if action.is_body_need() || journaled {
+    if action.is_body_need() || journaled || watched {
       let Some(body) = tree.get(id)? else {
         return Ok(false)
       };
@@ -36,6 +38,7 @@ pub fn process_delete<'a>(
       return Ok(false)
     }
   }
+  db.watches.written(tx, schema, entity, id, body_value.as_deref(), None);
 
   if journaled {
     db.journals.record_delete(tx, entity, schema, id, body_value.as_deref().unwrap_or(&[])).map_err(DeleteError::Journal)?;
@@ -102,6 +105,7 @@ pub fn process_delete<'a>(
             let mut tree = tx.require_tree(dep.rev_entity.name.as_bytes())?;
             tree.insert(item_id, &body)?;
           }
+          db.watches.written(tx, schema, dep.rev_entity, item_id, Some(&old_body), Some(&body));
 
           // The foreign key is gone, so its index entries must go with it — otherwise a lookup by the
           // now-dangling old value still finds this row.
@@ -133,6 +137,9 @@ pub fn process_delete<'a>(
           if let Some(mut body) = row {
             if remove_from_id_list_row(dep.rev_field, &mut body, id) {
               owner_tree.insert(item_id, &body)?;
+              // Only the `@list` array changed — a relation, which a watch's check counts as "may match"
+              // either way: the new body tells as much as both.
+              db.watches.written(tx, schema, dep.rev_entity, item_id, None, Some(&body));
             }
           }
           index_tree.delete(&[ id, item_id.as_slice() ].concat())?;
@@ -174,6 +181,10 @@ pub fn process_delete<'a>(
         process_delete(tx, child_id, child, delete_op, db, None)?;
       }
       continue;
+    }
+    // Owned children removed as a key range: their bodies are not read, so their watches fire unchecked.
+    if let RefToDelete::ChildEntity { entity: child, .. } = ref_to_delete {
+      db.watches.touched(child);
     }
     delete_ref_data(tx, ref_to_delete, id)?;
   }

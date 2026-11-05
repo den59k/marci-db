@@ -28,7 +28,7 @@ fn query_error(e: QueryError) -> ApiError {
 }
 
 /// Opens the DB by name (read-lock) and runs an operation against it
-fn with_db<T>(ctx: &ServerContext, db_name: &str, f: impl FnOnce(&MarciDB) -> Result<T, ApiError>) -> Result<T, ApiError> {
+pub(crate) fn with_db<T>(ctx: &ServerContext, db_name: &str, f: impl FnOnce(&MarciDB) -> Result<T, ApiError>) -> Result<T, ApiError> {
     let db = ctx.get_db(db_name, false)?;
     let db = db.read().unwrap_or_else(|e| e.into_inner());
     f(&db)

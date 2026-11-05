@@ -415,14 +415,22 @@ fn parse_field_line(line: &str) -> Result<SnapField, SchemaError> {
 }
 
 /// Splits the attribute string into `@` tokens, WITHOUT splitting on `@` inside parentheses
-/// (a value may contain `@`, e.g. `@rev(@parent_id)`)
+/// (a value may contain `@`, e.g. `@rev(@parent_id)`) and without counting a paren inside a double-quoted
+/// string of a default (`@default({"p": ")"})`; `\` escapes the next char there)
 fn split_attr_tokens(s: &str) -> Vec<String> {
   let mut tokens = vec![];
   let mut cur = String::new();
   let mut depth = 0i32;
   let mut started = false;
+  let (mut in_string, mut escaped) = (false, false);
   for ch in s.chars() {
+    if in_string {
+      if escaped { escaped = false } else if ch == '\\' { escaped = true } else if ch == '"' { in_string = false }
+      cur.push(ch);
+      continue;
+    }
     match ch {
+      '"' => { in_string = true; cur.push(ch); }
       '@' if depth == 0 => {
         if started && !cur.trim().is_empty() { tokens.push(cur.trim().to_string()); }
         cur.clear();

@@ -3,7 +3,7 @@
 //! — the runtime engine (`marcidb`) only ever consumes the resulting snapshot via `parse_snapshot` and the
 //! ops via `apply`. A migration file is a list of SELF-CONTAINED actions, one per line.
 
-use crate::{Entity, Field, MigrateOp, Schema, SchemaError, serialize_field};
+use crate::{Entity, Field, MigrateOp, Schema, SchemaError, schema::split_outside_quotes, serialize_field};
 
 // ─────────────────────────── rendering (ops → .march text) ───────────────────────────
 
@@ -170,7 +170,7 @@ fn set_unique_group(blocks: &mut [(String, Vec<String>)], entity: &str, name: &s
     }
     for line in block.1.iter_mut() {
         let keep = fields.is_some_and(|fields| fields.iter().any(|f| f == field_name_of(line)));
-        let mut toks: Vec<&str> = line.split_whitespace().filter(|t| *t != token).collect();
+        let mut toks: Vec<&str> = tokens(line).filter(|t| *t != token).collect();
         if keep { toks.push(&token); }
         *line = toks.join(" ");
     }
@@ -183,7 +183,7 @@ fn set_field_index(blocks: &mut [(String, Vec<String>)], entity: &str, field: &s
         .ok_or_else(|| SchemaError(format!("evolve: unknown entity {}", entity)))?;
     let line = block.1.iter_mut().find(|l| field_name_of(l) == field)
         .ok_or_else(|| SchemaError(format!("evolve: unknown field {}.{}", entity, field)))?;
-    let mut toks: Vec<&str> = line.split_whitespace().filter(|t| *t != "@index" && *t != "@unique").collect();
+    let mut toks: Vec<&str> = tokens(line).filter(|t| *t != "@index" && *t != "@unique").collect();
     match idx {
         Some(true) => toks.push("@unique"),
         Some(false) => toks.push("@index"),
@@ -197,9 +197,15 @@ fn field_name_of(line: &str) -> &str {
     line.split_whitespace().next().unwrap_or("")
 }
 
+/// The whitespace-separated tokens of a field line, a double-quoted string of a default kept whole: its
+/// spaces are not separators (a rewrite of the line must not collapse them) and an `@index` in it is no token.
+fn tokens(line: &str) -> impl Iterator<Item = &str> {
+    split_outside_quotes(line, char::is_whitespace).into_iter().filter(|t| !t.is_empty())
+}
+
 /// Extracts the Body `@slot(N)` from a field line, if any (virtual fields have none).
 fn slot_of(line: &str) -> Option<usize> {
-    line.split_whitespace()
+    tokens(line)
         .find_map(|tok| tok.strip_prefix("@slot(").and_then(|x| x.strip_suffix(")")).and_then(|n| n.parse().ok()))
 }
 
@@ -223,12 +229,12 @@ struct Layout {
 /// slot 0. From then on every stored row decoded garbage from the wrong offsets. Requiring the location
 /// turns that into an error before anything is written.
 fn layout_of(path: &str, line: &str) -> Result<Layout, SchemaError> {
-    let ty = line.split_whitespace().nth(1)
+    let ty = tokens(line).nth(1)
         .ok_or_else(|| SchemaError(format!("evolve: {} — expected \"<name> <type> <attributes>\", got \"{}\"", path, line.trim())))?
         .to_string();
 
     let (mut location, mut binding) = (None, None);
-    for tok in line.split_whitespace().skip(2) {
+    for tok in tokens(line).skip(2) {
         match tok.split_once('(').map(|(kw, _)| kw).unwrap_or(tok) {
             "@id" | "@virtual" | "@slot" => {
                 if let Some(first) = &location {

@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 # Foundation crate — pure schema model + parser + snapshot codec + migration authoring. No storage,
 # and (deliberately) no dependency on the engine; the engine depends on this crate.
+# Validates a `Json @default(<literal>)` and stores it re-serialised; the JSONB bytes are the engine's (`jsonb`).
+serde_json = "1.0.145"

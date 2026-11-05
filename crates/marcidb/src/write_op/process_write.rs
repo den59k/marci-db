@@ -93,6 +93,7 @@ pub fn process_write(tx: &WriteTransaction, entity: &Entity, insert: &WriteOp, d
     }
     tree.insert(&write_id, data)?;
   }
+  db.watches.written(tx, &db.schema, entity, &write_id, None, Some(data));
 
   for write_index in insert.write_indexes.iter() {
     match write_index {

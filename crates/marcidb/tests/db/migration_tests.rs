@@ -500,6 +500,39 @@ fn migrate_add_field_with_default_fills_existing_rows() {
   }
 }
 
+/// An added `Json` field with a `@default` is written into the rows that exist, as JSONB like an inserted
+/// value: old rows read it decoded and filter on its paths; an added `DateTime @default(<ms>)` the same.
+#[test]
+fn migrate_add_json_field_with_default_fills_existing_rows() {
+  let before = "model User {\n  name String\n}";
+  let after = "model User {\n  name String\n  prefs Json @default({\"theme\": \"dark\", \"tabs\": [1, 2], \"to\": \"a@b.c\"})\n  joined DateTime @default(1735689600000)\n}";
+  let prefs = json!({ "theme": "dark", "tabs": [1, 2], "to": "a@b.c" });
+
+  // Both frontends: `$sync` (diff) and a `.march` file (evolve)
+  for via_file in [false, true] {
+    let dir = tempdir().unwrap();
+    let mut db = MarciDB::new(before, dir.path().to_str().unwrap());
+    insert_data(&db, "User", json!({ "name": "Alice" }));
+    insert_data(&db, "User", json!({ "name": "Bob" }));
+
+    if via_file { apply_migration(&mut db, &mig(before, after)).unwrap() } else { migrate_to(&mut db, after).unwrap() }
+
+    assert_eq!(
+      get_data(&db, "User", json!({ "name": true, "prefs": true, "joined": true })),
+      json!([
+        { "name": "Alice", "prefs": prefs, "joined": 1735689600000i64 },
+        { "name": "Bob", "prefs": prefs, "joined": 1735689600000i64 },
+      ])
+    );
+    assert_eq!(get_data(&db, "User", json!({ "name": true, "$where": { "prefs": { "theme": "dark" } } })).as_array().unwrap().len(), 2);
+
+    insert_data(&db, "User", json!({ "name": "Carol" }));
+    drop(db);
+    let db = MarciDB::open(dir.path().to_str().unwrap());
+    assert_eq!(get_data(&db, "User", json!({ "prefs": true, "$where": { "name": "Carol" } })), json!([{ "prefs": prefs }]));
+  }
+}
+
 /// The default is in the rows before the field's index is built, so an index lookup finds old rows.
 #[test]
 fn migrate_add_indexed_field_with_default_indexes_existing_rows() {

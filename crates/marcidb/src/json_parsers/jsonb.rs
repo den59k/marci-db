@@ -51,8 +51,7 @@ const TAG_OBJECT: u8 = 8;
 // ───────────────────────────────── encode ─────────────────────────────────
 
 /// Encodes a JSON value into a fresh JSONB blob. The write path uses [`encode_into`] to append directly to
-/// the row body; this convenience wrapper is used by tests and the upcoming filter/transport phases.
-#[allow(dead_code)]
+/// the row body; this wrapper makes the bytes of a `Json @default(...)` (`default_bytes`) and serves the tests.
 pub fn encode(value: &Value) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32);
     encode_into(&mut buf, value);

@@ -169,6 +169,25 @@ pub fn parse_inject_attrs(s: &str) -> Vec<(String,String)> {
     return items;
 }
 
+/// Splits `s` at every char `is_sep` accepts that lies outside a double-quoted string (`\` escapes the next
+/// char inside one). A string or JSON default may hold `@`, `)` or spaces: `@default({"to": "a@b.c"}) @index`.
+pub(crate) fn split_outside_quotes(s: &str, is_sep: impl Fn(char) -> bool) -> Vec<&str> {
+    let mut parts = vec![];
+    let (mut start, mut in_string, mut escaped) = (0, false, false);
+    for (i, c) in s.char_indices() {
+        if in_string {
+            if escaped { escaped = false } else if c == '\\' { escaped = true } else if c == '"' { in_string = false }
+        } else if c == '"' {
+            in_string = true;
+        } else if is_sep(c) {
+            parts.push(&s[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
 pub fn split_once_end(s: &str, c: char) -> Option<(&str, &str)> {
     s.rfind(c).map(|idx| {
         let (left, right_with_char) = s.split_at(idx);

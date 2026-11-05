@@ -8,6 +8,7 @@ use std::ptr;
 use marcidb_ffi::{
     DbHandle, marci_backup_poll, marci_backup_start, marci_close, marci_exec, marci_free_string, marci_last_error,
     marci_listen, marci_listen_stop, marci_migrate_apply, marci_open, marci_restore, marci_snapshot, marci_sync,
+    marci_unwatch, marci_watch, marci_watch_poll,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -569,5 +570,47 @@ fn a_maintenance_port_checks_its_options_and_the_token() {
     assert_eq!(http(port, "POST", "/app/User/count", b"{}", None).unwrap().0, 401);
     assert_eq!(http(port, "POST", "/app/User/count", b"{}", Some("wrong")).unwrap().0, 401);
     assert_eq!(http(port, "POST", "/app/User/count", b"{}", Some("s3cret")).unwrap(), (200, b"0".to_vec()));
+    marci_close(handle);
+}
+
+/// The ids `marci_watch_poll` drains.
+fn poll(handle: *mut DbHandle) -> Value {
+    take(marci_watch_poll(handle))
+}
+
+fn watch(handle: *mut DbHandle, id: u64, op: &Value) -> *mut c_char {
+    let op_c = CString::new(op.to_string()).unwrap();
+    marci_watch(handle, id, op_c.as_ptr())
+}
+
+#[test]
+fn a_watch_is_polled_for_the_commits_that_touch_it() {
+    let dir = tempdir().unwrap();
+    let handle = open_synced(dir.path().to_str().unwrap());
+
+    let adults = json!({ "model": "User", "action": "count", "query": { "$where": { "age": { "$gte": 18 } } } });
+    assert!(watch(handle, 7, &adults).is_null(), "a read is watched: NULL");
+    assert!(watch(handle, 9, &json!({ "model": "User", "action": "findMany", "query": {} })).is_null());
+    assert_eq!(poll(handle), json!([]));
+
+    data(exec(handle, &json!({ "model": "User", "action": "insert", "data": { "name": "kid", "age": 5 } })));
+    data(exec(handle, &json!({ "model": "User", "action": "insert", "data": { "name": "ann", "age": 30 } })));
+    assert_eq!(poll(handle), json!([9, 7]), "each id once, since the last poll");
+    assert_eq!(poll(handle), json!([]));
+
+    marci_unwatch(handle, 9);
+    marci_unwatch(handle, 12345); // unknown: a no-op
+    data(exec(handle, &json!({ "model": "User", "action": "insert", "data": { "name": "bob", "age": 40 } })));
+    assert_eq!(poll(handle), json!([7]));
+
+    // A write is refused with an error envelope.
+    let refused = take(watch(handle, 1, &json!({ "model": "User", "action": "insert", "query": {} })));
+    assert_eq!(refused["ok"], json!(false));
+    assert_eq!(refused["kind"], json!("bad_request"));
+    let unknown = take(watch(handle, 1, &json!({ "model": "Nope", "action": "findMany", "query": {} })));
+    assert_eq!(unknown["kind"], json!("not_found"));
+
+    // A NULL handle: nothing to poll.
+    assert_eq!(poll(ptr::null_mut()), json!([]));
     marci_close(handle);
 }
