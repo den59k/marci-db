@@ -95,7 +95,9 @@ pub fn encode_list(dst: &mut Vec<u8>, value: &Value, field: &Field, primitive_ty
 
 fn encode_list_str(dst: &mut Vec<u8>, str: &str, field: &Field, primitive_type: &PrimitiveFieldType, fixed_size: Option<usize>) -> Result<(), EncodeError> {
     if matches!(primitive_type, PrimitiveFieldType::Byte) {
-        let mut hex = parse_hex(str);
+        let Some(mut hex) = parse_hex(str) else {
+            return Err(EncodeError::type_mismatch(field, "bytes as hex text (dashes allowed) or an array"))
+        };
         // if let Some(fixed_size) = fixed_size && hex.len() < fixed_size {
         //     hex.resize(fixed_size, 0u8);
         // }
@@ -223,17 +225,18 @@ pub fn parse_id<'a>(schema: &'a Schema, entity: &'a Entity, json_val: &Value) ->
    Ok(id)
 }
 
-fn parse_hex(input: &str) -> Vec<u8> {
-    let hex_chars: Vec<u8> = input
-        .chars()
-        .filter_map(|c| c.to_digit(16).map(|d| d as u8))
-        .collect();
-
-    hex_chars
-        .chunks(2)
-        .filter(|chunk| chunk.len() == 2)
-        .map(|chunk| (chunk[0] << 4) | chunk[1])
-        .collect()
+/// Hex text -> bytes; `-` separators are skipped (a UUID). Any other character, or an odd number of digits,
+/// is refused: dropping them would let two different texts name the same bytes (a key, a unique value).
+fn parse_hex(input: &str) -> Option<Vec<u8>> {
+    let mut digits = Vec::with_capacity(input.len());
+    for c in input.chars() {
+        if c == '-' { continue; }
+        digits.push(c.to_digit(16)? as u8);
+    }
+    if digits.len() % 2 != 0 {
+        return None;
+    }
+    Some(digits.chunks(2).map(|pair| (pair[0] << 4) | pair[1]).collect())
 }
 
 pub fn parse_field_value_num<'a>(field: &'a Field, v: &Value) -> Result<NumberValue,EncodeError> {

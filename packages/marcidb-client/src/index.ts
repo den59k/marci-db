@@ -552,5 +552,6 @@ export function encodeId(id: any): string {
     walk(id, "");
     return parts.join("&");
   }
-  return String(id);
+  // The bare value of a single key, encoded too: a string key may hold `/`, `?`, `=`, a space
+  return encodeURIComponent(String(id));
 }

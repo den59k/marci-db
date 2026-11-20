@@ -280,7 +280,7 @@ pub async fn handle_update(req: Request<hyper::body::Incoming>, item_id: String,
     blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let id = parse_id_from_url(&db.schema, entity, &item_id)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to parse :item_id: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(format!("Failed to parse :item_id: {}", e)))?;
         let update_op = parse_update(&db.schema, entity, &json_val)
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         db.update_item(entity, &id, &update_op)?;
@@ -349,7 +349,7 @@ pub async fn handle_delete(item_id: String, ctx: Arc<ServerContext>, db_name: St
     blocking(move || with_db(&ctx, &db_name, |db| {
         let entity = model(db, &model_name)?;
         let id = parse_id_from_url(&db.schema, entity, &item_id)
-            .map_err(|e| ApiError::BadRequest(format!("Failed to parse :item_id: {:?}", e)))?;
+            .map_err(|e| ApiError::BadRequest(format!("Failed to parse :item_id: {}", e)))?;
         db.delete_item(entity, &id)?;
         Ok(())
     })).await?;

@@ -564,3 +564,59 @@ async fn a_stopping_server_closes_its_watch_sockets() {
     assert!(started.elapsed() < SHUTDOWN_GRACE, "took {:?}", started.elapsed());
     assert_eq!(next(&mut ws, SOON).await, Some(json!({ "closed": 1001 })));
 }
+
+/// `update/{id}` and `delete/{id}` name the row in the path: a UUID key (`Byte[16] @format(uuid)`) and a string
+/// key with characters a client percent-encodes reach the row the JSON form of the same id names.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_is_named_in_the_path_by_a_uuid_or_an_encoded_string() {
+    let server = start(None).await;
+    let schema = "model Chat {\n  id Byte[16] @id @format(uuid)\n  title String\n}\nmodel Tag {\n  name String @id\n  note String\n}";
+    assert_eq!(post(&server, "/app/$sync", schema).await.status, StatusCode::OK);
+
+    let uuid = "36116d39-8376-4430-bb2e-d725923ab645";
+    let other = "00000000-0000-4000-8000-000000000001";
+    for id in [uuid, other] {
+        let reply = post(&server, "/app/Chat/insert", json!({ "id": id, "title": "new" }).to_string()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    let titles = |server: &TestServer| {
+        let addr = server.addr;
+        async move {
+            let reply = try_request(addr, Method::POST, "/app/Chat/findMany", json!({ "id": true, "title": true }).to_string(), None).await.unwrap();
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            reply.json()
+        }
+    };
+
+    let reply = post(&server, &format!("/app/Chat/update/{}", uuid), json!({ "title": "renamed" }).to_string()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let rows = titles(&server).await;
+    let title_of = |rows: &Value, id: &str| rows.as_array().unwrap().iter().find(|r| r["id"] == id).map(|r| r["title"].clone());
+    assert_eq!(title_of(&rows, uuid), Some(json!("renamed")));
+    assert_eq!(title_of(&rows, other), Some(json!("new")));
+
+    // not a uuid: refused with words, not a Debug dump
+    let reply = post(&server, "/app/Chat/update/not-a-uuid", json!({ "title": "x" }).to_string()).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8_lossy(&reply.body).into_owned();
+    assert!(text.contains("Chat.id: expected 16 bytes as hex"), "{}", text);
+
+    let reply = post(&server, &format!("/app/Chat/delete/{}", uuid), "").await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let rows = titles(&server).await;
+    assert_eq!(title_of(&rows, uuid), None);
+    assert_eq!(title_of(&rows, other), Some(json!("new")));
+
+    // a string key as encodeURIComponent writes it
+    for name in ["a b/c=d", "plain"] {
+        let reply = post(&server, "/app/Tag/insert", json!({ "name": name, "note": "new" }).to_string()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    let reply = post(&server, "/app/Tag/update/a%20b%2Fc%3Dd", json!({ "note": "renamed" }).to_string()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let reply = post(&server, "/app/Tag/findMany", json!({ "name": true, "note": true }).to_string()).await;
+    let rows = reply.json();
+    let note_of = |name: &str| rows.as_array().unwrap().iter().find(|r| r["name"] == name).map(|r| r["note"].clone());
+    assert_eq!(note_of("a b/c=d"), Some(json!("renamed")));
+    assert_eq!(note_of("plain"), Some(json!("new")));
+}
