@@ -728,7 +728,7 @@ checksum = "90071f8077f8e40adfc4b7fe9cd495ce316263f19e75c2211eeff3fdf475a3d9"
 
 [[package]]
 name = "marci_fulltext_index"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "marcidb",
  "rust-stemmers",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "marci_vector"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "bytemuck",
  "kentro",
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "marci_vector_index"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "marci_vector",
  "marcidb",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "marcidb"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "bitvec",
  "canopydb",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "marcidb-ffi"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "marci_fulltext_index",
  "marci_vector_index",
@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "marcidb-http"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "chrono",
  "ctutils",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "marcidb-migrate"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "marcidb",
  "marcidb-schema",
@@ -819,14 +819,14 @@ dependencies = [
 
 [[package]]
 name = "marcidb-schema"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "marcidb-server"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "marcidb-http",
  "tokio",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "marcidb-ts"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "marcidb",
 ]
