@@ -9,7 +9,7 @@ use marcidb::{BackupReader, MarciDB, OpenOptions, RestoreOptions};
 use serde_json::{Value, json};
 use tokio::{net::{TcpListener, TcpStream}, sync::oneshot};
 
-use crate::{SHUTDOWN_GRACE, ServerContext, Slot, errors::ApiError, serve, serve_with_grace};
+use crate::{SHUTDOWN_GRACE, ServerContext, Slot, errors::ApiError, is_data_route, scoped_token, serve, serve_with_grace};
 
 struct TestServer {
     addr: SocketAddr,
@@ -181,6 +181,298 @@ async fn backup_routes_require_the_token() {
     assert_eq!(backup.status, StatusCode::OK);
     let restored = request(&server, Method::POST, "/app/$restore", backup.body, Some("s3cret")).await;
     assert_eq!(restored.status, StatusCode::OK);
+}
+
+// ───────────────────────────────── scoped tokens (`scoped_token`) ─────────────────────────────────
+
+const MASTER: &str = "s3cret";
+const UNAUTHORIZED: &str = "missing or invalid bearer token";
+
+/// A server with the token [`MASTER`], `app` seeded (3 users) and `other` beside it (1 user, "zed").
+async fn two_databases() -> TestServer {
+    let server = seeded(Some(MASTER)).await;
+    assert_eq!(request(&server, Method::POST, "/other/$sync", USER, Some(MASTER)).await.status, StatusCode::OK);
+    let reply = request(&server, Method::POST, "/other/User/insert", json!({ "name": "zed" }).to_string(), Some(MASTER)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    server
+}
+
+async fn count_as(server: &TestServer, db: &str, token: &str) -> Reply {
+    request(server, Method::POST, &format!("/{}/User/count", db), "{}", Some(token)).await
+}
+
+fn assert_unauthorized(reply: &Reply, what: &str) {
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}: {:?}", what, reply.body);
+    assert_eq!(reply.json(), json!({ "error": UNAUTHORIZED, "kind": "unauthorized" }), "{}", what);
+}
+
+fn upgrade_status(result: Result<Socket, tokio_tungstenite::tungstenite::Error>) -> u16 {
+    match result {
+        Err(tokio_tungstenite::tungstenite::Error::Http(res)) => res.status().as_u16(),
+        Err(e) => panic!("{}", e),
+        Ok(_) => 101,
+    }
+}
+
+#[test]
+fn a_scoped_token_is_the_hmac_sha256_of_the_database_name() {
+    use hmac::{KeyInit, Mac};
+    // Fixed vectors: one computed with Node / Python / OpenSSL, and RFC 4231 test case 2.
+    assert_eq!(scoped_token("marci-secret", "app"), "4f47e2c79744228438b2b934651796800d67ae08ff501488d9652859e833e144");
+    assert_eq!(scoped_token("Jefe", "what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+
+    // The tag the hex spells, checked by the crate's own verify. A key longer than SHA-256's block is hashed first.
+    let long = "k".repeat(200);
+    for (master, db) in [("marci-secret", "app"), (MASTER, "other"), ("", "app"), (long.as_str(), "a_b-C9")] {
+        let token = scoped_token(master, db);
+        assert_eq!(token.len(), 64, "{}", token);
+        assert!(token.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "lowercase hex: {}", token);
+        let tag: Vec<u8> = (0..32).map(|i| u8::from_str_radix(&token[i * 2..i * 2 + 2], 16).unwrap()).collect();
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(master.as_bytes()).unwrap();
+        mac.update(db.as_bytes());
+        assert!(mac.verify_slice(&tag).is_ok(), "{} / {}", master, db);
+    }
+    assert_ne!(scoped_token(MASTER, "app"), scoped_token(MASTER, "other"));
+    assert_ne!(scoped_token(MASTER, "app"), scoped_token("s3cret2", "app"));
+}
+
+/// What a scoped token opens, route by route (`path` as `authorize` sees it: trimmed, the query gone).
+#[test]
+fn the_data_routes_are_listed_and_everything_else_is_admin() {
+    let data = [
+        (Method::GET, "app/$watch"),
+        (Method::GET, "app/$snapshot"),
+        (Method::POST, "app/$transaction"),
+        (Method::POST, "app/$reindex"),
+        (Method::POST, "app/User/insert"),
+        (Method::POST, "app/User/findMany"),
+        (Method::POST, "app/User/update/7"),
+        (Method::POST, "app/User/delete/a%2Fb"),
+        (Method::POST, "app/User/$reindex"),
+        (Method::POST, "app/User/$journal/j"),
+        (Method::GET, "app/User/$journal/j"),
+        (Method::DELETE, "app/User/$journal/j"),
+        (Method::POST, "app/User/bogus"), // the router's 404
+    ];
+    for (method, path) in data {
+        assert!(is_data_route(&method, path), "data: {} /{}", method, path);
+    }
+    let admin = [
+        (Method::DELETE, "app"),
+        (Method::GET, "app"),
+        (Method::POST, "app/$sync"),
+        (Method::POST, "app/$migrate"),
+        (Method::GET, "app/$backup"),
+        (Method::POST, "app/$restore"),
+        // Unknown `$` routes are closed by default — at the database level and at the model level.
+        (Method::POST, "app/$compact"),
+        (Method::GET, "app/$transaction"),
+        (Method::POST, "app/$watch"),
+        (Method::POST, "app/$snapshot"),
+        (Method::POST, "app/$restore/insert"),
+        (Method::POST, "app/User/$drop"),
+        // Malformed: the router's 400.
+        (Method::POST, "app/User"),
+        (Method::POST, "app//User/count"),
+        (Method::POST, "app/User/"),
+    ];
+    for (method, path) in admin {
+        assert!(!is_data_route(&method, path), "admin: {} /{}", method, path);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scoped_token_opens_the_data_routes_of_its_database() {
+    let server = two_databases().await;
+    let token = scoped_token(MASTER, "app");
+    let token = Some(token.as_str());
+
+    let inserted = request(&server, Method::POST, "/app/User/insert", json!({ "name": "dee" }).to_string(), token).await;
+    assert_eq!((inserted.status, inserted.json()), (StatusCode::OK, json!({ "id": 4 })));
+    let count = request(&server, Method::POST, "/app/User/count", "{}", token).await;
+    assert_eq!((count.status, count.json()), (StatusCode::OK, json!(4)));
+    let rows = request(&server, Method::POST, "/app/User/findMany", json!({ "name": true }).to_string(), token).await;
+    assert_eq!(rows.status, StatusCode::OK, "{:?}", rows.body);
+    assert_eq!(rows.json().as_array().unwrap().len(), 4);
+    let updated = request(&server, Method::POST, "/app/User/update/4", json!({ "name": "eve" }).to_string(), token).await;
+    assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
+
+    let ops = json!([{ "model": "User", "action": "insert", "data": { "name": "fay" } }, { "model": "User", "action": "count", "query": {} }]);
+    let batch = request(&server, Method::POST, "/app/$transaction", ops.to_string(), token).await;
+    assert_eq!(batch.status, StatusCode::OK, "{:?}", batch.body);
+
+    let snapshot = request(&server, Method::GET, "/app/$snapshot", Bytes::new(), token).await;
+    assert_eq!(snapshot.status, StatusCode::OK, "{:?}", snapshot.body);
+    assert!(String::from_utf8_lossy(&snapshot.body).contains("User"));
+    for path in ["/app/$reindex", "/app/User/$reindex"] {
+        let reply = request(&server, Method::POST, path, Bytes::new(), token).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}: {:?}", path, reply.body);
+    }
+
+    let opened = request(&server, Method::POST, "/app/User/$journal/j", json!({ "on": "delete" }).to_string(), token).await;
+    assert_eq!((opened.status, opened.json()), (StatusCode::OK, json!({ "created": true })));
+    let read = request(&server, Method::GET, "/app/User/$journal/j", Bytes::new(), token).await;
+    assert_eq!((read.status, read.json()), (StatusCode::OK, json!([])));
+    let dropped = request(&server, Method::DELETE, "/app/User/$journal/j", Bytes::new(), token).await;
+    assert_eq!((dropped.status, dropped.json()), (StatusCode::OK, json!({ "dropped": true })));
+
+    // An unknown action is the router's answer, not a refusal.
+    assert_eq!(request(&server, Method::POST, "/app/User/bogus", "{}", token).await.status, StatusCode::NOT_FOUND);
+
+    // The watch socket, and it works.
+    let mut ws = socket(server.addr, "app", token).await.unwrap();
+    send(&mut ws, watch_frame(1, "count", json!({}))).await;
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "ok": 1 })));
+    let reply = request(&server, Method::POST, "/app/User/insert", json!({ "name": "gus" }).to_string(), token).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(next(&mut ws, SOON).await, Some(json!({ "changed": [1] })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scoped_token_is_refused_on_the_admin_routes_of_its_database() {
+    let server = two_databases().await;
+    let backup = request(&server, Method::GET, "/app/$backup", Bytes::new(), Some(MASTER)).await;
+    assert_eq!(backup.status, StatusCode::OK);
+    // A 4th row: an in-place restore of the backup would take it away.
+    let reply = request(&server, Method::POST, "/app/User/insert", json!({ "name": "dee" }).to_string(), Some(MASTER)).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let token = scoped_token(MASTER, "app");
+
+    let with_age = "model User {\n  name String\n  age  UInt?\n}";
+    let refused: [(Method, &str, Bytes); 13] = [
+        (Method::DELETE, "/app", Bytes::new()),
+        (Method::DELETE, "/app/", Bytes::new()),
+        (Method::POST, "/app/$sync", Bytes::from(with_age)),
+        (Method::POST, "/app/$sync?plan=1", Bytes::from(with_age)),
+        (Method::POST, "/app/$migrate", Bytes::from("create entity Thing")),
+        (Method::GET, "/app/$backup", Bytes::new()),
+        (Method::POST, "/app/$restore", backup.body.clone()),
+        (Method::POST, "/app/$restore?into=other", backup.body.clone()),
+        (Method::POST, "/app/$restore?into=fresh", backup.body.clone()),
+        // Closed by default: `$` routes the server does not list as data.
+        (Method::POST, "/app/$compact", Bytes::new()),
+        (Method::GET, "/app/$transaction", Bytes::new()),
+        (Method::POST, "/app/$restore/insert", backup.body.clone()),
+        (Method::POST, "/app/User/$drop", Bytes::new()),
+    ];
+    for (method, path, body) in refused {
+        let reply = request(&server, method.clone(), path, body, Some(&token)).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{} {}: {:?}", method, path, reply.body);
+        let error = reply.json();
+        assert_eq!(error["kind"], json!("forbidden"), "{} {}", method, path);
+        assert!(error["error"].as_str().unwrap().contains("scoped to the data routes of database 'app'"), "{} {}: {}", method, path, error);
+    }
+
+    // Nothing of it happened.
+    assert_eq!(count_as(&server, "app", &token).await.json(), json!(4), "not dropped, not restored");
+    let snapshot = request(&server, Method::GET, "/app/$snapshot", Bytes::new(), Some(&token)).await;
+    let snapshot = String::from_utf8_lossy(&snapshot.body).into_owned();
+    assert!(!snapshot.contains("age") && !snapshot.contains("Thing"), "not synced, not migrated: {}", snapshot);
+    assert_eq!(count_as(&server, "other", MASTER).await.json(), json!(1), "`?into=other` did not overwrite it");
+    assert_eq!(count_as(&server, "fresh", MASTER).await.status, StatusCode::NOT_FOUND, "`?into=fresh` did not create it");
+    assert!(!server.dir.path().join("fresh").exists());
+    assert!(leftovers(&server).is_empty(), "left {:?}", leftovers(&server));
+
+    // The server's token still does every one of them.
+    let copy = request(&server, Method::POST, "/app/$restore?into=fresh", backup.body.clone(), Some(MASTER)).await;
+    assert_eq!(copy.status, StatusCode::OK, "{:?}", copy.body);
+    assert_eq!(request(&server, Method::POST, "/app/$sync", with_age, Some(MASTER)).await.status, StatusCode::OK);
+    let migrated = request(&server, Method::POST, "/app/$migrate", "create entity Thing", Some(MASTER)).await;
+    assert_eq!(migrated.status, StatusCode::OK, "{:?}", migrated.body);
+    assert_eq!(request(&server, Method::DELETE, "/fresh", Bytes::new(), Some(MASTER)).await.status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scoped_token_is_no_credential_on_another_database() {
+    let server = two_databases().await;
+    let token = scoped_token(MASTER, "app");
+
+    for (method, path, body) in [
+        (Method::POST, "/other/User/count", "{}"),
+        (Method::POST, "/other/User/insert", r#"{ "name": "mal" }"#),
+        (Method::POST, "/other/$transaction", "[]"),
+        (Method::GET, "/other/$snapshot", ""),
+        (Method::GET, "/other/User/$journal/j", ""),
+        (Method::GET, "/other/$watch", ""),
+        (Method::GET, "/other/$backup", ""),
+        (Method::POST, "/other/$restore", ""),
+        (Method::POST, "/other/$sync", USER),
+        (Method::DELETE, "/other", ""),
+        (Method::POST, "/nothing/User/count", "{}"), // 401 before 404
+        (Method::POST, "/nothing/$sync", USER),
+        (Method::POST, "/$health/x", ""),
+    ] {
+        let reply = request(&server, method.clone(), path, body, Some(&token)).await;
+        assert_unauthorized(&reply, &format!("{} {}", method, path));
+    }
+    assert_eq!(upgrade_status(socket(server.addr, "other", Some(&token)).await), 401);
+    assert_eq!(count_as(&server, "other", MASTER).await.json(), json!(1));
+    assert!(!server.dir.path().join("nothing").exists());
+
+    // The token is the exact lowercase hex: another spelling, or one of another server, is no token.
+    assert_unauthorized(&count_as(&server, "app", &token.to_uppercase()).await, "uppercase");
+    assert_unauthorized(&count_as(&server, "app", &scoped_token("s3cret2", "app")).await, "another master");
+    assert_unauthorized(&count_as(&server, "app", &token[..63]).await, "truncated");
+    // `other`'s own token opens `other`.
+    assert_eq!(count_as(&server, "other", &scoped_token(MASTER, "other")).await.json(), json!(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_token_opens_everything_and_nothing_else_does() {
+    let server = two_databases().await;
+    for token in [None, Some("wrong"), Some("s3cre"), Some("s3cret2"), Some("S3CRET"), Some("")] {
+        for (method, path) in [(Method::POST, "/app/User/count"), (Method::GET, "/app/$backup"), (Method::DELETE, "/other")] {
+            let reply = request(&server, method.clone(), path, "{}", token).await;
+            assert_unauthorized(&reply, &format!("{:?} on {} {}", token, method, path));
+        }
+        assert_eq!(upgrade_status(socket(server.addr, "app", token).await), 401, "{:?}", token);
+    }
+
+    assert_eq!(count_as(&server, "app", MASTER).await.json(), json!(3));
+    assert_eq!(upgrade_status(socket(server.addr, "app", Some(MASTER)).await), 101);
+    assert_eq!(request(&server, Method::POST, "/other/$sync?plan=1", USER, Some(MASTER)).await.status, StatusCode::OK);
+    assert_eq!(request(&server, Method::GET, "/other/$backup", Bytes::new(), Some(MASTER)).await.status, StatusCode::OK);
+    assert_eq!(request(&server, Method::DELETE, "/other", Bytes::new(), Some(MASTER)).await.status, StatusCode::OK);
+    assert_eq!(count_as(&server, "other", MASTER).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_without_a_token_lets_every_request_in() {
+    let server = seeded(None).await;
+    let scoped = scoped_token("anything", "app");
+    for token in [None, Some("whatever"), Some(scoped.as_str())] {
+        assert_eq!(request(&server, Method::POST, "/app/User/count", "{}", token).await.status, StatusCode::OK, "{:?}", token);
+        assert_eq!(request(&server, Method::GET, "/app/$backup", Bytes::new(), token).await.status, StatusCode::OK, "{:?}", token);
+        assert_eq!(request(&server, Method::POST, "/app/$sync?plan=1", USER, token).await.status, StatusCode::OK, "{:?}", token);
+    }
+    assert_eq!(request(&server, Method::DELETE, "/app", Bytes::new(), Some(&scoped)).await.status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_says_the_server_takes_scoped_tokens() {
+    let server = start(Some(MASTER)).await;
+    let health = request(&server, Method::GET, "/$health", Bytes::new(), None).await;
+    assert_eq!(health.status, StatusCode::OK);
+    assert_eq!(health.json(), json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "scopedTokens": true }));
+}
+
+/// A maintenance port goes through the same check: its one database's scoped token opens its data routes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_maintenance_port_takes_the_scoped_token_of_its_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = app_db(&dir);
+    let addr = listen(ServerContext::single("app".to_string(), db.clone(), Some(MASTER.to_string()))).await;
+    let server = TestServer { addr, dir };
+    let token = scoped_token(MASTER, "app");
+
+    let reply = request(&server, Method::POST, "/app/User/insert", json!({ "name": "ann" }).to_string(), Some(&token)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(app_count(&db), 1);
+    for (method, path) in [(Method::POST, "/app/$sync"), (Method::GET, "/app/$backup"), (Method::POST, "/app/$restore"), (Method::DELETE, "/app")] {
+        assert_eq!(request(&server, method.clone(), path, USER, Some(&token)).await.status, StatusCode::FORBIDDEN, "{} {}", method, path);
+    }
+    assert_unauthorized(&request(&server, Method::POST, "/other/User/count", "{}", Some(&token)).await, "another name");
+    assert_eq!(request(&server, Method::GET, "/app/$backup", Bytes::new(), Some(MASTER)).await.status, StatusCode::OK);
 }
 
 /// The guarantee behind `$backup` streaming: a copy that fails after the headers went out aborts the

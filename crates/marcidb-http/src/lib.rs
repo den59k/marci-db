@@ -31,6 +31,7 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 pub struct ServerContext {
     databases: Databases,
     /// Bearer token every request must carry (`MARCI_TOKEN` / `--token`); `None` = open server (local dev).
+    /// A database's [`scoped_token`], derived from it, opens that database's data routes only.
     token: Option<String>,
     /// One stdout line per request: on in the server, off on a maintenance port (an app's stdout is not ours).
     log_requests: bool,
@@ -385,12 +386,13 @@ async fn handle_inner(
     let method = req.method().clone();
     let path = req.uri().path().trim_matches('/').to_string();
 
-    // Liveness probe (docker healthcheck / a host waiting for the container) — before auth on purpose
+    // Liveness probe (docker healthcheck / a host waiting for the container) — before auth on purpose.
+    // `scopedTokens`: this server accepts a database's scoped token (see `authorize`).
     if method == Method::GET && path == "$health" {
-        return Ok(boxed(Response::new(Full::new(Bytes::from(format!("{{\"ok\":true,\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")))))));
+        return Ok(boxed(Response::new(Full::new(Bytes::from(format!("{{\"ok\":true,\"version\":\"{}\",\"scopedTokens\":true}}", env!("CARGO_PKG_VERSION")))))));
     }
 
-    authorize(&req, &ctx)?;
+    authorize(&req, &method, &path, &ctx)?;
 
     // A watch socket takes the connection over (see watch.rs)
     if method == Method::GET && let Some((db_name, "$watch")) = path.split_once('/') {
@@ -405,18 +407,73 @@ async fn handle_inner(
     route(req, ctx, method, path).await.map(boxed)
 }
 
-/// `Authorization: Bearer <token>` when the server was started with one.
-fn authorize(req: &Request<hyper::body::Incoming>, ctx: &ServerContext) -> Result<(), ApiError> {
-    if let Some(expected) = &ctx.token {
-        let given = req.headers().get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim);
-        if given != Some(expected.as_str()) {
-            return Err(ApiError::Unauthorized("missing or invalid bearer token".to_string()));
-        }
+/// `Authorization: Bearer <token>` when the server was started with one. The server's token opens every
+/// route. The [`scoped_token`] of the database the path names (its first segment) opens that database's
+/// data routes ([`is_data_route`]) and is refused on its admin routes (403); on any other database it is
+/// no credential at all (401). `path` is the one [`route`] splits: trimmed of its slashes, not decoded.
+fn authorize(req: &Request<hyper::body::Incoming>, method: &Method, path: &str, ctx: &ServerContext) -> Result<(), ApiError> {
+    let Some(master) = &ctx.token else { return Ok(()) };
+    let unauthorized = || ApiError::Unauthorized("missing or invalid bearer token".to_string());
+    let given = req.headers().get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .ok_or_else(unauthorized)?;
+    if same_token(given, master) {
+        return Ok(());
     }
-    Ok(())
+    let db = path.split('/').next().unwrap_or_default();
+    if is_valid_db_name(db) && same_token(given, &scoped_token(master, db)) {
+        if is_data_route(method, path) {
+            return Ok(());
+        }
+        return Err(ApiError::Forbidden(format!(
+            "this token is scoped to the data routes of database '{}' — {} /{} needs the server's token",
+            db, method, path
+        )));
+    }
+    Err(unauthorized())
+}
+
+/// The token that opens the data routes of database `db` on a server whose token is `master`: lowercase hex
+/// of HMAC-SHA256 keyed with `master`'s UTF-8 bytes over `db`'s UTF-8 bytes (64 characters). Anything that
+/// holds the server's token derives it — in Node, `createHmac('sha256', master).update(db).digest('hex')`.
+pub fn scoped_token(master: &str, db: &str) -> String {
+    use hmac::{KeyInit, Mac};
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(master.as_bytes()).expect("HMAC takes a key of any length");
+    mac.update(db.as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Token equality that takes the same time wherever the two differ (only a different length answers early).
+fn same_token(given: &str, expected: &str) -> bool {
+    use ctutils::CtEq;
+    given.as_bytes().ct_eq(expected.as_bytes()).to_bool()
+}
+
+/// Whether a database's scoped token opens `method /path` (`path` as [`authorize`] gets it, its first
+/// segment the database). Mirrors how `handle_inner` and [`route`] match, by allowing what is known:
+///
+/// - data: `GET /:db/$watch`, `GET /:db/$snapshot`, `POST /:db/$transaction`, `POST /:db/$reindex`, and
+///   the model routes `/:db/:model/:action[/…]` — any action not starting with `$` (an unknown one is the
+///   router's 404), plus `$reindex` and `$journal`;
+/// - admin (everything else): `DELETE /:db`, `$sync` (also `?plan=1`), `$migrate`, `$backup`, `$restore`
+///   (also `?into=`, which names another database) — and any `$` segment not listed above, in the place of
+///   a model or of an action, so a route added later stays closed to a scoped token until it is listed here.
+fn is_data_route(method: &Method, path: &str) -> bool {
+    // `/:db` alone: `DELETE /:db` drops the database.
+    let Some((_, rest)) = path.split_once('/') else { return false };
+    match rest {
+        "$watch" | "$snapshot" => return *method == Method::GET,
+        "$transaction" | "$reindex" => return *method == Method::POST,
+        _ => {}
+    }
+    let mut parts = rest.splitn(3, '/');
+    let (Some(model), Some(action)) = (parts.next(), parts.next()) else { return false };
+    if model.is_empty() || model.starts_with('$') || action.is_empty() {
+        return false;
+    }
+    !action.starts_with('$') || matches!(action, "$reindex" | "$journal")
 }
 
 // "/{db}/$migrate" | "/{db}/$sync" | "/{db}/$transaction" | "/{db}/$restore" | "/{db}/{model}/{action}[/{id}]"

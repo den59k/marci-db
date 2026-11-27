@@ -18,6 +18,11 @@ chrono = "0.4.42"
 # `GET /:db/$watch` is a WebSocket (watch.rs): the frame codec over hyper's upgraded connection.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# A database's scoped token is HMAC-SHA256(server token, database name) (lib.rs, `scoped_token`). Tokens are
+# compared in constant time with ctutils: hmac depends on it already (digest's `mac`), so it adds no crate.
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+ctutils = "0.4"
 # Vector index module — opt-in (pulls in `marci_vector`, which needs nightly portable_simd).
 marci_vector_index = { path = "../marci-vector-index", optional = true }
 # Full-text search module — opt-in (stable toolchain).

@@ -3,8 +3,9 @@ export * from "./query";
 import type { FieldDesc, MarciOp, WatchListener, WatchRegistration } from "./query";
 
 /** The class of a refused request — the server's `kind`: a constraint (`unique`, `foreign_key`, `restrict`,
- *  `duplicate_id`), `not_found`, `bad_request`, `unauthorized`, or `internal` for a fault of the server. */
-export type MarciErrorKind = "unique" | "foreign_key" | "restrict" | "duplicate_id" | "not_found" | "bad_request" | "unauthorized" | "internal";
+ *  `duplicate_id`), `not_found`, `bad_request`, `unauthorized`, `forbidden` (a database's scoped token on one
+ *  of its admin routes), or `internal` for a fault of the server. */
+export type MarciErrorKind = "unique" | "foreign_key" | "restrict" | "duplicate_id" | "not_found" | "bad_request" | "unauthorized" | "forbidden" | "internal";
 
 /** A failed request: `kind` is what to switch on, `field` the `Model.field` a constraint is about, the message is for a person. */
 export class MarciError extends Error {
@@ -21,7 +22,7 @@ export class MarciError extends Error {
 }
 
 const kindOfStatus = (status: number): MarciErrorKind =>
-  status === 404 ? "not_found" : status === 401 ? "unauthorized" : status >= 500 ? "internal" : "bad_request";
+  status === 404 ? "not_found" : status === 401 ? "unauthorized" : status === 403 ? "forbidden" : status >= 500 ? "internal" : "bad_request";
 
 /** The error of a failed response: the server's JSON body (`error`, `kind`, `field`), or its text (an older server). */
 async function failure(res: Response): Promise<MarciError> {
@@ -77,7 +78,7 @@ export async function request(method: string, url: string, body?: any, options?:
 const WATCH_LINGER_MS = 3000;
 const WATCH_RETRY_MIN_MS = 250;
 const WATCH_RETRY_MAX_MS = 5000;
-const STATUS_OF_KIND: Record<string, number> = { not_found: 404, unauthorized: 401, unavailable: 503, internal: 500 };
+const STATUS_OF_KIND: Record<string, number> = { not_found: 404, unauthorized: 401, forbidden: 403, unavailable: 503, internal: 500 };
 
 /** The watch half of the HTTP transport for the database at `url` (what `marcidb(url)` plugs in). */
 export function createWatchSocket(url: string, options?: HttpOptions): { watch(op: MarciOp, listener: WatchListener): WatchRegistration } {

@@ -18,15 +18,52 @@ docker run -d -p 3000:3000 -v marcidb-data:/app/data ghcr.io/den59k/marcidb-serv
 | `--host <HOST>` | `MARCI_HOST` | `0.0.0.0` | bind address (`localhost` is accepted) |
 | `--port <PORT>` | `PORT` | `3000` | listen port |
 | `--data <DIR>` | `MARCI_DATA` | `./data` | data directory (`/app/data` in the image) |
-| `--token <TOKEN>` | `MARCI_TOKEN` | *(unset)* | when set, every request must carry `Authorization: Bearer <TOKEN>` (else `401`); `GET /$health` stays open |
+| `--token <TOKEN>` | `MARCI_TOKEN` | *(unset)* | when set, every request must carry `Authorization: Bearer <TOKEN>` — or a database's [scoped token](#scoped-tokens) — (else `401`); `GET /$health` stays open. An empty value is the same as unset |
 
 `--help` / `--version` print and exit. Each database is stored under `<data>/<db>`.
 
 With `--token`, clients send the token: the typed client as `marcidb(url, { token })`, the `marcidb` CLI as
 `--token` (or `MARCI_TOKEN`), anything else as the `Authorization: Bearer <TOKEN>` header.
 
-`GET /$health` → `{"ok":true,"version":"0.11.4"}` — liveness probe (docker healthcheck), never authenticated; `version` since 0.11.4 (hosts use it to know `$sync?plan=1` exists).
+`GET /$health` → `{"ok":true,"version":"<server version>","scopedTokens":true}` — liveness probe (docker healthcheck), never authenticated; `version` since 0.11.4 (hosts use it to know `$sync?plan=1` exists); `scopedTokens` on a server that accepts [scoped tokens](#scoped-tokens) (absent on older ones).
 `DELETE /:db` → drops a database: closes the handle and removes its directory (`404` if absent). Meant for hosts that own many databases (per-tenant / per-environment DBs); there is no undo.
+
+### Scoped tokens
+
+A server with a token also accepts, for each database, a token that opens **only that database's data
+routes** — for a host that runs many projects, one database each, and gives each project's code access to
+its own database and nothing else. It is derived from the server's token, so the server stores nothing and
+there is nothing to configure:
+
+```
+scoped token of <db> = lowercase hex of HMAC-SHA256(key = the server's token, message = <db>)
+                       (both as UTF-8 bytes; 64 characters)
+```
+
+```js
+import { createHmac } from "node:crypto"
+const token = createHmac("sha256", process.env.MARCI_TOKEN).update("myapp").digest("hex")
+const db = marcidb("http://localhost:3000/myapp", { token })
+```
+
+```bash
+printf %s myapp | openssl dgst -sha256 -hmac "$MARCI_TOKEN"   # the same, from a shell
+```
+
+| With the scoped token of `myapp` | Answer |
+|---|---|
+| the data routes of `myapp`: every `/myapp/:model/…` route (journals and `$reindex` included), `POST /myapp/$transaction`, `GET /myapp/$snapshot`, `POST /myapp/$reindex`, `GET /myapp/$watch` | as with the server's token |
+| the admin routes of `myapp`: `DELETE /myapp`, `POST /myapp/$sync` (also `?plan=1`), `POST /myapp/$migrate`, `GET /myapp/$backup`, `POST /myapp/$restore` (also `?into=<name>`) | `403`, `kind: "forbidden"` |
+| any path of another database | `401` — it is not a credential there |
+
+- A `$` route not in the first row is refused with a `403`: a route a later server adds stays closed to
+  scoped tokens until it is listed as a data route.
+- The token is compared as the exact lowercase hex. Changing the server's token changes every scoped token
+  (that is how they are revoked — all at once).
+- The server's own token still opens everything. A server without a token is open: any token, or none, is let in.
+- On an [embedded maintenance port](#embedded-maintenance-port) opened with a token, the scoped token of its
+  database works the same way.
+- Feature-detect with `GET /$health`: `"scopedTokens": true`. An older server answers a scoped token `401`.
 
 ## Endpoints
 
@@ -357,7 +394,8 @@ An error answers with a JSON body and the status its kind means:
 | `duplicate_id` | `409` | a row with the given id exists |
 | `not_found` | `404` | unknown database, model or action; the row to update or delete does not exist |
 | `bad_request` | `400` | invalid JSON, unknown or missing field, malformed query/insert/update, bad `:id` syntax, missing aggregate keys, unsupported or diverged migration |
-| `unauthorized` | `401` | the token is missing or wrong |
+| `unauthorized` | `401` | the token is missing or wrong (a [scoped token](#scoped-tokens) on another database too) |
+| `forbidden` | `403` | a database's [scoped token](#scoped-tokens) on one of its admin routes (`DELETE /:db`, `$sync`, `$migrate`, `$backup`, `$restore`) |
 | `unavailable` | `503` | the database is being restored, or stayed busy past the restore's wait — retry |
 | `internal` | `500` | a fault of the server |
 

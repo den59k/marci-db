@@ -9,6 +9,8 @@ use marcidb::{BackupError, BatchError, DeleteError, EncodeError, InsertError, Op
 #[derive(Debug)]
 pub enum ApiError {
     Unauthorized(String),
+    /// A valid credential that does not open this route: a database's scoped token on an admin route (403).
+    Forbidden(String),
     NotFound(String),
     BadRequest(String),
     Internal(String),
@@ -25,6 +27,7 @@ impl ApiError {
     pub fn parts(self) -> (&'static str, Option<String>, String) {
         match self {
             ApiError::Unauthorized(m) => ("unauthorized", None, m),
+            ApiError::Forbidden(m) => ("forbidden", None, m),
             ApiError::NotFound(m) => ("not_found", None, m),
             ApiError::BadRequest(m) => ("bad_request", None, m),
             ApiError::Internal(m) => ("internal", None, m),
@@ -39,6 +42,7 @@ impl ApiError {
             "unique" | "foreign_key" | "restrict" | "duplicate_id" => StatusCode::CONFLICT,
             "not_found" => StatusCode::NOT_FOUND,
             "unauthorized" => StatusCode::UNAUTHORIZED,
+            "forbidden" => StatusCode::FORBIDDEN,
             "bad_request" => StatusCode::BAD_REQUEST,
             "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
